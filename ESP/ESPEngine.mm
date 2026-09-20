@@ -18,6 +18,7 @@
 #include <atomic>
 #include <string.h>
 #include <stdio.h>
+#include <vector>
 
 extern "C" {
 #import "darksword.h"
@@ -166,6 +167,10 @@ static uint64_t g_espVerdictWorld = 0;
 // Số lượt quét còn ghi log chi tiết (field từng actor + histogram VTable).
 // Đặt lại mỗi khi đổi world => mỗi map/trận chỉ ghi vài lượt đầu.
 static int g_espVerboseLeft = 2;
+// Actor địch/hình nhân đã biết (kind 1/3) để refresh vị trí NHANH giữa 2 lượt
+// quét đầy đủ — ESP_REFRESH_HZ lần/giây, mỗi actor chỉ 1 lần đọc root + 1 lần
+// đọc camera thay vì phân loại lại từ đầu.
+static std::vector<ESPTrackedActor> g_espTracked;
 
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
     if (g_espVerdictWorld != world) {
@@ -176,6 +181,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
+        g_espTracked.clear();
     }
 }
 
@@ -654,6 +660,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espProgress.store(0);
     uint32_t enemies = 0;
     uint32_t dummies = 0;
+    g_espTracked.clear();
     uint32_t nVt = 0, nName = 0, nDummyName = 0, nChar = 0, nDummySig = 0;
     uint32_t nNo = 0, nFiltered = 0, nCached = 0;
     uint32_t nearChar = 0, nearDummy = 0, winOK = 0, winFail = 0;
@@ -699,6 +706,22 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         if (!isEnemy) continue;
         enemies++;
         if (team == ESPTeam_Dummy) dummies++;
+        // Lưu lại để refresh vị trí nhanh giữa các lượt quét (ESPTrackedActor).
+        if (g_espTracked.size() < 64) {
+            ESPTrackedActor tr;
+            tr.actor = actor;
+            tr.root = (ESPIsUserPtr(f.root)) ? f.root : 0;
+            tr.fallback = 0;
+            if (team == ESPTeam_Dummy) {
+                tr.kind = 3;
+                if (ESPIsUserPtr(f.stMove)) tr.fallback = f.stMove;
+                else if (ESPIsUserPtr(f.tMesh)) tr.fallback = f.tMesh;
+                if (!tr.root && tr.fallback) tr.root = tr.fallback;
+            } else {
+                tr.kind = 1;
+            }
+            g_espTracked.push_back(tr);
+        }
         if (!sample) {
             sample = actor;
             BOOL okRoot = NO;
@@ -1172,13 +1195,101 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
             float wEst = hEst * 0.5f;
             if (hEst < 8 || hEst > screenH) continue;
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp };
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp, 1 };
             continue;
         }
         float h = fabsf(sy - hy);
         if (h < 8 || h > screenH * 1.2f) continue;
         float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp };
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp, 1 };
+    }
+    return n;
+#endif
+}
+
+// MARK: - Refresh nhanh giữa 2 lượt quét đầy đủ
+
+// Đọc vị trí world của 1 tracked actor: root.Relative (+parent) trước, rồi
+// ComponentToWorld của fallback (hình nhân), rồi ReplicatedMovement.
+static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *out) {
+    BOOL ok0 = NO;
+    if (!tr || !out) return NO;
+    if (tr->root && ESPIsUserPtr(tr->root)) {
+        ESPVector loc = {0,0,0};
+        if (ESPMemoryRead(vmMap, tr->root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
+            fabsf(loc.x) < 300000 && fabsf(loc.y) < 300000 && fabsf(loc.z) < 300000 &&
+            (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
+            uint64_t parent = ESPReadU64(vmMap, tr->root + ESPOff_Scene_AttachedParent, &ok0);
+            if (ok0 && ESPIsUserPtr(parent)) {
+                ESPVector pl = {0,0,0};
+                if (ESPMemoryRead(vmMap, parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
+                    fabsf(pl.x) < 300000 && fabsf(pl.y) < 300000 && fabsf(pl.z) < 300000) {
+                    loc.x += pl.x; loc.y += pl.y; loc.z += pl.z;
+                }
+            }
+            *out = loc;
+            return YES;
+        }
+    }
+    if (tr->fallback && ESPIsUserPtr(tr->fallback)) {
+        ESPVector v = {0,0,0};
+        if (ESPMemoryRead(vmMap, tr->fallback + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
+            fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 &&
+            (v.x != 0 || v.y != 0 || v.z != 0)) {
+            *out = v;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes) {
+    if (!outBoxes || maxBoxes <= 0) return 0;
+#if !USE_DARKSWORD
+    (void)gameBase; (void)screenW; (void)screenH;
+    return 0;
+#else
+    if (!gameBase || !ds_is_ready()) return 0;
+    if (screenW <= 0 || screenH <= 0) return 0;
+    if (g_espTracked.empty()) return 0;
+    uint64_t vmMap = ESPProcVMMap(NULL);
+    if (!vmMap) return 0;
+    ESPCamera cam;
+    if (!ESPEngineCamera(gameBase, &cam)) return 0;
+    if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
+    float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
+    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
+    int n = 0;
+    for (size_t i = 0; i < g_espTracked.size() && n < maxBoxes; i++) {
+        const ESPTrackedActor *tr = &g_espTracked[i];
+        // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
+        uint8_t flags[2] = {0, 0};
+        // bHidden ở 0xE8, bDead ở 0xE7C — cách nhau quá xa nên không gộp được
+        // 1 lần đọc; đọc bHidden trước, chết/ẩn thì khỏi đọc bDead.
+        if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
+            if (flags[0] & 0x1) continue;
+            if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
+                if (flags[1] & 0x1) continue;
+            }
+        }
+        ESPVector pos = {0,0,0};
+        if (!ESPTrackedPos(vmMap, tr, &pos)) continue;
+        float sx = 0, sy = 0, dist = 0;
+        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) continue;
+        if (dist < 2.0f) continue;
+        ESPVector head = pos; head.z += 180.0f;
+        float hx = 0, hy = 0, hd = 0;
+        if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
+            float wEst = hEst * 0.5f;
+            if (hEst < 8 || hEst > screenH) continue;
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1 };
+            continue;
+        }
+        float h = fabsf(sy - hy);
+        if (h < 8 || h > screenH * 1.2f) continue;
+        float w = h * 0.5f;
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1 };
     }
     return n;
 #endif

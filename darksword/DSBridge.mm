@@ -110,6 +110,7 @@ static void ds_set_error(NSString *message) {
 #import <mach/mach.h>
 #import <mach-o/loader.h>
 #import "ESPEngine.h"
+#import "ESPConfig.h"
 #import "ESPOverlay.h"
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
@@ -1920,13 +1921,53 @@ static void ds_update_rate(void) {
         g_hudActive.store(false);
     }
 
-    // ESP Box thật: TẠM TẮT overlay để tránh respring SpringBoard.
-    // Text ESP (actors/players) vẫn chạy. Bao giờ overlay cứng mới bật lại
-    // bằng kDSESPOverlayEnabled.
+    // ESP Box thật trên SpringBoard (RemoteCall): chỉ chạy khi toggle ESP Box ON.
+    // Chi phí/throttle: vị trí box được refresh ESP_REFRESH_HZ lần/giây bằng
+    // ESPEngineRefreshBoxes (rẻ), lượt quét đầy đủ vẫn theo TTL riêng của engine.
+    // Frame set setHidden chỉ được gửi khi trạng thái ĐỔI (cache) — tick này
+    // nếu không đổi box thì 0 remote call, nên không quá tải SpringBoard main.
     @try {
-        if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
+            if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        } else {
+            CGRect sbBounds = CGRectNull;
+            {
+                // Bounds của scene SpringBoard (portrait) — dùng chính remote
+                // window scene đã cache để khỏi dispatch_sync thêm lần nữa.
+                CGRect b = CGRectZero;
+                ds_screen_geometry(&b, NULL);
+                sbBounds = b;
+            }
+            if (!CGRectIsNull(sbBounds) && sbBounds.size.width > 0) {
+                static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
+                static CFAbsoluteTime s_lastRefresh = 0;
+                CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
+                int count = 0;
+                double minInterval = 1.0 / (double)ESP_REFRESH_HZ;
+                if (now2 - s_lastRefresh >= minInterval) {
+                    s_lastRefresh = now2;
+                    float landW = (float)CGRectGetWidth(sbBounds);
+                    float landH = (float)CGRectGetHeight(sbBounds);
+                    BOOL landscape = UIInterfaceOrientationIsLandscape(
+                        (UIInterfaceOrientation)g_remoteOrientation.load());
+                    if (landscape) {
+                        float t = landW; landW = landH; landH = t;
+                    }
+                    count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
+                                                  s_boxes, ESPOverlayMaxBoxes);
+                    if (count == 0) {
+                        // Chưa có tracked actor (mới vào trận / lượt quét đầu):
+                        // dùng đường đầy đủ để khởi tạo danh sách theo dõi.
+                        count = ESPEngineBoxes(g_gameBase, landW, landH,
+                                               s_boxes, ESPOverlayMaxBoxes);
+                    }
+                }
+                ds_esp_overlay_update(g_springBoard, s_boxes, count, sbBounds,
+                                      g_remoteOrientation.load());
+            }
+        }
     } @catch (NSException *exception) {
-        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay hide failed: %{public}@", exception.reason);
+        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
     }
 }
 

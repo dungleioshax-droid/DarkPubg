@@ -35,7 +35,16 @@ typedef struct {
     float x, y, w, h;
     float distance;
     int health; // -1 chưa đọc
+    uint8_t visible; // 1 = đang trong tầm nhìn camera (mesh bRecentlyRendered)
 } ESPBox2D;
+
+// Actor đã phân loại để refresh vị trí nhanh giữa 2 lượt quét đầy đủ.
+typedef struct {
+    uint64_t actor;
+    uint64_t root;      // RootComponent (0 nếu không có)
+    uint64_t fallback;  // StaticMeshComp/MoveRoot (ComponentToWorld) cho hình nhân
+    int kind;           // 1 = character, 3 = hình nhân
+} ESPTrackedActor;
 
 // Kết quả scan phase 1
 typedef struct {

@@ -43,6 +43,11 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
 // Quét + project ra boxes 2D. Trả về số box (0..max). Lọc: distance<350m, trong màn hình.
 int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes);
 
+// NHANH: không phân loại lại actor — chỉ đọc lại camera + vị trí của các actor
+// đã biết (ESPTrackedActor từ lượt quét gần nhất) rồi project ra màn hình.
+// ESP_REFRESH_HZ lần/giây, chỉ tốn ~2 lần đọc kernel/actor. Trả về số box.
+int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes);
+
 NS_ASSUME_NONNULL_END
 
 #endif /* ESPEngine_h */
