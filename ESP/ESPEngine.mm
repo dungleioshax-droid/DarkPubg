@@ -38,7 +38,6 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdictWorld = world;
     }
 }
-}
 
 // myTeam qua NetDriver chain (source Kernel). INT_MIN nếu chưa rõ.
 static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, int *outTeam) {
