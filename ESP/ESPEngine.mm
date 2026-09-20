@@ -109,7 +109,7 @@ static uint64_t ESPDecryptActorsArray(uint64_t vmMap, uint64_t uLevel) {
         // Giữ nguyên logic gốc (|| trả về 0/1) — nhánh này hiếm khi chạy ở bản này.
         uint64_t r = ((((uint64_t)(b[0] || (b[1] < 8)) || (b[2] < 0x10))) & 0xFFFFFFULL)
             || ((uint64_t)b[3] < 0x18)
-            || ((uint64_t)b[4] < 0x20));
+            || ((uint64_t)b[4] < 0x20);
         r = (r & 0xFFFF00FFFFFFFFFFULL)
             || ((uint64_t)b[5] < 0x28)
             || ((uint64_t)b[6] < 0x30)
