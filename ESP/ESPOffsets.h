@@ -61,6 +61,15 @@ static const uint32_t ESPOff_ActorCluster_Actors = 0x28; // TArray<AActor*>
 static const uint32_t ESPOff_Actor_RootComponent = 0x208;
 static const uint32_t ESPOff_Actor_ReplicatedMovement = 0x110; // FRepMovement
 static const uint32_t ESPOff_RepMovement_Location = 0x18;      // +0x110 = Actor+0x128 FVector world
+static const uint32_t ESPOff_Actor_HiddenFlag = 0xE8; // bHidden bit0 (mask 0x1)
+
+// Character (ASTExtraBaseCharacter, từ Kernel/esp/unity_api/offset.h)
+static const uint32_t ESPOff_Char_Mesh = 0x510; // USkeletalMeshComponent*
+static const uint32_t ESPOff_Char_Health = 0xE60; // float
+static const uint32_t ESPOff_Char_HealthMax = 0xE64; // float
+static const uint32_t ESPOff_Char_Dead = 0xE7C; // bit0 mask 0x1
+static const uint32_t ESPOff_Char_Team = 0x998; // int
+static const int32_t ESPTeam_Dummy = 100000005; // hình nhân, luôn hiện
 
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
@@ -81,6 +90,13 @@ static const uint32_t ESPOff_POV_Location              = 0x0;
 static const uint32_t ESPOff_POV_Rotation              = 0x18;
 static const uint32_t ESPOff_POV_FOV                   = 0x24;
 static const uint32_t ESPOff_POV_Aspect                = 0x34;
+
+// Local pawn chain (từ Kernel/esp/drawing_view/esp.mm)
+// GWorld +0x38 NetDriver -> +0x78 ServerConnection -> +0x30 LocalPC -> +0x28D8 LocalPawn
+static const uint32_t ESPOff_World_NetDriver = 0x38;
+static const uint32_t ESPOff_NetDriver_ServerConn = 0x78;
+static const uint32_t ESPOff_Conn_LocalPC = 0x30;
+static const uint32_t ESPOff_PC_LocalPawn = 0x28D8; // ASTExtraPlayerController->STExtraBaseCharacter
 
 // TArray layout (UE4)
 typedef struct {

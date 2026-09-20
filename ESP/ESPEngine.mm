@@ -8,6 +8,8 @@
 #import "ESPOffsets.h"
 #import "ESPMemory.h"
 #import "ESPConfig.h"
+#include <unordered_map>
+#include <limits.h>
 
 extern "C" {
 #import "darksword.h"
@@ -18,6 +20,87 @@ extern "C" {
 // Chain nhanh GEngine->Viewport->World (không scan 200k objects).
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
+static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 2=other
+static std::unordered_map<uint64_t, int> g_espTeamCache;
+static uint64_t g_espVerdictWorld = 0;
+
+static void ESPVerdictResetIfWorldChanged(uint64_t world) {
+    if (g_espVerdictWorld != world) {
+        g_espVerdict.clear();
+        g_espTeamCache.clear();
+        g_espVerdictWorld = world;
+    }
+}
+
+// myTeam qua NetDriver chain (source Kernel). INT_MIN nếu chưa rõ.
+static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, int *outTeam) {
+    BOOL ok = NO;
+    uint64_t net = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &ok);
+    if (!ok || !ESPIsUserPtr(net)) return NO;
+    uint64_t conn = ESPReadU64(vmMap, net + ESPOff_NetDriver_ServerConn, &ok);
+    if (!ok || !ESPIsUserPtr(conn)) return NO;
+    uint64_t pc = ESPReadU64(vmMap, conn + ESPOff_Conn_LocalPC, &ok);
+    if (!ok || !ESPIsUserPtr(pc)) return NO;
+    uint64_t pawn = ESPReadU64(vmMap, pc + ESPOff_PC_LocalPawn, &ok);
+    if (!ok || !ESPIsUserPtr(pawn)) return NO;
+    int team = (int)ESPReadU32(vmMap, pawn + ESPOff_Char_Team, &ok);
+    if (!ok) return NO;
+    if (outPawn) *outPawn = pawn;
+    if (outTeam) *outTeam = team;
+    return YES;
+}
+
+// Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
+// verdict 2 (other) được cache để lần sau khỏi đọc.
+static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam, float *outHp) {
+    auto vit = g_espVerdict.find(actor);
+    if (vit != g_espVerdict.end() && vit->second == 2) return NO;
+    BOOL ok = NO;
+    if (vit == g_espVerdict.end()) {
+        uint64_t mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
+        if (!ok || !ESPIsUserPtr(mesh)) {
+            if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
+            g_espVerdict[actor] = 2;
+            return NO;
+        }
+        float hp = 0, mx = 0;
+        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4) ||
+            !ESPMemoryRead(vmMap, actor + ESPOff_Char_HealthMax, &mx, 4)) {
+            g_espVerdict[actor] = 2;
+            return NO;
+        }
+        int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
+        if (!ok || !(hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000)) {
+            if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
+            g_espVerdict[actor] = 2;
+            return NO;
+        }
+        if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
+        g_espVerdict[actor] = 1;
+        g_espTeamCache[actor] = team;
+    }
+    int team = INT_MIN;
+    auto tit = g_espTeamCache.find(actor);
+    if (tit != g_espTeamCache.end()) {
+        team = tit->second;
+    } else {
+        team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
+        if (!ok) return NO;
+        g_espTeamCache[actor] = team;
+    }
+    uint8_t hid = ESPReadU8(vmMap, actor + ESPOff_Actor_HiddenFlag, &ok);
+    if (!ok) return NO;
+    uint8_t dead = ESPReadU8(vmMap, actor + ESPOff_Char_Dead, &ok);
+    if (!ok) return NO;
+    if ((hid & 0x1) || (dead & 0x1)) return NO;
+    float hp = 0;
+    if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4)) return NO;
+    if (!(hp > 0 && hp <= 2000)) return NO;
+    if (myTeam != INT_MIN && team == myTeam && team != ESPTeam_Dummy) return NO;
+    if (outTeam) *outTeam = team;
+    if (outHp) *outHp = hp;
+    return YES;
+}
 
 static uint64_t ESPGEngineRuntime(uint64_t gameBase) {
     return ESPRuntime(gameBase, ESPDump_GEngine);
@@ -264,7 +347,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     if (!actorsData || actorsCount == 0 || actorsCount > 20000) return r;
 
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
-    uint32_t playerLike = 0;
+    ESPVerdictResetIfWorldChanged(world);
+    int myTeam = INT_MIN;
+    { int t = INT_MIN; uint64_t lp = 0; if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) myTeam = t; }
+    uint32_t enemies = 0;
     uint64_t sample = 0;
     ESPVector samplePos = {0,0,0};
     BOOL hasPos = NO;
@@ -272,20 +358,22 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
         if (!ok || !actor || actor < 0x100000000ULL) continue;
         r.scanned++;
-        uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-        if (!ok || !root || root < 0x100000000ULL) continue;
-        playerLike++;
+        int team = 0; float hp = 0;
+        if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
+        enemies++;
         if (!sample) {
             sample = actor;
-            // Thử đọc RelativeLocation ở RootComponent+0x1E4
-            ESPVector v = {0,0,0};
-            if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &v, sizeof(v))) {
-                samplePos = v;
-                hasPos = YES;
+            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+            if (ok && ESPIsUserPtr(root)) {
+                ESPVector v = {0,0,0};
+                if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &v, sizeof(v))) {
+                    samplePos = v;
+                    hasPos = YES;
+                }
             }
         }
     }
-    r.playerLike = playerLike;
+    r.playerLike = enemies;
     r.sampleActor = sample;
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
@@ -475,13 +563,17 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) return 0;
     if (!actorsData || actorsCount == 0 || actorsCount > 20000) return 0;
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
-    // Lấy vị trí mình để bỏ qua self (actor gần camera <2m)
+    ESPVerdictResetIfWorldChanged(world);
+    int myTeam = INT_MIN;
+    { int t = INT_MIN; if (ESPMyTeamAndPawn(vmMap, world, NULL, &t)) myTeam = t; }
     int n = 0;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
         uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
         if (!ok || !actor || actor < 0x100000000ULL) continue;
+        int team = 0; float hp = 0;
+        if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative
         // ( ComponentToWorld 0x1D0 để dự phòng nếu Relative fail — xem offset.h )
         ESPVector pos = {0,0,0};
@@ -525,13 +617,13 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
             float wEst = hEst * 0.5f;
             if (hEst < 8 || hEst > screenH) continue;
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1 };
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp };
             continue;
         }
         float h = fabsf(sy - hy);
         if (h < 8 || h > screenH * 1.2f) continue;
         float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1 };
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp };
     }
     return n;
 #endif
