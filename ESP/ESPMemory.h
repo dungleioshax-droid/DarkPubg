@@ -26,6 +26,10 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 // phải rơi xuống ~11 lần đọc lẻ/actor, pass quét 20s).
 BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
 
+// Xả toàn bộ page cache (gọi khi world/game base đổi — mapping cũ của world
+// cũ phải nhả cùng port để không tích port/mapping vô hạn).
+void ESPMemoryFlushPageCache(void);
+
 // Helpers
 static inline uint64_t ESPReadU64(uint64_t vmMap, uint64_t addr, BOOL *ok) {
     uint64_t v = 0;

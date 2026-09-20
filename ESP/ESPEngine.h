@@ -48,6 +48,9 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
 // ESP_REFRESH_HZ lần/giây, chỉ tốn ~2 lần đọc kernel/actor. Trả về số box.
 int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes);
 
+// Bridge báo số box đang vẽ (để hiển thị B<nn> trên dòng scan của app).
+void ESPBoxCounterSet(int n);
+
 NS_ASSUME_NONNULL_END
 
 #endif /* ESPEngine_h */

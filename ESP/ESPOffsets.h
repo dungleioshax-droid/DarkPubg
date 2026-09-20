@@ -84,17 +84,20 @@ static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (
 static const uint32_t ESPOff_Comp_ComponentToWorld = 0x1D0; // FTransform
 static const uint32_t ESPOff_Transform_Translation = 0x10;   // FQuat 0x0 + FVector 0x10
 
-// Camera chain (PUBG UE4, từ SDK/Engine.hpp)
+// Camera chain (PUBG UE4 — theo source Kernel ĐANG CHẠY ĐƯỢC, unity_api/offset.h)
 // UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
 // -> ULocalPlayer (UPlayer) 0x30 PlayerController
 // -> APlayerController 0x548 PlayerCameraManager
-// -> APlayerCameraManager 0x520 CameraCache -> +0x10 POV (FMinimalViewInfo)
+// -> APlayerCameraManager 0x10A0 ViewTarget (FTViewTarget)
+//    -> +0x10 POV (FMinimalViewInfo)
 //    POV: Location 0x0 (FVector), Rotation 0x18 (FRotator), FOV 0x24 (float), Aspect 0x34 (float)
+// CameraCache 0x520 bị loại: bản game này camera thật nằm ở ViewTarget —
+// nguồn Kernel đọc POV = PCM + 0x10A0 + 0x10 và ESP box của nó vẽ đúng.
 static const uint32_t ESPOff_GameInstance_LocalPlayers = 0x48;
 static const uint32_t ESPOff_Player_PlayerController   = 0x30;
 static const uint32_t ESPOff_PC_CameraManager          = 0x548;
-static const uint32_t ESPOff_CamMgr_CameraCache        = 0x520;
-static const uint32_t ESPOff_Cache_POV                 = 0x10;
+static const uint32_t ESPOff_CamMgr_ViewTarget         = 0x10A0; // FTViewTarget
+static const uint32_t ESPOff_ViewTarget_POV            = 0x10;
 static const uint32_t ESPOff_POV_Location              = 0x0;
 static const uint32_t ESPOff_POV_Rotation              = 0x18;
 static const uint32_t ESPOff_POV_FOV                   = 0x24;

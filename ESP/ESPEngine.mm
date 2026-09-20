@@ -655,6 +655,34 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                pf.nameID, (unsigned long long)pf.mesh, pf.hp, pf.hpMax,
                (unsigned)pf.bHidden, (unsigned)pf.bDead, (unsigned long long)pf.tMesh,
                pf.tMax, pf.tCur, (unsigned)pf.tIsUp, pf.window ? 1 : 0);
+        // Camera: chẩn đoán tại sao không vẽ được box (chain toàn bộ).
+        ESPCamera camProbe;
+        BOOL camOK = ESPEngineCamera(gameBase, &camProbe);
+        if (camOK) {
+            ESPLog("diag cam OK fov=%.1f loc=(%.0f,%.0f,%.0f) rot=(%.0f,%.0f,%.0f)",
+                   camProbe.fov, camProbe.location.x, camProbe.location.y,
+                   camProbe.location.z, camProbe.rotation.pitch,
+                   camProbe.rotation.yaw, camProbe.rotation.roll);
+        } else {
+            // Lần lượt từng mốc của chain để biết gãy chỗ nào.
+            BOOL okc = NO;
+            uint64_t gameInst2 = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &okc);
+            uint64_t lpData2 = okc ? ESPReadU64(vmMap, gameInst2 + ESPOff_GameInstance_LocalPlayers, &okc) : 0;
+            uint32_t lpN2 = okc ? ESPReadU32(vmMap, gameInst2 + ESPOff_GameInstance_LocalPlayers + 8, &okc) : 0;
+            uint64_t lp2 = okc && lpData2 ? ESPReadU64(vmMap, lpData2, &okc) : 0;
+            uint64_t pc2 = okc && lp2 ? ESPReadU64(vmMap, lp2 + ESPOff_Player_PlayerController, &okc) : 0;
+            uint64_t cm2 = okc && pc2 ? ESPReadU64(vmMap, pc2 + ESPOff_PC_CameraManager, &okc) : 0;
+            uint64_t pov2 = cm2 ? (cm2 + ESPOff_CamMgr_ViewTarget + ESPOff_ViewTarget_POV) : 0;
+            float fov2 = -2;
+            if (pov2) {
+                ESPReadF32(vmMap, pov2 + ESPOff_POV_FOV, &fov2);
+                if (fov2 == 0) fov2 = -1;
+            }
+            ESPLog("diag cam FAIL gInst=%llx lpData=%llx n=%u lp=%llx pc=%llx cm=%llx pov=%llx fov=%.1f",
+                   (unsigned long long)gameInst2, (unsigned long long)lpData2,
+                   lpN2, (unsigned long long)lp2, (unsigned long long)pc2,
+                   (unsigned long long)cm2, (unsigned long long)pov2, fov2);
+        }
     }
     g_espProgressTotal.store((int)scanN);
     g_espProgress.store(0);
@@ -780,6 +808,12 @@ static const double kESPScanStuckTimeout = 45.0; // quá từng này giây coi n
 static double g_espLastScanSeconds = 0; // lần quét xong gần nhất mất bao lâu
 static int g_espLastScanEnemies = -1; // -1 = chưa xong lần nào
 static int g_espLastScanDummies = -1; // số hình nhân trong lần quét xong gần nhất
+static int g_espLastBoxes = 0;        // số box refresh gần nhất (hiện trên app)
+static int g_espTrackedCount = 0;     // số actor đang theo dõi (mirror của g_espTracked)
+
+void ESPBoxCounterSet(int n) {
+    g_espLastBoxes = n;
+}
 static uint32_t g_espLightActors = 0; // actors của lần quét nhẹ gần nhất
 static uint64_t g_espLightWorld = 0;  // world tương ứng (0 = chưa quét được)
 static CFAbsoluteTime g_espLightAt = 0; // lúc quét nhẹ lần cuối (cache 1s)
@@ -821,12 +855,20 @@ void ESPEngineRequestScan(uint64_t gameBase) {
         @autoreleasepool {
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
             ESPScanResult r = ESPEngineScan(gameBase);
+            // World đổi (map/trận mới): page cache còn giữ mapping của world
+            // cũ -> xả để nhả mapping + port, và tránh đọc page héo.
+            static uint64_t s_lastCacheWorld = 0;
+            if (r.world && r.world != s_lastCacheWorld) {
+                if (s_lastCacheWorld) ESPMemoryFlushPageCache();
+                s_lastCacheWorld = r.world;
+            }
             g_espCache = r;
             g_espCachePasses = g_espPasses;
             g_espCheckedAt = CFAbsoluteTimeGetCurrent();
             g_espLastScanSeconds = g_espCheckedAt - t0;
             g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
             g_espLastScanDummies = r.world ? (int)r.dummyLike : -1;
+            g_espTrackedCount = (int)g_espTracked.size();
             ESPLog("scan finished dt=%.1fs enemies=%d step=%d", g_espLastScanSeconds,
                    g_espLastScanEnemies, g_espStep);
         }
@@ -971,7 +1013,13 @@ NSString *ESPEngineScanInfoText(void) {
     if (g_espCheckedAt == 0) return @"scan idle";
     if (g_espLastScanEnemies >= 0) {
         // "%d D" = trong đó có bao nhiêu là hình nhân huấn luyện — để biết
-        // ngay con hình nhân nào bị lọt khỏi bộ lọc.
+        // ngay con hình nhân nào bị lọt khỏi bộ lọc. "B %d" = số box đang vẽ
+        // trên SpringBoard (cam+track OK). B=0 mà P>0 thì camera/track lỗi.
+        if (g_espTrackedCount > 0 || g_espLastBoxes > 0) {
+            return [NSString stringWithFormat:@"scan ok %d P %d D B%d %.1fs",
+                    g_espLastScanEnemies, g_espLastScanDummies, g_espLastBoxes,
+                    g_espLastScanSeconds];
+        }
         return [NSString stringWithFormat:@"scan ok %d P %d D %.1fs",
                 g_espLastScanEnemies, g_espLastScanDummies, g_espLastScanSeconds];
     }
@@ -1024,7 +1072,9 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     if (!ok || !pc) return NO;
     uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
     if (!ok || !camMgr) return NO;
-    uint64_t pov = camMgr + ESPOff_CamMgr_CameraCache + ESPOff_Cache_POV;
+    // POV qua ViewTarget (FTViewTarget @ 0x10A0 + 0x10) — đúng như source
+    // Kernel đang chạy được (CameraCache 0x520 không có camera thật ở bản này).
+    uint64_t pov = camMgr + ESPOff_CamMgr_ViewTarget + ESPOff_ViewTarget_POV;
     ESPVector loc = {0,0,0};
     if (!ESPReadVec(vmMap, pov + ESPOff_POV_Location, &loc)) return NO;
     ESPRotator rot = {0,0,0};

@@ -37,6 +37,108 @@ static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
     return addr >= 0x100000000ULL && addr < 0x300000000000ULL;
 }
 
+// ---- Đường đọc NHANH: page cache của PROCESS GAME ----
+// vmmapremotepage() tạo 1 mapping LIVE (share vm_object của game, giữ bằng
+// ref_count) => game ghi gì mình đọc thấy ngay. Nó đắt ở chỗ: tạo memory
+// entry + bump refcount bằng kernel write + map + dealloc + 1 port mỗi lần
+// gọi. Mỗi mapping chỉ phủ ĐÚNG 1 page nên cache theo địa chỉ page chính xác:
+// dữ liệu nóng (statics, mảng actors, camera, root địch) sau lần chạm đầu chỉ
+// còn memcpy thuần. Đọc cửa sổ lớn (0xF00/actor lúc phân loại) đi đường trực
+// tiếp không cache để không đuổi dữ liệu nóng khỏi cache.
+#define ESP_PAGE_CACHE_SIZE 96
+
+struct ESPPageCacheEntry {
+    uint64_t pageStart;    // địa chỉ page đã map (0 = slot trống)
+    uint64_t localAddress; // mapping live của đúng page đó trong process mình
+    uint64_t port;         // memory-entry port phải giữ cùng localAddress
+    uint64_t lastUse;      // cho LRU
+};
+static ESPPageCacheEntry s_pageCache[ESP_PAGE_CACHE_SIZE];
+static uint64_t s_pageCacheClock = 1; // tăng dần, trị lastUse
+
+// Tìm trong cache theo page CHÍNH XÁC. KHÔNG lock — caller giữ mutex.
+static ESPPageCacheEntry *ESPPageCacheFind(uint64_t pageStart) {
+    for (int i = 0; i < ESP_PAGE_CACHE_SIZE; i++) {
+        ESPPageCacheEntry *e = &s_pageCache[i];
+        if (e->pageStart == pageStart) {
+            e->lastUse = s_pageCacheClock;
+            return e;
+        }
+    }
+    return NULL;
+}
+
+// Lấy mapping live cho pageStart (cache -> miss thì map mới + đưa vào cache).
+// KHÔNG lock — caller giữ mutex.
+static BOOL ESPPageCacheGet(uint64_t vmMap, uint64_t pageStart,
+                            uint64_t *outLocal) {
+    ESPPageCacheEntry *e = ESPPageCacheFind(pageStart);
+    if (e) {
+        *outLocal = e->localAddress;
+        return YES;
+    }
+    // Miss: map page mới bằng vmmapremotepage (đường đang chạy được).
+    struct ESPShmem sh = vmmapremotepage(vmMap, pageStart);
+    if (!sh.used || !sh.localAddress) return NO;
+    // Đưa vào slot LRU (hoặc slot trống).
+    ESPPageCacheEntry *victim = &s_pageCache[0];
+    for (int i = 0; i < ESP_PAGE_CACHE_SIZE; i++) {
+        if (!s_pageCache[i].pageStart) { victim = &s_pageCache[i]; break; }
+        if (s_pageCache[i].lastUse < victim->lastUse) victim = &s_pageCache[i];
+    }
+    if (victim->pageStart) {
+        // Nhả mapping + port của slot bị đuổi.
+        if (victim->localAddress) {
+            mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)victim->localAddress, PAGE_SIZE);
+        }
+        if (victim->port) mach_port_deallocate(mach_task_self_, (mach_port_t)victim->port);
+        victim->localAddress = 0; victim->port = 0; victim->pageStart = 0;
+    }
+    victim->pageStart = pageStart;
+    victim->localAddress = sh.localAddress;
+    victim->port = sh.port;
+    victim->lastUse = s_pageCacheClock;
+    *outLocal = sh.localAddress;
+    return YES;
+}
+
+void ESPMemoryFlushPageCache(void) {
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    for (int i = 0; i < ESP_PAGE_CACHE_SIZE; i++) {
+        ESPPageCacheEntry *e = &s_pageCache[i];
+        if (e->pageStart) {
+            if (e->localAddress) {
+                mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)e->localAddress, PAGE_SIZE);
+            }
+            if (e->port) mach_port_deallocate(mach_task_self_, (mach_port_t)e->port);
+            e->pageStart = 0; e->localAddress = 0; e->port = 0; e->lastUse = 0;
+        }
+    }
+}
+
+// Đường trực tiếp: map -> memcpy -> nhả ngay, KHÔNG qua cache. Dùng cho đọc
+// stream (cửa sổ 0xF00/actor lúc phân loại). KHÔNG lock — caller giữ mutex.
+static BOOL ESPReadDirectLocked(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    uint64_t off = 0;
+    uint8_t *out = (uint8_t *)buf;
+    while (off < len) {
+        uint64_t addr = remoteAddr + off;
+        uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t pageOff = addr - pageStart;
+        struct ESPShmem sh = vmmapremotepage(vmMap, pageStart);
+        if (!sh.used || !sh.localAddress) return NO;
+        uint64_t chunk = len - off;
+        if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
+        memcpy(out + off, (void *)(uintptr_t)(sh.localAddress + pageOff), (size_t)chunk);
+        mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
+        // vmmapremotepage tạo 1 memory-entry port cho mỗi page — phải nhả,
+        // không là leak hàng nghìn port/scan rồi bị Jetsam kill app.
+        if (sh.port) mach_port_deallocate(mach_task_self_, (mach_port_t)sh.port);
+        off += chunk;
+    }
+    return YES;
+}
+
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     if (!proc) return 0;
     if (!ds_is_ready()) return 0;
@@ -52,23 +154,26 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    s_pageCacheClock++;
+    // Đọc dài hơn 1 page (cửa sổ 0xF00 lúc phân loại actor) là stream: đi
+    // đường trực tiếp, không làm bẩn cache dữ liệu nóng.
+    if (len > (uint64_t)PAGE_SIZE) {
+        return ESPReadDirectLocked(vmMap, remoteAddr, buf, len);
+    }
     uint64_t off = 0;
     uint8_t *out = (uint8_t *)buf;
     while (off < len) {
         uint64_t addr = remoteAddr + off;
         uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t pageOff = addr - pageStart;
-        struct ESPShmem sh = vmmapremotepage(vmMap, pageStart);
-        if (!sh.used || !sh.localAddress) {
-            return NO;
-        }
+        uint64_t local = 0;
+        if (!ESPPageCacheGet(vmMap, pageStart, &local)) return NO;
         uint64_t chunk = len - off;
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
-        memcpy(out + off, (void *)(uintptr_t)(sh.localAddress + pageOff), (size_t)chunk);
-        mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
-        // vmmapremotepage tạo 1 memory-entry port cho mỗi page — phải nhả,
-        // không là leak hàng nghìn port/scan rồi bị Jetsam kill app.
-        if (sh.port) mach_port_deallocate(mach_task_self_, (mach_port_t)sh.port);
+        memcpy(out + off, (void *)(uintptr_t)(local + pageOff), (size_t)chunk);
+        // Mapping là LIVE (share vm_object game) nên giữ trong cache không
+        // làm dữ liệu cũ — game ghi gì mình đọc thấy ngay. Chỉ nhả khi bị
+        // đuổi khỏi cache hoặc flush.
         off += chunk;
     }
     return YES;
@@ -86,14 +191,16 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     uint8_t pageBuf[ESP_MAX_PAGE];
     uint8_t *out = (uint8_t *)buf;
     uint64_t off = 0;
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
     while (off < len) {
         uint64_t addr = remoteAddr + off;
         uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
         uint64_t pageOff = addr - pageStart;
         uint64_t chunk = (uint64_t)PAGE_SIZE - pageOff;
         if (chunk > len - off) chunk = len - off;
-        // đọc nguyên 1 page từ địa chỉ page-align: đúng dạng map đang chạy được.
-        if (!ESPMemoryRead(vmMap, pageStart, pageBuf, (uint64_t)PAGE_SIZE)) return NO;
+        // đọc nguyên 1 page từ địa chỉ page-align, đường trực tiếp (không
+        // cache) — cửa sổ 0xF00 chỉ đọc 1 lần/actor lúc phân loại.
+        if (!ESPReadDirectLocked(vmMap, pageStart, pageBuf, (uint64_t)PAGE_SIZE)) return NO;
         memcpy(out + off, pageBuf + pageOff, (size_t)chunk);
         off += chunk;
     }
@@ -112,5 +219,7 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
     (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
     return NO;
+}
+void ESPMemoryFlushPageCache(void) {
 }
 #endif

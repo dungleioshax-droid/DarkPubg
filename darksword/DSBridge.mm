@@ -1941,6 +1941,7 @@ static void ds_update_rate(void) {
             if (!CGRectIsNull(sbBounds) && sbBounds.size.width > 0) {
                 static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
                 static CFAbsoluteTime s_lastRefresh = 0;
+                static BOOL s_espBoxLogged = NO;
                 CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
                 int count = 0;
                 double minInterval = 1.0 / (double)ESP_REFRESH_HZ;
@@ -1960,6 +1961,15 @@ static void ds_update_rate(void) {
                         // dùng đường đầy đủ để khởi tạo danh sách theo dõi.
                         count = ESPEngineBoxes(g_gameBase, landW, landH,
                                                s_boxes, ESPOverlayMaxBoxes);
+                    }
+                    ESPBoxCounterSet(count);
+                    // Log 1 lần mỗi khi bật để biết kẹt ở đâu (xem ESP.log).
+                    if (!s_espBoxLogged) {
+                        s_espBoxLogged = YES;
+                        ESPLog("box tick: count=%d landscape=%d sb=%.0fx%.0f",
+                               count, landscape ? 1 : 0,
+                               (double)CGRectGetWidth(sbBounds),
+                               (double)CGRectGetHeight(sbBounds));
                     }
                 }
                 ds_esp_overlay_update(g_springBoard, s_boxes, count, sbBounds,
@@ -2137,6 +2147,7 @@ static void ds_finish_disable(void) {
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
+    ESPMemoryFlushPageCache(); // nhả mapping + port của world cũ
     g_hudActive.store(false);
     if (process) {
         @try {
