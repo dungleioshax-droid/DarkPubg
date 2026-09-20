@@ -505,6 +505,34 @@ static NSString *ESPCacheText(void) {
             (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
 }
 
+// Quét NHẸ đồng bộ (~15 lần đọc kernel): world -> level -> actors count.
+// Không lọc players — để hiện số actors ngay khi vào trận.
+// An toàn gọi từ tick (bridge queue), KHÔNG gọi từ main thread.
+static uint32_t ESPFastActors(uint64_t gameBase, uint64_t *outWorld) {
+    if (outWorld) *outWorld = 0;
+    if (!gameBase || !ds_is_ready()) return 0;
+    uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
+    if (!proc) proc = procbyname("ShadowTrackerE");
+    if (!proc) return 0;
+    uint64_t task = taskbyproc(proc);
+    uint64_t vmMap = task ? task_get_vm_map(task) : 0;
+    if (!vmMap) return 0;
+    BOOL ok = NO;
+    uint64_t geStatic = ESPGEngineRuntime(gameBase);
+    uint64_t engine = ESPReadU64(vmMap, geStatic, &ok);
+    if (!ok || !ESPIsUserPtr(engine)) return 0;
+    uint64_t viewport = ESPReadU64(vmMap, engine + ESPOff_Engine_GameViewport, &ok);
+    if (!ok || !ESPIsUserPtr(viewport)) return 0;
+    uint64_t world = ESPReadU64(vmMap, viewport + ESPOff_Viewport_World, &ok);
+    if (!ok || !ESPIsUserPtr(world)) return 0;
+    if (outWorld) *outWorld = world;
+    uint64_t level = 0, ad = 0;
+    uint32_t ac = 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &ad, &ac)) return 0;
+    if (ac > 20000) return 0;
+    return ac;
+}
+
 NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!gameBase) return @"ESP: --";
 #if !USE_DARKSWORD
@@ -512,18 +540,23 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     return @"ESP: --";
 #else
     if (!ds_is_ready()) return @"ESP: wait…";
-    ESPEngineRequestScan(gameBase); // nền, không block
-    if (g_espCheckedAt == 0) {
-        // Chưa quét xong lần nào — hiện số giây đang quét để biết có kẹt không
-        if (g_espScanStart > 0) {
-            int el = (int)(CFAbsoluteTimeGetCurrent() - g_espScanStart);
-            if (el < 0) el = 0;
-            if (el > 999) el = 999;
-            return [NSString stringWithFormat:@"ESP: .. %ds", el];
-        }
-        return @"ESP: ..";
+    ESPEngineRequestScan(gameBase); // lọc players chạy nền, không block
+    if (g_espCheckedAt != 0) return ESPCacheText();
+    // Chưa lọc xong lần nào — quét nhẹ lấy số actors hiện ngay
+    uint64_t w = 0;
+    uint32_t actors = ESPFastActors(gameBase, &w);
+    if (w && actors <= 20000) {
+        if (actors > 0) return [NSString stringWithFormat:@"ESP: %u actors / ..", (unsigned)actors];
+        return @"ESP: 0 actors / ..";
     }
-    return ESPCacheText();
+    // World còn chưa ra — hiện số giây đang quét để biết có kẹt không
+    if (g_espScanStart > 0) {
+        int el = (int)(CFAbsoluteTimeGetCurrent() - g_espScanStart);
+        if (el < 0) el = 0;
+        if (el > 999) el = 999;
+        return [NSString stringWithFormat:@"ESP: .. %ds", el];
+    }
+    return @"ESP: ..";
 #endif
 }
 

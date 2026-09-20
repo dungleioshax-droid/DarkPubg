@@ -499,7 +499,7 @@ static NSDictionary *ds_hud_preferences(void) {
 // MARK: - Base Game (ShadowTrackerExtra / PUBG Mobile)
 
 static NSString * const kDSDefaultGameProcessName = @"ShadowTrackerExtra";
-static const NSTimeInterval kDSGameBaseCacheTTL = 10.0; // base ít đổi (ASLR theo lần mở game) — quét thưa để đỡ panic
+static const NSTimeInterval kDSGameBaseCacheTTL = 30.0; // base ít đổi (ASLR theo lần mở game) — quét thưa để đỡ panic
 static uint64_t g_gameBase = 0;
 static pid_t g_gamePid = 0;
 static NSString *g_gameFoundName = nil;
