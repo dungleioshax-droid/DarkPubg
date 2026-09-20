@@ -23,16 +23,21 @@ static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
-static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 2=other
+static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
+static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
+static int g_espFrame = 0;
+static const int kESPverdictExpiryFrames = 6; // verdict 2 quá 6 scans thì đánh giá lại
 static uint64_t g_espVerdictWorld = 0;
 
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
     if (g_espVerdictWorld != world) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
+        g_espVerdictFrame.clear();
         g_espVerdictWorld = world;
     }
+}
 }
 
 // myTeam qua NetDriver chain (source Kernel). INT_MIN nếu chưa rõ.
@@ -53,11 +58,32 @@ static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, 
     return YES;
 }
 
+static void ESPVerdictSet(uint64_t actor, char v, int team) {
+    if (g_espVerdict.size() > 3000) {
+        g_espVerdict.clear();
+        g_espTeamCache.clear();
+        g_espVerdictFrame.clear();
+    }
+    g_espVerdict[actor] = v;
+    g_espVerdictFrame[actor] = g_espFrame;
+    if (v == 1 || v == 3) g_espTeamCache[actor] = team;
+}
+
 // Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
-// verdict 1=character, 3=target huấn luyện, 2=other (cache để lần sau khỏi đọc).
+// verdict 1=character, 3=target huấn luyện, 2=other.
+// verdict 2 hết hạn sau kESPverdictExpiryFrames scans để đánh giá lại
+// (tránh kẹt 1/4 do lúc map chưa load đã kết luận).
 static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam, float *outHp) {
     auto vit = g_espVerdict.find(actor);
-    if (vit != g_espVerdict.end() && vit->second == 2) return NO;
+    if (vit != g_espVerdict.end() && vit->second == 2) {
+        auto fit = g_espVerdictFrame.find(actor);
+        int age = (fit != g_espVerdictFrame.end()) ? (g_espFrame - fit->second) : 999;
+        if (age <= kESPverdictExpiryFrames) return NO;
+        g_espVerdict.erase(actor);
+        g_espVerdictFrame.erase(actor);
+        g_espTeamCache.erase(actor);
+        vit = g_espVerdict.end();
+    }
     BOOL ok = NO;
     if (vit == g_espVerdict.end()) {
         // Thử character trước (Mesh skeletal 0x510)
@@ -68,9 +94,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
                 ESPMemoryRead(vmMap, actor + ESPOff_Char_HealthMax, &mx, 4)) {
                 int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
                 if (ok && hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000) {
-                    if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-                    g_espVerdict[actor] = 1;
-                    g_espTeamCache[actor] = team;
+                    ESPVerdictSet(actor, 1, team);
                     goto check_live;
                 }
             }
@@ -87,9 +111,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
                     ESPMemoryRead(vmMap, actor + ESPOff_Target_MaxHealth, &tMax, 4) &&
                     ESPMemoryRead(vmMap, actor + ESPOff_Target_IsUp, &isUp, 1)) {
                     if (tMax >= 50 && tMax <= 2000 && tCur >= 0 && tCur <= tMax && (isUp == 0 || isUp == 1)) {
-                        if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-                        g_espVerdict[actor] = 3;
-                        g_espTeamCache[actor] = ESPTeam_Dummy;
+                        ESPVerdictSet(actor, 3, ESPTeam_Dummy);
                         if (outTeam) *outTeam = ESPTeam_Dummy;
                         if (outHp) *outHp = tCur;
                         return YES;
@@ -97,8 +119,8 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
                 }
             }
         }
-        if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-        g_espVerdict[actor] = 2;
+        ESPVerdictSet(actor, 2, 0);
+        g_espTeamCache.erase(actor);
         return NO;
     }
     if (vit->second == 3) {
@@ -350,6 +372,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 #else
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
+    g_espFrame++; // frame để verdict 2 hết hạn rồi đánh giá lại
     // Lấy proc game hiện tại qua Base? DSBridge đã cache proc, nhưng ở đây tự tìm lại nhẹ:
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) {
