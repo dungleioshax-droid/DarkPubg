@@ -562,12 +562,25 @@ static BOOL ESPValidateWorld(uint64_t vmMap, uint64_t world) {
     return NO;
 }
 
+// Đang chạy ESPEngineScan ở thread này — chặn ESPEngineCamera tự gọi scan
+// (trước đây tạo đệ quy vô hạn: diag probe camera -> scan mới -> diag mới…).
+// RAII guard nhả cờ trên MỌI nhánh return của ESPEngineScan.
+static thread_local bool t_espInScan = false;
+struct ESPScanReentryGuard {
+    ~ESPScanReentryGuard() { t_espInScan = false; }
+};
+
 ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPScanResult r = {0};
 #if !USE_DARKSWORD
     (void)gameBase;
     return r;
 #else
+    // Chống re-entry: nếu scan khác đang chạy trên thread này thì trả rỗng
+    // (trước đây diag probe camera -> scan mới -> diag mới… đệ quy vô hạn).
+    if (t_espInScan) return r;
+    t_espInScan = true;
+    ESPScanReentryGuard reentryGuard; (void)reentryGuard;
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
     g_espFrame++; // frame để verdict 2 hết hạn rồi đánh giá lại
@@ -1053,11 +1066,14 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     if (!gameBase || !ds_is_ready()) return NO;
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) return NO;
-    // Reuse world từ cache nếu có để đỡ scan lại
+    // Reuse world từ cache nếu có để đỡ scan lại. TUYỆT ĐỐI không tự kick scan:
+    // ESPEngineScan gọi hàm này (diag probe) và HUD tick gọi nó 4Hz — tự kick
+    // scan ở đây là đệ quy vô hạn (bug: log 'scan start' spam, không scan nào
+    // kết thúc). Scan nền do ESPEngineRequestScan lo; camera chỉ ăn theo cache.
     uint64_t world = g_espCache.world;
-    if (!world) {
-        ESPScanResult r = ESPEngineScan(gameBase);
-        world = r.world;
+    if (!world || t_espInScan) {
+        // Đang scan hoặc chưa có world: tự đi tìm world qua viewport, rẻ.
+        world = ESPWorldViaViewport(vmMap, gameBase);
         if (!world) return NO;
     }
     BOOL ok = NO;
@@ -1149,20 +1165,12 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) return 0;
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
-    // Lấy actors từ cache/scan (qua decrypt 0xA0/0x448, không qua cluster)
+    // Chỉ dùng world từ cache — KHÔNG scan đồng bộ ở đây: hàm này chạy trên
+    // timer 4Hz của bridge; scan đầy đủ là việc của ESPEngineRequestScan (queue
+    // nền, TTL riêng). Trước đây scan ở đây làm HUD tick kẹt cả giây.
     uint64_t world = g_espCache.world;
-    BOOL ok = NO;
-    if (!world) {
-        ESPScanResult r = ESPEngineScan(gameBase);
-        world = r.world;
-        if (world) {
-            // dùng actors từ scan mới nhất nếu có
-            if (r.actorCount > 0) {
-                // r đã có actorCount nhưng không giữ actorsData — đọc lại rẻ:
-            }
-        }
-    }
     if (!world) return 0;
+    BOOL ok = NO;
     uint64_t level = 0;
     uint64_t actorsData = 0;
     uint32_t actorsCount = 0;
