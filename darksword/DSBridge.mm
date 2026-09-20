@@ -112,6 +112,8 @@ static void ds_set_error(NSString *message) {
 #import "ESPEngine.h"
 #import "ESPConfig.h"
 #import "ESPOverlay.h"
+#import "ESPMemory.h"
+#import "ESPLog.h"
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
 extern "C" {
