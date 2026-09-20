@@ -1,0 +1,204 @@
+/* formattedSpeed */
+"%.0f KB" = "%.0f KB";
+
+/* formattedSpeed */
+"%.0f Kb" = "%.0f Kb";
+
+/* formattedSpeed */
+"%.0f Kb/s" = "%.0f Kb/s";
+
+/* formattedSpeed */
+"%.0f KB/s" = "%.0f KB/s";
+
+/* formattedSpeed */
+"%.2f GB" = "%.2f GB";
+
+/* formattedSpeed */
+"%.2f Gb" = "%.2f Gb";
+
+/* formattedSpeed */
+"%.2f GB/s" = "%.2f GB/s";
+
+/* formattedSpeed */
+"%.2f Gb/s" = "%.2f Gb/s";
+
+/* formattedSpeed */
+"%.2f MB" = "%.2f MB";
+
+/* formattedSpeed */
+"%.2f Mb" = "%.2f Mb";
+
+/* formattedSpeed */
+"%.2f MB/s" = "%.2f MB/s";
+
+/* formattedSpeed */
+"%.2f Mb/s" = "%.2f Mb/s";
+
+/* formattedSpeed */
+"0 KB" = "0 KB";
+
+/* formattedSpeed */
+"0 Kb" = "0 Kb";
+
+/* formattedSpeed */
+"0 Kb/s" = "0 Kb/s";
+
+/* formattedSpeed */
+"0 KB/s" = "0 KB/s";
+
+/* No comment provided by engineer. */
+"Activate the network speed HUD." = "Activa la velocidad de red HUD.";
+
+/* No comment provided by engineer. */
+"Appearance" = "Apariencia";
+
+/* No comment provided by engineer. */
+"b/s" = "b/s";
+
+/* No comment provided by engineer. */
+"B/s" = "B/s";
+
+/* No comment provided by engineer. */
+"Choose an action below." = "Elija una acción a continuación.";
+
+/* No comment provided by engineer. */
+"Classic" = "Clásico";
+
+/* No comment provided by engineer. */
+"Deactivate the network speed HUD." = "Desactiva la velocidad de red HUD.";
+
+/* No comment provided by engineer. */
+"Developer Area" = "Área de desarrollo";
+
+/* No comment provided by engineer. */
+"Dismiss" = "Descartar";
+
+/* No comment provided by engineer. */
+"Display Mode" = "Modo de pantalla";
+
+/* No comment provided by engineer. */
+"Exit HUD" = "Cerrar HUD";
+
+/* No comment provided by engineer. */
+"Follow" = "Habilitado";
+
+/* No comment provided by engineer. */
+"FPS" = "FPS";
+
+/* No comment provided by engineer. */
+"Hide" = "Oculto";
+
+/* No comment provided by engineer. */
+"Hide @snapshot" = "Ocultar en capturas";
+
+/* No comment provided by engineer. */
+"Incoming Only" = "Sólo descarga";
+
+/* No comment provided by engineer. */
+"Inverted" = "Invertido";
+
+/* No comment provided by engineer. */
+"Keep In-place" = "Mantener en el sitio";
+
+/* No comment provided by engineer. */
+"Landscape" = "Horizontal";
+
+/* No comment provided by engineer. */
+"Large" = "Grande";
+
+/* No comment provided by engineer. */
+"DarkSpeed by @GITHUB@huami1314\nBased on TrollSpeed by @GITHUB@i_82" = "DarkSpeed por @GITHUB@huami1314\nBasado en TrollSpeed de @GITHUB@i_82";
+
+/* No comment provided by engineer. */
+"Memory Pressure" = "Presión en la memoria";
+
+/* No comment provided by engineer. */
+"OFF" = "Deshabilitado";
+
+/* No comment provided by engineer. */
+"ON" = "Habilitado";
+
+/* No comment provided by engineer. */
+"Open HUD" = "Abrir HUD";
+
+/* No comment provided by engineer. */
+"Pass-through" = "Pass-through";
+
+/* No comment provided by engineer. */
+"Prefixes" = "Prefijos";
+
+/* No comment provided by engineer. */
+"Re-open to apply" = "Reabrir para aplicar";
+
+/* No comment provided by engineer. */
+"Reset Settings" = "Restablecer ajustes";
+
+/* No comment provided by engineer. */
+"Settings" = "Ajustes";
+
+/* No comment provided by engineer. */
+"Size" = "Tamaño";
+
+/* No comment provided by engineer. */
+"Speed" = "Velocidad";
+
+/* No comment provided by engineer. */
+"Standard" = "Estándar";
+
+/* No comment provided by engineer. */
+"Tap that button on the center again,\nto toggle ON/OFF “Dynamic Island” mode." = "Toca de nuevo el botón en el centro,\npara activar/desactivar el modo “Isla dinámica“.";
+
+/* No comment provided by engineer. */
+"Toggle HUD" = "Alternar HUD";
+
+/* No comment provided by engineer. */
+"Toggle the network speed HUD." = "Cambia la velocidad de la red HUD.";
+
+/* No comment provided by engineer. */
+"Unit" = "Unid";
+
+/* No comment provided by engineer. */
+"Utility" = "Utilidad";
+
+/* No comment provided by engineer. */
+"You can quit this app now.\nThe HUD will persist on your screen." = "Puedes salir de esta aplicación ahora.\nEl HUD persistirá en tu pantalla.";
+
+"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD." = "DarkSpeed seguirá ejecutándose en segundo plano.\nNo fuerces el cierre después de activar el HUD.";
+
+/* No comment provided by engineer. */
+"↑↓" = "↑↓";
+
+/* No comment provided by engineer. */
+"▲▼" = "▲▼";
+
+/* DarkSpeed startup and SpringBoard bridge */
+"Error: " = "Error: ";
+"System data is ready" = "Los datos del sistema están listos";
+"Caching kernelcache" = "Guardando kernelcache";
+"Kernelcache cached" = "Kernelcache guardado";
+"Kernelcache cache failed" = "No se pudo guardar kernelcache";
+"Waiting for network (%.0f seconds, attempt %lu)" = "Esperando la red (%.0f segundos, intento %lu)";
+"Network connected; preparing kernelcache" = "Red conectada; preparando kernelcache";
+"No valid response" = "No se recibió una respuesta válida";
+"Network wait timed out" = "Se agotó el tiempo de espera de la red";
+"Network is not ready; waited %.0f seconds. Retrying in %.0f seconds" = "La red aún no está lista; se esperaron %.0f segundos. Reintentando en %.0f segundos";
+"Requesting network access" = "Solicitando acceso a la red";
+"Startup failed" = "Error de inicio";
+"Could not adopt the DarkSpeed environment." = "No se pudo adoptar el entorno de DarkSpeed.";
+"DarkSpeed system data is unavailable." = "Los datos del sistema de DarkSpeed no están disponibles.";
+"DarkSpeed initialization complete" = "Inicialización de DarkSpeed completada";
+"Initializing DarkSpeed" = "Inicializando DarkSpeed";
+"DarkSpeed initialization failed (%d)" = "Error al inicializar DarkSpeed (%d)";
+"DarkSpeed initialization failed" = "Error al inicializar DarkSpeed";
+"Unknown error" = "Error desconocido";
+"Closing HUD" = "Cerrando HUD";
+"HUD closed" = "HUD cerrado";
+"Preparing startup" = "Preparando el inicio";
+"Preparing system data" = "Preparando datos del sistema";
+"Locating SpringBoard" = "Localizando SpringBoard";
+"Connecting to SpringBoard" = "Conectando con SpringBoard";
+"Creating SpringBoard HUD" = "Creando HUD de SpringBoard";
+"SpringBoard HUD started" = "HUD de SpringBoard iniciado";
+"DarkSpeed startup failed. Retry or reinstall over the existing app; restart the device only as a last resort." = "DarkSpeed no pudo iniciarse. Vuelve a intentarlo o reinstala sobre la aplicación existente; reinicia el dispositivo solo como último recurso.";
+"DarkSpeed is not enabled in this build." = "El entorno de DarkSpeed no está activado en esta compilación.";
+"Waiting to start" = "Esperando para iniciar";

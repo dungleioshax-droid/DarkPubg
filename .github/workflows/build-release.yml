@@ -1,0 +1,70 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*.*"
+      - "v*.*.*"
+
+env:
+  PKG_VERSION: ''
+  XCODE_VERSION: '15.4'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and upload DarkSpeed IPA
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.XCODE_VERSION }}
+
+      - name: Setup build environment
+        run: |
+          echo "PKG_VERSION=$(./get-version.sh)" >> $GITHUB_ENV
+
+      - name: Build IPA
+        run: |
+          DARKSPEED_UNSIGNED=1 ./build-darkspeed.sh
+
+      - name: Collect symbols
+        run: |
+          zip -qry packages/DarkSpeed_${{ env.PKG_VERSION }}_symbols.zip DarkSpeed.xcarchive/dSYMs
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DarkSpeed_${{ env.PKG_VERSION }}
+          path: |
+            packages/DarkSpeed_*.ipa
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: DarkSpeed_${{ env.PKG_VERSION }}_symbols
+          path: |
+            packages/DarkSpeed_${{ env.PKG_VERSION }}_symbols.zip
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: v${{ env.PKG_VERSION }}
+          body_path: README.md
+          files: |
+            packages/DarkSpeed_*.ipa
+            packages/DarkSpeed_${{ env.PKG_VERSION }}_symbols.zip

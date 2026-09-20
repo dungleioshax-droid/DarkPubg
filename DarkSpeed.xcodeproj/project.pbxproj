@@ -1,0 +1,1124 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		DSE5E89FE25688FD3B972ED4 /* libxpf.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = DS3A0647113D290CFB5F7D9F /* libxpf.dylib */; };
+		DSDF9FC129B4EF9BBE225879 /* libgrabkernel2.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = DS02D856F5C47EF0755250DA /* libgrabkernel2.dylib */; };
+		DSAEFB1BD8D28F00EAD13763 /* libxpf.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DS3A0647113D290CFB5F7D9F /* libxpf.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		DS6253195D2BCEE369EEB96B /* libgrabkernel2.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DS02D856F5C47EF0755250DA /* libgrabkernel2.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		DS94654A91D7201BB1B561CD /* DSInProcessHUD.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSD388242B94FD8AC25B634C /* DSInProcessHUD.mm */; };
+		DSD0995349C46D887FAEB09E /* persistence_stub.m in Sources */ = {isa = PBXBuildFile; fileRef = DSB8752946F8F938B70355A6 /* persistence_stub.m */; };
+		DSA1CCDB4D9FC47C89696454 /* darksword.m in Sources */ = {isa = PBXBuildFile; fileRef = DS7709C29A58498BA5FDEEB4 /* darksword.m */; };
+		DS89F06621EABBAB73487869 /* offsets.m in Sources */ = {isa = PBXBuildFile; fileRef = DS0FD59AA27B1E85E0460251 /* offsets.m */; };
+		DS76050362023157AA4DFCC5 /* utils.m in Sources */ = {isa = PBXBuildFile; fileRef = DS3906A662B00B1537A76873 /* utils.m */; };
+		DSAC91F41CF5F5E012EA03DC /* vfs.m in Sources */ = {isa = PBXBuildFile; fileRef = DS46E229996AE84BC2481129 /* vfs.m */; };
+		DS25D17BFA9E9ADA13CB32B7 /* sbx.m in Sources */ = {isa = PBXBuildFile; fileRef = DS025C5F8CE3D0B0CDAC11EA /* sbx.m */; };
+		DSE1DFEF3BE7326AD0E0494C /* vnode.m in Sources */ = {isa = PBXBuildFile; fileRef = DS88795F4CEB0C0594BD685F /* vnode.m */; };
+		DSC7D4F2BFAE1C62672C6E7F /* DSInProcessHUD.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSD388242B94FD8AC25B634C /* DSInProcessHUD.mm */; };
+		DSEF139AF73C9CACD9591806 /* persistence_stub.m in Sources */ = {isa = PBXBuildFile; fileRef = DSB8752946F8F938B70355A6 /* persistence_stub.m */; };
+		DSB12E65EF7CF95432804F70 /* darksword.m in Sources */ = {isa = PBXBuildFile; fileRef = DS7709C29A58498BA5FDEEB4 /* darksword.m */; };
+		DSCB2B57E643D28B011998A6 /* offsets.m in Sources */ = {isa = PBXBuildFile; fileRef = DS0FD59AA27B1E85E0460251 /* offsets.m */; };
+		DS641331F3BD833AB01AE0E0 /* utils.m in Sources */ = {isa = PBXBuildFile; fileRef = DS3906A662B00B1537A76873 /* utils.m */; };
+		DS4F226A980404EE4505DC64 /* vfs.m in Sources */ = {isa = PBXBuildFile; fileRef = DS46E229996AE84BC2481129 /* vfs.m */; };
+		DS71A2CB3B2C052082A7B271 /* sbx.m in Sources */ = {isa = PBXBuildFile; fileRef = DS025C5F8CE3D0B0CDAC11EA /* sbx.m */; };
+		DSA87FCA18F17A9FCFB9C289 /* vnode.m in Sources */ = {isa = PBXBuildFile; fileRef = DS88795F4CEB0C0594BD685F /* vnode.m */; };
+		DSB100032B5BF5C6007235A6 /* DSBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSB100022B5BF5C6007235A6 /* DSBridge.mm */; };
+		DSB100042B5BF5C6007235A6 /* DSBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSB100022B5BF5C6007235A6 /* DSBridge.mm */; };
+		D52000000000000000000001 /* RemoteCall.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000001 /* RemoteCall.m */; };
+		D52000000000000000000002 /* exc.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000002 /* exc.m */; };
+		D52000000000000000000003 /* thread.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000003 /* thread.m */; };
+		D52000000000000000000004 /* vm.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000004 /* vm.m */; };
+		D52000000000000000000005 /* pac.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000005 /* pac.m */; };
+		D52000000000000000000006 /* findcachedataoff.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000006 /* findcachedataoff.m */; };
+		D53000000000000000000001 /* RemoteCall.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000001 /* RemoteCall.m */; };
+		D53000000000000000000002 /* exc.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000002 /* exc.m */; };
+		D53000000000000000000003 /* thread.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000003 /* thread.m */; };
+		D53000000000000000000004 /* vm.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000004 /* vm.m */; };
+		D53000000000000000000005 /* pac.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000005 /* pac.m */; };
+		D53000000000000000000006 /* findcachedataoff.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000006 /* findcachedataoff.m */; };
+		CC2A77302B6AADB400796650 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = CC2A772F2B6AADB400796650 /* Settings.bundle */; };
+		CC654E0F2DABD9C200D54F83 /* ActivateHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA8E2B654DC8001C7C9E /* ActivateHUDIntent.swift */; };
+		CC654E102DABD9C200D54F83 /* TSSettingsIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */; };
+		CC654E112DABD9C200D54F83 /* HUDHelper.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */; };
+		CC654E122DABD9C200D54F83 /* SPLarkPresentingAnimationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D312B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift */; };
+		CC654E132DABD9C200D54F83 /* SPLarkDismissingAnimationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D372B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift */; };
+		CC654E142DABD9C200D54F83 /* HUDBackdropView.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A22B616C18006E3280 /* HUDBackdropView.mm */; };
+		CC654E152DABD9C200D54F83 /* MainButton.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2E2B5BF5C6007235A6 /* MainButton.mm */; };
+		CC654E162DABD9C200D54F83 /* HiddenContainerRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3D2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift */; };
+		CC654E172DABD9C200D54F83 /* TSEventFetcher.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D472B5BF5C6007235A6 /* TSEventFetcher.mm */; };
+		CC654E182DABD9C200D54F83 /* UITouch-KIFAdditions.m in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2B2B5BF5C6007235A6 /* UITouch-KIFAdditions.m */; };
+		CC654E192DABD9C200D54F83 /* SPLarkSettingsCloseButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D302B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift */; };
+		CC654E1A2DABD9C200D54F83 /* HUDBackdropLabel.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC91309D2B616541006E3280 /* HUDBackdropLabel.mm */; };
+		CC654E1B2DABD9C200D54F83 /* SPLarkPresentationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D362B5BF5C6007235A6 /* SPLarkPresentationController.swift */; };
+		CC654E1C2DABD9C200D54F83 /* TSSettingsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D462B5BF5C6007235A6 /* TSSettingsController.swift */; };
+		CC654E1D2DABD9C200D54F83 /* HUDMainApplication.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D452B5BF5C6007235A6 /* HUDMainApplication.mm */; };
+		CC654E1E2DABD9C200D54F83 /* MainApplication.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D422B5BF5C6007235A6 /* MainApplication.mm */; };
+		CC654E1F2DABD9C200D54F83 /* ToggleHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA942B655183001C7C9E /* ToggleHUDIntent.swift */; };
+		CC654E202DABD9C200D54F83 /* RootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */; };
+		CC654E212DABD9C200D54F83 /* ScreenshotInvisibleContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3B2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift */; };
+		CC654E222DABD9C200D54F83 /* ScreenshotInvincibleContainerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3C2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift */; };
+		CC654E232DABD9C200D54F83 /* SPLarkController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D342B5BF5C6007235A6 /* SPLarkController.swift */; };
+		CC654E242DABD9C200D54F83 /* HUDApp.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D482B5BF5C6007235A6 /* HUDApp.mm */; };
+		CC654E252DABD9C200D54F83 /* IOHIDEvent+KIF.m in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2C2B5BF5C6007235A6 /* IOHIDEvent+KIF.m */; };
+		CC654E262DABD9C200D54F83 /* DeactivateHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA912B655156001C7C9E /* DeactivateHUDIntent.swift */; };
+		CC654E272DABD9C200D54F83 /* SPLarkSettingsCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D352B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift */; };
+		CC654E282DABD9C200D54F83 /* SPLarkSettingsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D332B5BF5C6007235A6 /* SPLarkSettingsController.swift */; };
+		CC654E292DABD9C200D54F83 /* SPLarkControllerExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D392B5BF5C6007235A6 /* SPLarkControllerExtension.swift */; };
+		CC654E2A2DABD9C200D54F83 /* MainApplicationDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D222B5BF5C6007235A6 /* MainApplicationDelegate.mm */; };
+		CC654E2B2DABD9C200D54F83 /* HUDRootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D442B5BF5C6007235A6 /* HUDRootViewController.mm */; };
+		CC654E2C2DABD9C200D54F83 /* HUDMainApplicationDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D272B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm */; };
+		CC654E2D2DABD9C200D54F83 /* SPLarkTransitioningDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D382B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift */; };
+		CC654E2E2DABD9C200D54F83 /* SPLarkSettingsCollectionViewCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D322B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift */; };
+		CC654E2F2DABD9C200D54F83 /* HUDMainWindow.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */; };
+		CC654E332DABD9C200D54F83 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC8DDA982B66318E001C7C9E /* AppIntents.framework */; settings = {ATTRIBUTES = (Required, ); }; };
+		CC654E362DABD9C200D54F83 /* BackBoardServices.Sim.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC654E072DABD95200D54F83 /* BackBoardServices.Sim.tbd */; };
+		CC654E372DABD9C200D54F83 /* IOKit.Sim.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC654E052DABD94A00D54F83 /* IOKit.Sim.tbd */; };
+		CC654E392DABD9C200D54F83 /* AssertionServices.Sim.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC654E032DABD94300D54F83 /* AssertionServices.Sim.tbd */; };
+		CC654E3A2DABD9C200D54F83 /* GraphicsServices.Sim.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC654E092DABD95800D54F83 /* GraphicsServices.Sim.tbd */; };
+		CC654E3B2DABD9C200D54F83 /* SpringBoardServices.Sim.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC654E0B2DABD95E00D54F83 /* SpringBoardServices.Sim.tbd */; };
+		CC654E3D2DABD9C200D54F83 /* icon.png in Resources */ = {isa = PBXBuildFile; fileRef = CC711D922B5BFE66007235A6 /* icon.png */; };
+		CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */; };
+		CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */ = {isa = PBXBuildFile; fileRef = CC2A772F2B6AADB400796650 /* Settings.bundle */; };
+		CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D872B5BFCC4007235A6 /* Localizable.strings */; };
+		CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
+		CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CC711D102B5BF551007235A6 /* Assets.xcassets */; };
+		CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */; };
+		CC711D4B2B5BF5C6007235A6 /* RootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */; };
+		CC711D4C2B5BF5C6007235A6 /* HUDMainWindow.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */; };
+		CC711D4D2B5BF5C6007235A6 /* MainApplicationDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D222B5BF5C6007235A6 /* MainApplicationDelegate.mm */; };
+		CC711D4E2B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D272B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm */; };
+		CC711D4F2B5BF5C6007235A6 /* UITouch-KIFAdditions.m in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2B2B5BF5C6007235A6 /* UITouch-KIFAdditions.m */; };
+		CC711D502B5BF5C6007235A6 /* IOHIDEvent+KIF.m in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2C2B5BF5C6007235A6 /* IOHIDEvent+KIF.m */; };
+		CC711D512B5BF5C6007235A6 /* MainButton.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D2E2B5BF5C6007235A6 /* MainButton.mm */; };
+		CC711D522B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D302B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift */; };
+		CC711D532B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D312B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift */; };
+		CC711D542B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D322B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift */; };
+		CC711D552B5BF5C6007235A6 /* SPLarkSettingsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D332B5BF5C6007235A6 /* SPLarkSettingsController.swift */; };
+		CC711D562B5BF5C6007235A6 /* SPLarkController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D342B5BF5C6007235A6 /* SPLarkController.swift */; };
+		CC711D572B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D352B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift */; };
+		CC711D582B5BF5C6007235A6 /* SPLarkPresentationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D362B5BF5C6007235A6 /* SPLarkPresentationController.swift */; };
+		CC711D592B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D372B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift */; };
+		CC711D5A2B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D382B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift */; };
+		CC711D5B2B5BF5C6007235A6 /* SPLarkControllerExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D392B5BF5C6007235A6 /* SPLarkControllerExtension.swift */; };
+		CC711D5C2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3B2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift */; };
+		CC711D5D2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3C2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift */; };
+		CC711D5E2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D3D2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift */; };
+		CC711D5F2B5BF5C6007235A6 /* MainApplication.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D422B5BF5C6007235A6 /* MainApplication.mm */; };
+		CC711D602B5BF5C6007235A6 /* HUDRootViewController.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D442B5BF5C6007235A6 /* HUDRootViewController.mm */; };
+		CC711D612B5BF5C6007235A6 /* HUDMainApplication.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D452B5BF5C6007235A6 /* HUDMainApplication.mm */; };
+		CC711D622B5BF5C6007235A6 /* TSSettingsController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC711D462B5BF5C6007235A6 /* TSSettingsController.swift */; };
+		CC711D632B5BF5C6007235A6 /* TSEventFetcher.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D472B5BF5C6007235A6 /* TSEventFetcher.mm */; };
+		CC711D642B5BF5C6007235A6 /* HUDApp.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC711D482B5BF5C6007235A6 /* HUDApp.mm */; };
+		CC711D852B5BFCC4007235A6 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D872B5BFCC4007235A6 /* Localizable.strings */; };
+		CC711D8C2B5BFD50007235A6 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */; };
+		CC711D932B5BFE6A007235A6 /* icon.png in Resources */ = {isa = PBXBuildFile; fileRef = CC711D922B5BFE66007235A6 /* icon.png */; };
+		CC711D982B5BFF2F007235A6 /* GraphicsServices.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC711D952B5BFF2F007235A6 /* GraphicsServices.tbd */; };
+		CC711D992B5BFF2F007235A6 /* SpringBoardServices.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC711D962B5BFF2F007235A6 /* SpringBoardServices.tbd */; };
+		CC711D9A2B5BFF2F007235A6 /* BackBoardServices.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC711D972B5BFF2F007235A6 /* BackBoardServices.tbd */; };
+		CC711D9C2B5C0032007235A6 /* IOKit.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC711D9B2B5C0032007235A6 /* IOKit.tbd */; };
+		CC711D9E2B5C0081007235A6 /* AssertionServices.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = CC711D9D2B5C0081007235A6 /* AssertionServices.tbd */; };
+		CC8DDA8F2B654DC8001C7C9E /* ActivateHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA8E2B654DC8001C7C9E /* ActivateHUDIntent.swift */; };
+		CC8DDA922B655156001C7C9E /* DeactivateHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA912B655156001C7C9E /* DeactivateHUDIntent.swift */; };
+		CC8DDA952B6551C7001C7C9E /* ToggleHUDIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC8DDA942B655183001C7C9E /* ToggleHUDIntent.swift */; };
+		CC8DDA9A2B6631DC001C7C9E /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CC8DDA982B66318E001C7C9E /* AppIntents.framework */; settings = {ATTRIBUTES = (Required, ); }; };
+		DSAVFOUNDATION00000000000002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DSAVFOUNDATION00000000000001 /* AVFoundation.framework */; };
+		CC91309E2B616541006E3280 /* HUDBackdropLabel.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC91309D2B616541006E3280 /* HUDBackdropLabel.mm */; };
+		CC9130A32B616C18006E3280 /* HUDBackdropView.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A22B616C18006E3280 /* HUDBackdropView.mm */; };
+		CC9130A72B62A33A006E3280 /* TSSettingsIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		DS3A0647113D290CFB5F7D9F /* libxpf.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libxpf.dylib; path = Vendor/darksword-lib-thin/libxpf.dylib; sourceTree = SOURCE_ROOT; };
+		DS02D856F5C47EF0755250DA /* libgrabkernel2.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libgrabkernel2.dylib; path = Vendor/darksword-lib-thin/libgrabkernel2.dylib; sourceTree = SOURCE_ROOT; };
+		DS5DD4BDAA87258C38A20CEA /* DSInProcessHUD.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = DSInProcessHUD.h; path = darksword/DSInProcessHUD.h; sourceTree = SOURCE_ROOT; };
+		DSD388242B94FD8AC25B634C /* DSInProcessHUD.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = DSInProcessHUD.mm; path = darksword/DSInProcessHUD.mm; sourceTree = SOURCE_ROOT; };
+		DSB8752946F8F938B70355A6 /* persistence_stub.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = persistence_stub.m; path = darksword/stubs/persistence_stub.m; sourceTree = SOURCE_ROOT; };
+		DS7709C29A58498BA5FDEEB4 /* darksword.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = darksword.m; path = Vendor/darksword-kexploit/darksword.m; sourceTree = SOURCE_ROOT; };
+		DS0FD59AA27B1E85E0460251 /* offsets.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = offsets.m; path = Vendor/darksword-kexploit/offsets.m; sourceTree = SOURCE_ROOT; };
+		DS3906A662B00B1537A76873 /* utils.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = utils.m; path = Vendor/darksword-kexploit/utils.m; sourceTree = SOURCE_ROOT; };
+		DS46E229996AE84BC2481129 /* vfs.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = vfs.m; path = Vendor/darksword-kexploit/pe/vfs.m; sourceTree = SOURCE_ROOT; };
+		DS025C5F8CE3D0B0CDAC11EA /* sbx.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = sbx.m; path = Vendor/darksword-kexploit/pe/sbx.m; sourceTree = SOURCE_ROOT; };
+		DS88795F4CEB0C0594BD685F /* vnode.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = vnode.m; path = Vendor/darksword-kexploit/pe/vnode.m; sourceTree = SOURCE_ROOT; };
+		DSB100012B5BF5C6007235A6 /* DSBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = DSBridge.h; path = darksword/DSBridge.h; sourceTree = SOURCE_ROOT; };
+		DSB100022B5BF5C6007235A6 /* DSBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = DSBridge.mm; path = darksword/DSBridge.mm; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000001 /* RemoteCall.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = RemoteCall.m; path = Vendor/darksword-kexploit/TaskRop/RemoteCall.m; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000002 /* exc.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = exc.m; path = Vendor/darksword-kexploit/TaskRop/exc.m; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000003 /* thread.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = thread.m; path = Vendor/darksword-kexploit/TaskRop/thread.m; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000004 /* vm.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = vm.m; path = Vendor/darksword-kexploit/TaskRop/vm.m; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000005 /* pac.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = pac.m; path = Vendor/darksword-kexploit/TaskRop/pac.m; sourceTree = SOURCE_ROOT; };
+		D51000000000000000000006 /* findcachedataoff.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = findcachedataoff.m; path = Vendor/darksword-kexploit/TaskRop/findcachedataoff.m; sourceTree = SOURCE_ROOT; };
+		0F43B7702B60D397003A435D /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = ../Resources/es.lproj/Localizable.strings; sourceTree = "<group>"; };
+		0F43B7712B60D397003A435D /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = ../Resources/es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		CC2A772F2B6AADB400796650 /* Settings.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; name = Settings.bundle; path = Resources/Settings.bundle; sourceTree = SOURCE_ROOT; };
+		CC654E032DABD94300D54F83 /* AssertionServices.Sim.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = AssertionServices.Sim.tbd; sourceTree = "<group>"; };
+		CC654E052DABD94A00D54F83 /* IOKit.Sim.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = IOKit.Sim.tbd; sourceTree = "<group>"; };
+		CC654E072DABD95200D54F83 /* BackBoardServices.Sim.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = BackBoardServices.Sim.tbd; sourceTree = "<group>"; };
+		CC654E092DABD95800D54F83 /* GraphicsServices.Sim.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = GraphicsServices.Sim.tbd; sourceTree = "<group>"; };
+		CC654E0B2DABD95E00D54F83 /* SpringBoardServices.Sim.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = SpringBoardServices.Sim.tbd; sourceTree = "<group>"; };
+		CC654E452DABD9C200D54F83 /* DarkSpeed.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DarkSpeed.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC711D012B5BF550007235A6 /* DarkSpeed.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DarkSpeed.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CC711D102B5BF551007235A6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDHelper.mm; sourceTree = "<group>"; };
+		CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = RootViewController.mm; sourceTree = "<group>"; };
+		CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDMainWindow.mm; sourceTree = "<group>"; };
+		CC711D212B5BF5C6007235A6 /* HUDPresetPosition.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDPresetPosition.h; sourceTree = "<group>"; };
+		CC711D222B5BF5C6007235A6 /* MainApplicationDelegate.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MainApplicationDelegate.mm; sourceTree = "<group>"; };
+		CC711D232B5BF5C6007235A6 /* TSEventFetcher.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TSEventFetcher.h; sourceTree = "<group>"; };
+		CC711D242B5BF5C6007235A6 /* MainApplication.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MainApplication.h; sourceTree = "<group>"; };
+		CC711D252B5BF5C6007235A6 /* HUDRootViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDRootViewController.h; sourceTree = "<group>"; };
+		CC711D262B5BF5C6007235A6 /* MainApplicationDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MainApplicationDelegate.h; sourceTree = "<group>"; };
+		CC711D272B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDMainApplicationDelegate.mm; sourceTree = "<group>"; };
+		CC711D282B5BF5C6007235A6 /* HUDMainApplication.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDMainApplication.h; sourceTree = "<group>"; };
+		CC711D2A2B5BF5C6007235A6 /* IOHIDEvent+KIF.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "IOHIDEvent+KIF.h"; sourceTree = "<group>"; };
+		CC711D2B2B5BF5C6007235A6 /* UITouch-KIFAdditions.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "UITouch-KIFAdditions.m"; sourceTree = "<group>"; };
+		CC711D2C2B5BF5C6007235A6 /* IOHIDEvent+KIF.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "IOHIDEvent+KIF.m"; sourceTree = "<group>"; };
+		CC711D2D2B5BF5C6007235A6 /* UITouch-KIFAdditions.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UITouch-KIFAdditions.h"; sourceTree = "<group>"; };
+		CC711D2E2B5BF5C6007235A6 /* MainButton.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MainButton.mm; sourceTree = "<group>"; };
+		CC711D302B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkSettingsCloseButton.swift; sourceTree = "<group>"; };
+		CC711D312B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkPresentingAnimationController.swift; sourceTree = "<group>"; };
+		CC711D322B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkSettingsCollectionViewCell.swift; sourceTree = "<group>"; };
+		CC711D332B5BF5C6007235A6 /* SPLarkSettingsController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkSettingsController.swift; sourceTree = "<group>"; };
+		CC711D342B5BF5C6007235A6 /* SPLarkController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkController.swift; sourceTree = "<group>"; };
+		CC711D352B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkSettingsCollectionView.swift; sourceTree = "<group>"; };
+		CC711D362B5BF5C6007235A6 /* SPLarkPresentationController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkPresentationController.swift; sourceTree = "<group>"; };
+		CC711D372B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkDismissingAnimationController.swift; sourceTree = "<group>"; };
+		CC711D382B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkTransitioningDelegate.swift; sourceTree = "<group>"; };
+		CC711D392B5BF5C6007235A6 /* SPLarkControllerExtension.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SPLarkControllerExtension.swift; sourceTree = "<group>"; };
+		CC711D3B2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScreenshotInvisibleContainer.swift; sourceTree = "<group>"; };
+		CC711D3C2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScreenshotInvincibleContainerProtocol.swift; sourceTree = "<group>"; };
+		CC711D3D2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HiddenContainerRecognizer.swift; sourceTree = "<group>"; };
+		CC711D3E2B5BF5C6007235A6 /* RootViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RootViewController.h; sourceTree = "<group>"; };
+		CC711D3F2B5BF5C6007235A6 /* JetsamHelper.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = JetsamHelper.h; sourceTree = "<group>"; };
+		CC711D402B5BF5C6007235A6 /* HUDMainApplicationDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDMainApplicationDelegate.h; sourceTree = "<group>"; };
+		CC711D412B5BF5C6007235A6 /* HUDMainWindow.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDMainWindow.h; sourceTree = "<group>"; };
+		CC711D422B5BF5C6007235A6 /* MainApplication.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MainApplication.mm; sourceTree = "<group>"; };
+		CC711D432B5BF5C6007235A6 /* HUDHelper.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HUDHelper.h; sourceTree = "<group>"; };
+		CC711D442B5BF5C6007235A6 /* HUDRootViewController.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDRootViewController.mm; sourceTree = "<group>"; };
+		CC711D452B5BF5C6007235A6 /* HUDMainApplication.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDMainApplication.mm; sourceTree = "<group>"; };
+		CC711D462B5BF5C6007235A6 /* TSSettingsController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TSSettingsController.swift; sourceTree = "<group>"; };
+		CC711D472B5BF5C6007235A6 /* TSEventFetcher.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = TSEventFetcher.mm; sourceTree = "<group>"; };
+		CC711D482B5BF5C6007235A6 /* HUDApp.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDApp.mm; sourceTree = "<group>"; };
+		CC711D492B5BF5C6007235A6 /* MainButton.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MainButton.h; sourceTree = "<group>"; };
+		CC711D662B5BF6B7007235A6 /* UIApplicationRotationFollowingControllerNoTouches.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIApplicationRotationFollowingControllerNoTouches.h; sourceTree = "<group>"; };
+		CC711D672B5BF6B7007235A6 /* UITouch+Private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UITouch+Private.h"; sourceTree = "<group>"; };
+		CC711D682B5BF6B7007235A6 /* UIApplicationRotationFollowingController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIApplicationRotationFollowingController.h; sourceTree = "<group>"; };
+		CC711D692B5BF6B7007235A6 /* UIApplication+Private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UIApplication+Private.h"; sourceTree = "<group>"; };
+		CC711D6A2B5BF6B7007235A6 /* FBSOrientationUpdate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FBSOrientationUpdate.h; sourceTree = "<group>"; };
+		CC711D6B2B5BF6B7007235A6 /* LSApplicationProxy.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LSApplicationProxy.h; sourceTree = "<group>"; };
+		CC711D6C2B5BF6B7007235A6 /* libproc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = libproc.h; sourceTree = "<group>"; };
+		CC711D6D2B5BF6B7007235A6 /* AXEventHandInfoRepresentation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AXEventHandInfoRepresentation.h; sourceTree = "<group>"; };
+		CC711D6E2B5BF6B7007235A6 /* UIApplicationRotationFollowingWindow.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIApplicationRotationFollowingWindow.h; sourceTree = "<group>"; };
+		CC711D6F2B5BF6B7007235A6 /* SpringBoardServices.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SpringBoardServices.h; sourceTree = "<group>"; };
+		CC711D702B5BF6B7007235A6 /* pac_helper.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = pac_helper.h; sourceTree = "<group>"; };
+		CC711D712B5BF6B7007235A6 /* AXEventPathInfoRepresentation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AXEventPathInfoRepresentation.h; sourceTree = "<group>"; };
+		CC711D722B5BF6B7007235A6 /* SBSAccessibilityWindowHostingController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SBSAccessibilityWindowHostingController.h; sourceTree = "<group>"; };
+		CC711D732B5BF6B7007235A6 /* UIEventFetcher.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIEventFetcher.h; sourceTree = "<group>"; };
+		CC711D742B5BF6B7007235A6 /* BackboardServices.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = BackboardServices.h; sourceTree = "<group>"; };
+		CC711D752B5BF6B7007235A6 /* kern_memorystatus.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = kern_memorystatus.h; sourceTree = "<group>"; };
+		CC711D762B5BF6B7007235A6 /* LSApplicationWorkspace.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LSApplicationWorkspace.h; sourceTree = "<group>"; };
+		CC711D772B5BF6B7007235A6 /* UIAutoRotatingWindow.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIAutoRotatingWindow.h; sourceTree = "<group>"; };
+		CC711D782B5BF6B7007235A6 /* UIEvent+Private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UIEvent+Private.h"; sourceTree = "<group>"; };
+		CC711D792B5BF6B7007235A6 /* AXEventRepresentation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AXEventRepresentation.h; sourceTree = "<group>"; };
+		CC711D7A2B5BF6B7007235A6 /* IOKit+SPI.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "IOKit+SPI.h"; sourceTree = "<group>"; };
+		CC711D7B2B5BF6B7007235A6 /* UIWindow+Private.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UIWindow+Private.h"; sourceTree = "<group>"; };
+		CC711D7C2B5BF6B7007235A6 /* FBSOrientationObserver.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FBSOrientationObserver.h; sourceTree = "<group>"; };
+		CC711D7D2B5BF6B7007235A6 /* UIEventDispatcher.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UIEventDispatcher.h; sourceTree = "<group>"; };
+		CC711D7E2B5BF772007235A6 /* hudapp-prefix.pch */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "hudapp-prefix.pch"; sourceTree = "<group>"; };
+		CC711D7F2B5BF772007235A6 /* entitlements.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = entitlements.plist; sourceTree = "<group>"; };
+		CC711D812B5BFA64007235A6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; name = Info.plist; path = Resources/Info.plist; sourceTree = SOURCE_ROOT; };
+		CC711D862B5BFCC4007235A6 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = Resources/en.lproj/Localizable.strings; sourceTree = SOURCE_ROOT; };
+		CC711D892B5BFCE0007235A6 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "Resources/zh-Hans.lproj/Localizable.strings"; sourceTree = SOURCE_ROOT; };
+		CC711D8D2B5BFD50007235A6 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = Resources/en.lproj/InfoPlist.strings; sourceTree = SOURCE_ROOT; };
+		CC711D8F2B5BFD51007235A6 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "Resources/zh-Hans.lproj/InfoPlist.strings"; sourceTree = SOURCE_ROOT; };
+		CC711D922B5BFE66007235A6 /* icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; name = icon.png; path = Resources/icon.png; sourceTree = SOURCE_ROOT; };
+		CC711D952B5BFF2F007235A6 /* GraphicsServices.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = GraphicsServices.tbd; sourceTree = "<group>"; };
+		CC711D962B5BFF2F007235A6 /* SpringBoardServices.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = SpringBoardServices.tbd; sourceTree = "<group>"; };
+		CC711D972B5BFF2F007235A6 /* BackBoardServices.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = BackBoardServices.tbd; sourceTree = "<group>"; };
+		CC711D9B2B5C0032007235A6 /* IOKit.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = IOKit.tbd; sourceTree = "<group>"; };
+		CC711D9D2B5C0081007235A6 /* AssertionServices.tbd */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = "sourcecode.text-based-dylib-definition"; path = AssertionServices.tbd; sourceTree = "<group>"; };
+		CC8DDA8E2B654DC8001C7C9E /* ActivateHUDIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivateHUDIntent.swift; sourceTree = "<group>"; };
+		CC8DDA912B655156001C7C9E /* DeactivateHUDIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeactivateHUDIntent.swift; sourceTree = "<group>"; };
+		CC8DDA942B655183001C7C9E /* ToggleHUDIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToggleHUDIntent.swift; sourceTree = "<group>"; };
+		CC8DDA982B66318E001C7C9E /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
+		DSAVFOUNDATION00000000000001 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		CC91309C2B616541006E3280 /* HUDBackdropLabel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HUDBackdropLabel.h; sourceTree = "<group>"; };
+		CC91309D2B616541006E3280 /* HUDBackdropLabel.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDBackdropLabel.mm; sourceTree = "<group>"; };
+		CC9130A02B616BBF006E3280 /* CAFilter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CAFilter.h; sourceTree = "<group>"; };
+		CC9130A12B616C18006E3280 /* HUDBackdropView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = HUDBackdropView.h; sourceTree = "<group>"; };
+		CC9130A22B616C18006E3280 /* HUDBackdropView.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = HUDBackdropView.mm; sourceTree = "<group>"; };
+		CC9130A52B62A262006E3280 /* hudapp-bridging-header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "hudapp-bridging-header.h"; sourceTree = "<group>"; };
+		CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSSettingsIndex.swift; sourceTree = "<group>"; };
+		CCB6B6FA2B5C06DD00AD2A89 /* NSUserDefaults+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NSUserDefaults+Private.h"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		CC654E302DABD9C200D54F83 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC654E332DABD9C200D54F83 /* AppIntents.framework in Frameworks */,
+				CC654E362DABD9C200D54F83 /* BackBoardServices.Sim.tbd in Frameworks */,
+				CC654E372DABD9C200D54F83 /* IOKit.Sim.tbd in Frameworks */,
+				CC654E392DABD9C200D54F83 /* AssertionServices.Sim.tbd in Frameworks */,
+				CC654E3A2DABD9C200D54F83 /* GraphicsServices.Sim.tbd in Frameworks */,
+				CC654E3B2DABD9C200D54F83 /* SpringBoardServices.Sim.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC711CFE2B5BF550007235A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC711D992B5BFF2F007235A6 /* SpringBoardServices.tbd in Frameworks */,
+				CC711D9E2B5C0081007235A6 /* AssertionServices.tbd in Frameworks */,
+				DSE5E89FE25688FD3B972ED4 /* libxpf.dylib in Frameworks */,
+				DSDF9FC129B4EF9BBE225879 /* libgrabkernel2.dylib in Frameworks */,
+				CC8DDA9A2B6631DC001C7C9E /* AppIntents.framework in Frameworks */,
+				DSAVFOUNDATION00000000000002 /* AVFoundation.framework in Frameworks */,
+				CC711D9C2B5C0032007235A6 /* IOKit.tbd in Frameworks */,
+				CC711D9A2B5BFF2F007235A6 /* BackBoardServices.tbd in Frameworks */,
+				CC711D982B5BFF2F007235A6 /* GraphicsServices.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		DSB100052B5BF5C6007235A6 /* darksword */ = {
+			isa = PBXGroup;
+			children = (
+				DSB100012B5BF5C6007235A6 /* DSBridge.h */,
+				DSB100022B5BF5C6007235A6 /* DSBridge.mm */,
+				D51000000000000000000001 /* RemoteCall.m */,
+				D51000000000000000000002 /* exc.m */,
+				D51000000000000000000003 /* thread.m */,
+				D51000000000000000000004 /* vm.m */,
+				D51000000000000000000005 /* pac.m */,
+				D51000000000000000000006 /* findcachedataoff.m */,
+				DS5DD4BDAA87258C38A20CEA /* DSInProcessHUD.h */,
+				DSD388242B94FD8AC25B634C /* DSInProcessHUD.mm */,
+				DSB8752946F8F938B70355A6 /* persistence_stub.m */,
+				DS7709C29A58498BA5FDEEB4 /* darksword.m */,
+				DS0FD59AA27B1E85E0460251 /* offsets.m */,
+				DS3906A662B00B1537A76873 /* utils.m */,
+				DS46E229996AE84BC2481129 /* vfs.m */,
+				DS025C5F8CE3D0B0CDAC11EA /* sbx.m */,
+				DS88795F4CEB0C0594BD685F /* vnode.m */,
+			);
+			path = darksword;
+			sourceTree = "<group>";
+		};
+		CC711CF82B5BF550007235A6 = {
+			isa = PBXGroup;
+			children = (
+				CC711D022B5BF550007235A6 /* Products */,
+				CC711D652B5BF6B7007235A6 /* headers */,
+				CC711D942B5BFE9F007235A6 /* libraries */,
+				CC711D032B5BF550007235A6 /* supports */,
+				DSB100052B5BF5C6007235A6 /* darksword */,
+				CC711D1D2B5BF5C6007235A6 /* sources */,
+				CC8DDA972B66318E001C7C9E /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		CC711D022B5BF550007235A6 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D012B5BF550007235A6 /* DarkSpeed.app */,
+				CC654E452DABD9C200D54F83 /* DarkSpeed.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CC711D032B5BF550007235A6 /* supports */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D102B5BF551007235A6 /* Assets.xcassets */,
+				CC711D922B5BFE66007235A6 /* icon.png */,
+				CC711D7F2B5BF772007235A6 /* entitlements.plist */,
+				CC711D7E2B5BF772007235A6 /* hudapp-prefix.pch */,
+				CC9130A52B62A262006E3280 /* hudapp-bridging-header.h */,
+				CC711D812B5BFA64007235A6 /* Info.plist */,
+				CC2A772F2B6AADB400796650 /* Settings.bundle */,
+				CC711D872B5BFCC4007235A6 /* Localizable.strings */,
+				CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */,
+			);
+			path = supports;
+			sourceTree = "<group>";
+		};
+		CC711D1D2B5BF5C6007235A6 /* sources */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D292B5BF5C6007235A6 /* KIF */,
+				CC711D3A2B5BF5C6007235A6 /* SnapshotSafeView */,
+				CC711D2F2B5BF5C6007235A6 /* SPLarkController */,
+				CC8DDA8D2B654D7D001C7C9E /* Intents */,
+				CC711D3F2B5BF5C6007235A6 /* JetsamHelper.h */,
+				CC711D212B5BF5C6007235A6 /* HUDPresetPosition.h */,
+				CC711D482B5BF5C6007235A6 /* HUDApp.mm */,
+				CC711D432B5BF5C6007235A6 /* HUDHelper.h */,
+				CC711D1E2B5BF5C6007235A6 /* HUDHelper.mm */,
+				CC711D282B5BF5C6007235A6 /* HUDMainApplication.h */,
+				CC711D452B5BF5C6007235A6 /* HUDMainApplication.mm */,
+				CC711D402B5BF5C6007235A6 /* HUDMainApplicationDelegate.h */,
+				CC711D272B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm */,
+				CC711D412B5BF5C6007235A6 /* HUDMainWindow.h */,
+				CC711D202B5BF5C6007235A6 /* HUDMainWindow.mm */,
+				CC711D252B5BF5C6007235A6 /* HUDRootViewController.h */,
+				CC711D442B5BF5C6007235A6 /* HUDRootViewController.mm */,
+				CC9130A12B616C18006E3280 /* HUDBackdropView.h */,
+				CC9130A22B616C18006E3280 /* HUDBackdropView.mm */,
+				CC91309C2B616541006E3280 /* HUDBackdropLabel.h */,
+				CC91309D2B616541006E3280 /* HUDBackdropLabel.mm */,
+				CC711D242B5BF5C6007235A6 /* MainApplication.h */,
+				CC711D422B5BF5C6007235A6 /* MainApplication.mm */,
+				CC711D262B5BF5C6007235A6 /* MainApplicationDelegate.h */,
+				CC711D222B5BF5C6007235A6 /* MainApplicationDelegate.mm */,
+				CC711D492B5BF5C6007235A6 /* MainButton.h */,
+				CC711D2E2B5BF5C6007235A6 /* MainButton.mm */,
+				CC711D3E2B5BF5C6007235A6 /* RootViewController.h */,
+				CC711D1F2B5BF5C6007235A6 /* RootViewController.mm */,
+				CC711D232B5BF5C6007235A6 /* TSEventFetcher.h */,
+				CC711D472B5BF5C6007235A6 /* TSEventFetcher.mm */,
+				CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */,
+				CC711D462B5BF5C6007235A6 /* TSSettingsController.swift */,
+			);
+			path = sources;
+			sourceTree = "<group>";
+		};
+		CC711D292B5BF5C6007235A6 /* KIF */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D2A2B5BF5C6007235A6 /* IOHIDEvent+KIF.h */,
+				CC711D2C2B5BF5C6007235A6 /* IOHIDEvent+KIF.m */,
+				CC711D2D2B5BF5C6007235A6 /* UITouch-KIFAdditions.h */,
+				CC711D2B2B5BF5C6007235A6 /* UITouch-KIFAdditions.m */,
+			);
+			path = KIF;
+			sourceTree = "<group>";
+		};
+		CC711D2F2B5BF5C6007235A6 /* SPLarkController */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D342B5BF5C6007235A6 /* SPLarkController.swift */,
+				CC711D392B5BF5C6007235A6 /* SPLarkControllerExtension.swift */,
+				CC711D372B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift */,
+				CC711D362B5BF5C6007235A6 /* SPLarkPresentationController.swift */,
+				CC711D312B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift */,
+				CC711D302B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift */,
+				CC711D352B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift */,
+				CC711D322B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift */,
+				CC711D332B5BF5C6007235A6 /* SPLarkSettingsController.swift */,
+				CC711D382B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift */,
+			);
+			path = SPLarkController;
+			sourceTree = "<group>";
+		};
+		CC711D3A2B5BF5C6007235A6 /* SnapshotSafeView */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D3D2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift */,
+				CC711D3C2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift */,
+				CC711D3B2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift */,
+			);
+			path = SnapshotSafeView;
+			sourceTree = "<group>";
+		};
+		CC711D652B5BF6B7007235A6 /* headers */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D6D2B5BF6B7007235A6 /* AXEventHandInfoRepresentation.h */,
+				CC711D712B5BF6B7007235A6 /* AXEventPathInfoRepresentation.h */,
+				CC711D792B5BF6B7007235A6 /* AXEventRepresentation.h */,
+				CC711D742B5BF6B7007235A6 /* BackboardServices.h */,
+				CC711D7C2B5BF6B7007235A6 /* FBSOrientationObserver.h */,
+				CC711D6A2B5BF6B7007235A6 /* FBSOrientationUpdate.h */,
+				CC711D7A2B5BF6B7007235A6 /* IOKit+SPI.h */,
+				CC711D752B5BF6B7007235A6 /* kern_memorystatus.h */,
+				CC711D6C2B5BF6B7007235A6 /* libproc.h */,
+				CC711D6B2B5BF6B7007235A6 /* LSApplicationProxy.h */,
+				CC711D762B5BF6B7007235A6 /* LSApplicationWorkspace.h */,
+				CCB6B6FA2B5C06DD00AD2A89 /* NSUserDefaults+Private.h */,
+				CC711D702B5BF6B7007235A6 /* pac_helper.h */,
+				CC711D722B5BF6B7007235A6 /* SBSAccessibilityWindowHostingController.h */,
+				CC711D6F2B5BF6B7007235A6 /* SpringBoardServices.h */,
+				CC711D692B5BF6B7007235A6 /* UIApplication+Private.h */,
+				CC711D682B5BF6B7007235A6 /* UIApplicationRotationFollowingController.h */,
+				CC711D662B5BF6B7007235A6 /* UIApplicationRotationFollowingControllerNoTouches.h */,
+				CC711D6E2B5BF6B7007235A6 /* UIApplicationRotationFollowingWindow.h */,
+				CC711D772B5BF6B7007235A6 /* UIAutoRotatingWindow.h */,
+				CC711D782B5BF6B7007235A6 /* UIEvent+Private.h */,
+				CC711D7D2B5BF6B7007235A6 /* UIEventDispatcher.h */,
+				CC711D732B5BF6B7007235A6 /* UIEventFetcher.h */,
+				CC711D672B5BF6B7007235A6 /* UITouch+Private.h */,
+				CC711D7B2B5BF6B7007235A6 /* UIWindow+Private.h */,
+				CC9130A02B616BBF006E3280 /* CAFilter.h */,
+			);
+			path = headers;
+			sourceTree = "<group>";
+		};
+		CC711D942B5BFE9F007235A6 /* libraries */ = {
+			isa = PBXGroup;
+			children = (
+				CC711D9D2B5C0081007235A6 /* AssertionServices.tbd */,
+				CC654E032DABD94300D54F83 /* AssertionServices.Sim.tbd */,
+				CC711D972B5BFF2F007235A6 /* BackBoardServices.tbd */,
+				CC654E072DABD95200D54F83 /* BackBoardServices.Sim.tbd */,
+				CC711D952B5BFF2F007235A6 /* GraphicsServices.tbd */,
+				CC654E092DABD95800D54F83 /* GraphicsServices.Sim.tbd */,
+				CC711D9B2B5C0032007235A6 /* IOKit.tbd */,
+				CC654E052DABD94A00D54F83 /* IOKit.Sim.tbd */,
+				CC711D962B5BFF2F007235A6 /* SpringBoardServices.tbd */,
+				CC654E0B2DABD95E00D54F83 /* SpringBoardServices.Sim.tbd */,
+			);
+			path = libraries;
+			sourceTree = "<group>";
+		};
+		CC8DDA8D2B654D7D001C7C9E /* Intents */ = {
+			isa = PBXGroup;
+			children = (
+				CC8DDA942B655183001C7C9E /* ToggleHUDIntent.swift */,
+				CC8DDA8E2B654DC8001C7C9E /* ActivateHUDIntent.swift */,
+				CC8DDA912B655156001C7C9E /* DeactivateHUDIntent.swift */,
+			);
+			path = Intents;
+			sourceTree = "<group>";
+		};
+		CC8DDA972B66318E001C7C9E /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				CC8DDA982B66318E001C7C9E /* AppIntents.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		CC654E0D2DABD9C200D54F83 /* DarkSpeed.Sim */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC654E422DABD9C200D54F83 /* Build configuration list for PBXNativeTarget "DarkSpeed.Sim" */;
+			buildPhases = (
+				CC654E0E2DABD9C200D54F83 /* Sources */,
+				CC654E302DABD9C200D54F83 /* Frameworks */,
+				CC654E3C2DABD9C200D54F83 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DarkSpeed.Sim;
+			productName = DarkSpeed;
+			productReference = CC654E452DABD9C200D54F83 /* DarkSpeed.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CC711D002B5BF550007235A6 /* DarkSpeed */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CC711D1A2B5BF551007235A6 /* Build configuration list for PBXNativeTarget "DarkSpeed" */;
+			buildPhases = (
+				CC711CFD2B5BF550007235A6 /* Sources */,
+				CC711CFE2B5BF550007235A6 /* Frameworks */,
+				CC711CFF2B5BF550007235A6 /* Resources */,
+				DSF10002EMBEDDARKSWORDDYLIBS00 /* Embed DarkSword dylibs */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DarkSpeed;
+			productName = DarkSpeed;
+			productReference = CC711D012B5BF550007235A6 /* DarkSpeed.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CC711CF92B5BF550007235A6 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 1520;
+				TargetAttributes = {
+					CC711D002B5BF550007235A6 = {
+						CreatedOnToolsVersion = 15.1;
+					};
+				};
+			};
+			buildConfigurationList = CC711CFC2B5BF550007235A6 /* Build configuration list for PBXProject "DarkSpeed" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				"zh-Hans",
+				es,
+			);
+			mainGroup = CC711CF82B5BF550007235A6;
+			productRefGroup = CC711D022B5BF550007235A6 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CC711D002B5BF550007235A6 /* DarkSpeed */,
+				CC654E0D2DABD9C200D54F83 /* DarkSpeed.Sim */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CC654E3C2DABD9C200D54F83 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC654E3D2DABD9C200D54F83 /* icon.png in Resources */,
+				CC654E3E2DABD9C200D54F83 /* InfoPlist.strings in Resources */,
+				CC654E3F2DABD9C200D54F83 /* Settings.bundle in Resources */,
+				CC654E402DABD9C200D54F83 /* Localizable.strings in Resources */,
+				CC654E412DABD9C200D54F83 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC711CFF2B5BF550007235A6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC711D932B5BFE6A007235A6 /* icon.png in Resources */,
+				CC711D8C2B5BFD50007235A6 /* InfoPlist.strings in Resources */,
+				CC2A77302B6AADB400796650 /* Settings.bundle in Resources */,
+				CC711D852B5BFCC4007235A6 /* Localizable.strings in Resources */,
+				CC711D112B5BF551007235A6 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		DSF10002EMBEDDARKSWORDDYLIBS00 /* Embed DarkSword dylibs */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Vendor/darksword-lib-thin/libxpf.dylib",
+				"$(SRCROOT)/Vendor/darksword-lib-thin/libgrabkernel2.dylib",
+			);
+			name = "Embed DarkSword dylibs";
+			outputPaths = (
+				"$(CODESIGNING_FOLDER_PATH)/Frameworks/libxpf.dylib",
+				"$(CODESIGNING_FOLDER_PATH)/Frameworks/libgrabkernel2.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\nFW=\"$CODESIGNING_FOLDER_PATH/Frameworks\"\nmkdir -p \"$FW\"\ncp -f \"$SRCROOT/Vendor/darksword-lib-thin/libxpf.dylib\" \"$FW/libxpf.dylib\"\ncp -f \"$SRCROOT/Vendor/darksword-lib-thin/libgrabkernel2.dylib\" \"$FW/libgrabkernel2.dylib\"\n# Sign the embedded dylibs with the archive identity.\nif [ -n \"$EXPANDED_CODE_SIGN_IDENTITY\" ] && [ \"$CODE_SIGNING_ALLOWED\" = \"YES\" ]; then\n  /usr/bin/codesign --remove-signature \"$FW/libxpf.dylib\" >/dev/null 2>&1 || true\n  /usr/bin/codesign --remove-signature \"$FW/libgrabkernel2.dylib\" >/dev/null 2>&1 || true\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none --generate-entitlement-der \"$FW/libxpf.dylib\"\n  /usr/bin/codesign --force --sign \"$EXPANDED_CODE_SIGN_IDENTITY\" --timestamp=none --generate-entitlement-der \"$FW/libgrabkernel2.dylib\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		CC654E0E2DABD9C200D54F83 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC654E0F2DABD9C200D54F83 /* ActivateHUDIntent.swift in Sources */,
+				CC654E102DABD9C200D54F83 /* TSSettingsIndex.swift in Sources */,
+				CC654E112DABD9C200D54F83 /* HUDHelper.mm in Sources */,
+				DSB100042B5BF5C6007235A6 /* DSBridge.mm in Sources */,
+				CC654E122DABD9C200D54F83 /* SPLarkPresentingAnimationController.swift in Sources */,
+				CC654E132DABD9C200D54F83 /* SPLarkDismissingAnimationController.swift in Sources */,
+				CC654E142DABD9C200D54F83 /* HUDBackdropView.mm in Sources */,
+				CC654E152DABD9C200D54F83 /* MainButton.mm in Sources */,
+				CC654E162DABD9C200D54F83 /* HiddenContainerRecognizer.swift in Sources */,
+				CC654E172DABD9C200D54F83 /* TSEventFetcher.mm in Sources */,
+				CC654E182DABD9C200D54F83 /* UITouch-KIFAdditions.m in Sources */,
+				CC654E192DABD9C200D54F83 /* SPLarkSettingsCloseButton.swift in Sources */,
+				CC654E1A2DABD9C200D54F83 /* HUDBackdropLabel.mm in Sources */,
+				CC654E1B2DABD9C200D54F83 /* SPLarkPresentationController.swift in Sources */,
+				CC654E1C2DABD9C200D54F83 /* TSSettingsController.swift in Sources */,
+				CC654E1D2DABD9C200D54F83 /* HUDMainApplication.mm in Sources */,
+				CC654E1E2DABD9C200D54F83 /* MainApplication.mm in Sources */,
+				CC654E1F2DABD9C200D54F83 /* ToggleHUDIntent.swift in Sources */,
+				CC654E202DABD9C200D54F83 /* RootViewController.mm in Sources */,
+				CC654E212DABD9C200D54F83 /* ScreenshotInvisibleContainer.swift in Sources */,
+				CC654E222DABD9C200D54F83 /* ScreenshotInvincibleContainerProtocol.swift in Sources */,
+				CC654E232DABD9C200D54F83 /* SPLarkController.swift in Sources */,
+				CC654E242DABD9C200D54F83 /* HUDApp.mm in Sources */,
+				CC654E252DABD9C200D54F83 /* IOHIDEvent+KIF.m in Sources */,
+				CC654E262DABD9C200D54F83 /* DeactivateHUDIntent.swift in Sources */,
+				CC654E272DABD9C200D54F83 /* SPLarkSettingsCollectionView.swift in Sources */,
+				CC654E282DABD9C200D54F83 /* SPLarkSettingsController.swift in Sources */,
+				CC654E292DABD9C200D54F83 /* SPLarkControllerExtension.swift in Sources */,
+				CC654E2A2DABD9C200D54F83 /* MainApplicationDelegate.mm in Sources */,
+				CC654E2B2DABD9C200D54F83 /* HUDRootViewController.mm in Sources */,
+				CC654E2C2DABD9C200D54F83 /* HUDMainApplicationDelegate.mm in Sources */,
+				CC654E2D2DABD9C200D54F83 /* SPLarkTransitioningDelegate.swift in Sources */,
+				CC654E2E2DABD9C200D54F83 /* SPLarkSettingsCollectionViewCell.swift in Sources */,
+				CC654E2F2DABD9C200D54F83 /* HUDMainWindow.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC711CFD2B5BF550007235A6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CC8DDA8F2B654DC8001C7C9E /* ActivateHUDIntent.swift in Sources */,
+				CC9130A72B62A33A006E3280 /* TSSettingsIndex.swift in Sources */,
+				CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */,
+				DSB100032B5BF5C6007235A6 /* DSBridge.mm in Sources */,
+				D52000000000000000000001 /* RemoteCall.m in Sources */,
+				D52000000000000000000002 /* exc.m in Sources */,
+				D52000000000000000000003 /* thread.m in Sources */,
+				D52000000000000000000004 /* vm.m in Sources */,
+				D52000000000000000000005 /* pac.m in Sources */,
+				D52000000000000000000006 /* findcachedataoff.m in Sources */,
+				DS94654A91D7201BB1B561CD /* DSInProcessHUD.mm in Sources */,
+				DSD0995349C46D887FAEB09E /* persistence_stub.m in Sources */,
+				DSA1CCDB4D9FC47C89696454 /* darksword.m in Sources */,
+				DS89F06621EABBAB73487869 /* offsets.m in Sources */,
+				DS76050362023157AA4DFCC5 /* utils.m in Sources */,
+				DSAC91F41CF5F5E012EA03DC /* vfs.m in Sources */,
+				DS25D17BFA9E9ADA13CB32B7 /* sbx.m in Sources */,
+				DSE1DFEF3BE7326AD0E0494C /* vnode.m in Sources */,
+				CC711D532B5BF5C6007235A6 /* SPLarkPresentingAnimationController.swift in Sources */,
+				CC711D592B5BF5C6007235A6 /* SPLarkDismissingAnimationController.swift in Sources */,
+				CC9130A32B616C18006E3280 /* HUDBackdropView.mm in Sources */,
+				CC711D512B5BF5C6007235A6 /* MainButton.mm in Sources */,
+				CC711D5E2B5BF5C6007235A6 /* HiddenContainerRecognizer.swift in Sources */,
+				CC711D632B5BF5C6007235A6 /* TSEventFetcher.mm in Sources */,
+				CC711D4F2B5BF5C6007235A6 /* UITouch-KIFAdditions.m in Sources */,
+				CC711D522B5BF5C6007235A6 /* SPLarkSettingsCloseButton.swift in Sources */,
+				CC91309E2B616541006E3280 /* HUDBackdropLabel.mm in Sources */,
+				CC711D582B5BF5C6007235A6 /* SPLarkPresentationController.swift in Sources */,
+				CC711D622B5BF5C6007235A6 /* TSSettingsController.swift in Sources */,
+				CC711D612B5BF5C6007235A6 /* HUDMainApplication.mm in Sources */,
+				CC711D5F2B5BF5C6007235A6 /* MainApplication.mm in Sources */,
+				CC8DDA952B6551C7001C7C9E /* ToggleHUDIntent.swift in Sources */,
+				CC711D4B2B5BF5C6007235A6 /* RootViewController.mm in Sources */,
+				CC711D5C2B5BF5C6007235A6 /* ScreenshotInvisibleContainer.swift in Sources */,
+				CC711D5D2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift in Sources */,
+				CC711D562B5BF5C6007235A6 /* SPLarkController.swift in Sources */,
+				CC711D642B5BF5C6007235A6 /* HUDApp.mm in Sources */,
+				CC711D502B5BF5C6007235A6 /* IOHIDEvent+KIF.m in Sources */,
+				CC8DDA922B655156001C7C9E /* DeactivateHUDIntent.swift in Sources */,
+				CC711D572B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift in Sources */,
+				CC711D552B5BF5C6007235A6 /* SPLarkSettingsController.swift in Sources */,
+				CC711D5B2B5BF5C6007235A6 /* SPLarkControllerExtension.swift in Sources */,
+				CC711D4D2B5BF5C6007235A6 /* MainApplicationDelegate.mm in Sources */,
+				CC711D602B5BF5C6007235A6 /* HUDRootViewController.mm in Sources */,
+				CC711D4E2B5BF5C6007235A6 /* HUDMainApplicationDelegate.mm in Sources */,
+				CC711D5A2B5BF5C6007235A6 /* SPLarkTransitioningDelegate.swift in Sources */,
+				CC711D542B5BF5C6007235A6 /* SPLarkSettingsCollectionViewCell.swift in Sources */,
+				CC711D4C2B5BF5C6007235A6 /* HUDMainWindow.mm in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXVariantGroup section */
+		CC711D872B5BFCC4007235A6 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				CC711D862B5BFCC4007235A6 /* en */,
+				CC711D892B5BFCE0007235A6 /* zh-Hans */,
+				0F43B7702B60D397003A435D /* es */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+		CC711D8E2B5BFD50007235A6 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				CC711D8D2B5BFD50007235A6 /* en */,
+				CC711D8F2B5BFD51007235A6 /* zh-Hans */,
+				0F43B7712B60D397003A435D /* es */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		CC654E432DABD9C200D54F83 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = supports/entitlements-darksword.plist;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "-";
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "supports/hudapp-prefix.pch";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DarkSpeed;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/libraries",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkspeed;
+				PRODUCT_NAME = DarkSpeed;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "supports/hudapp-bridging-header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CC654E442DABD9C200D54F83 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = supports/entitlements-darksword.plist;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "-";
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "supports/hudapp-prefix.pch";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DarkSpeed;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/libraries",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkspeed;
+				PRODUCT_NAME = DarkSpeed;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = iphonesimulator;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "supports/hudapp-bridging-header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		CC711D182B5BF551007235A6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/darksword",
+					"$(SRCROOT)/headers",
+					"$(SRCROOT)/Vendor/darksword-headers",
+					"$(SRCROOT)/Vendor/darksword-lib/choma",
+					"$(SRCROOT)/Vendor/darksword-kexploit",
+					"$(SRCROOT)/Vendor/darksword-kexploit/pe",
+					"$(SRCROOT)/Vendor/darksword-kexploit/TaskRop",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_MODULE_NAME = DarkSpeed;
+				SDKROOT = iphoneos;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Debug;
+		};
+		CC711D192B5BF551007235A6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_LOCALIZABILITY_NONLOCALIZED = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/darksword",
+					"$(SRCROOT)/headers",
+					"$(SRCROOT)/Vendor/darksword-headers",
+					"$(SRCROOT)/Vendor/darksword-lib/choma",
+					"$(SRCROOT)/Vendor/darksword-kexploit",
+					"$(SRCROOT)/Vendor/darksword-kexploit/pe",
+					"$(SRCROOT)/Vendor/darksword-kexploit/TaskRop",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_MODULE_NAME = DarkSpeed;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+				VERSIONING_SYSTEM = "apple-generic";
+			};
+			name = Release;
+		};
+		CC711D1B2B5BF551007235A6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64e;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_ENTITLEMENTS = supports/entitlements-darksword.plist;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6LMF23FAGL;
+				ENABLE_APPINTENTS_DEPLOYMENT_AWARE_PROCESSING = NO;
+				ENABLE_PREVIEWS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "supports/hudapp-prefix.pch";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DISABLE_PATH_REDIRECTION=1",
+					"USE_DARKSWORD=1",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DarkSpeed;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/libraries",
+					"$(PROJECT_DIR)/Vendor/darksword-lib-thin",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lxpf",
+					"-lgrabkernel2",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkspeed;
+				PRODUCT_NAME = DarkSpeed;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "supports/hudapp-bridging-header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CC711D1C2B5BF551007235A6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64e;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_ENTITLEMENTS = supports/entitlements-darksword.plist;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6LMF23FAGL;
+				ENABLE_APPINTENTS_DEPLOYMENT_AWARE_PROCESSING = NO;
+				ENABLE_PREVIEWS = NO;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_PRECOMPILE_PREFIX_HEADER = YES;
+				GCC_PREFIX_HEADER = "supports/hudapp-prefix.pch";
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DISABLE_PATH_REDIRECTION=1",
+					"USE_DARKSWORD=1",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DarkSpeed;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/libraries",
+					"$(PROJECT_DIR)/Vendor/darksword-lib-thin",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lxpf",
+					"-lgrabkernel2",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkspeed;
+				PRODUCT_NAME = DarkSpeed;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "supports/hudapp-bridging-header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CC654E422DABD9C200D54F83 /* Build configuration list for PBXNativeTarget "DarkSpeed.Sim" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC654E432DABD9C200D54F83 /* Debug */,
+				CC654E442DABD9C200D54F83 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC711CFC2B5BF550007235A6 /* Build configuration list for PBXProject "DarkSpeed" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC711D182B5BF551007235A6 /* Debug */,
+				CC711D192B5BF551007235A6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CC711D1A2B5BF551007235A6 /* Build configuration list for PBXNativeTarget "DarkSpeed" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC711D1B2B5BF551007235A6 /* Debug */,
+				CC711D1C2B5BF551007235A6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CC711CF92B5BF550007235A6 /* Project object */;
+}

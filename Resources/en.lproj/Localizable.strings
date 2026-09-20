@@ -1,0 +1,216 @@
+/* formattedSpeed */
+"%.0f KB" = "%.0f KB";
+
+/* formattedSpeed */
+"%.0f Kb" = "%.0f Kb";
+
+/* formattedSpeed */
+"%.0f Kb/s" = "%.0f Kb/s";
+
+/* formattedSpeed */
+"%.0f KB/s" = "%.0f KB/s";
+
+/* formattedSpeed */
+"%.2f GB" = "%.2f GB";
+
+/* formattedSpeed */
+"%.2f Gb" = "%.2f Gb";
+
+/* formattedSpeed */
+"%.2f GB/s" = "%.2f GB/s";
+
+/* formattedSpeed */
+"%.2f Gb/s" = "%.2f Gb/s";
+
+/* formattedSpeed */
+"%.2f MB" = "%.2f MB";
+
+/* formattedSpeed */
+"%.2f Mb" = "%.2f Mb";
+
+/* formattedSpeed */
+"%.2f MB/s" = "%.2f MB/s";
+
+/* formattedSpeed */
+"%.2f Mb/s" = "%.2f Mb/s";
+
+/* formattedSpeed */
+"0 KB" = "0 KB";
+
+/* formattedSpeed */
+"0 Kb" = "0 Kb";
+
+/* formattedSpeed */
+"0 Kb/s" = "0 Kb/s";
+
+/* formattedSpeed */
+"0 KB/s" = "0 KB/s";
+
+/* No comment provided by engineer. */
+"Activate the network speed HUD." = "Activate the network speed HUD.";
+
+/* No comment provided by engineer. */
+"Appearance" = "Appearance";
+
+/* No comment provided by engineer. */
+"b/s" = "b/s";
+
+/* No comment provided by engineer. */
+"B/s" = "B/s";
+
+/* No comment provided by engineer. */
+"Choose an action below." = "Choose an action below.";
+
+/* No comment provided by engineer. */
+"Classic" = "Classic";
+
+/* No comment provided by engineer. */
+"Deactivate the network speed HUD." = "Deactivate the network speed HUD.";
+
+/* No comment provided by engineer. */
+"Developer Area" = "Developer Area";
+
+/* No comment provided by engineer. */
+"Dismiss" = "Dismiss";
+
+/* No comment provided by engineer. */
+"Display Mode" = "Display Mode";
+
+/* No comment provided by engineer. */
+"Exit HUD" = "Exit HUD";
+
+/* No comment provided by engineer. */
+"Follow" = "Follow";
+
+/* No comment provided by engineer. */
+"FPS" = "FPS";
+
+/* No comment provided by engineer. */
+"Hide" = "Hide";
+
+/* No comment provided by engineer. */
+"Hide @snapshot" = "Hide @snapshot";
+
+/* No comment provided by engineer. */
+"Incoming Only" = "Incoming Only";
+
+/* No comment provided by engineer. */
+"Inverted" = "Inverted";
+
+/* No comment provided by engineer. */
+"Keep In-place" = "Keep In-place";
+
+/* No comment provided by engineer. */
+"Landscape" = "Landscape";
+
+/* No comment provided by engineer. */
+"Large" = "Large";
+
+/* No comment provided by engineer. */
+"DarkSpeed by @GITHUB@huami1314\nBased on TrollSpeed by @GITHUB@i_82" = "DarkSpeed by @GITHUB@huami1314\nBased on TrollSpeed by @GITHUB@i_82";
+
+/* No comment provided by engineer. */
+"Memory Pressure" = "Memory Pressure";
+
+/* No comment provided by engineer. */
+"OFF" = "OFF";
+
+/* No comment provided by engineer. */
+"ON" = "ON";
+
+/* No comment provided by engineer. */
+"Open HUD" = "Open HUD";
+
+/* No comment provided by engineer. */
+"Pass-through" = "Pass-through";
+
+/* No comment provided by engineer. */
+"Prefixes" = "Prefixes";
+
+/* No comment provided by engineer. */
+"Re-open to apply" = "Re-open to apply";
+
+/* No comment provided by engineer. */
+"Reset Settings" = "Reset Settings";
+
+/* No comment provided by engineer. */
+"Settings" = "Settings";
+
+/* No comment provided by engineer. */
+"Size" = "Size";
+
+/* No comment provided by engineer. */
+"Speed" = "Speed";
+
+/* No comment provided by engineer. */
+"Standard" = "Standard";
+
+/* No comment provided by engineer. */
+"Tap that button on the center again,\nto toggle ON/OFF “Dynamic Island” mode." = "Tap that button on the center again,\nto toggle ON/OFF “Dynamic Island” mode.";
+
+/* No comment provided by engineer. */
+"Toggle HUD" = "Toggle HUD";
+
+/* No comment provided by engineer. */
+"Toggle the network speed HUD." = "Toggle the network speed HUD.";
+
+/* No comment provided by engineer. */
+"Unit" = "Unit";
+
+/* No comment provided by engineer. */
+"Utility" = "Utility";
+
+/* No comment provided by engineer. */
+"You can quit this app now.\nThe HUD will persist on your screen." = "You can quit this app now.\nThe HUD will persist on your screen.";
+
+"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD." = "DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD.";
+
+/* No comment provided by engineer. */
+"↑↓" = "↑↓";
+
+/* No comment provided by engineer. */
+"▲▼" = "▲▼";
+
+/* DarkSpeed startup and SpringBoard bridge */
+"Error: " = "Error: ";
+"System data is ready" = "System data is ready";
+"Caching kernelcache" = "Caching kernelcache";
+"Kernelcache cached" = "Kernelcache cached";
+"Kernelcache cache failed" = "Kernelcache cache failed";
+"Kernelcache download or parsing failed. Check DarkSpeed network access and your connection, then retry. If it still fails, reinstall over the existing app; restart the device only as a last resort." = "Kernelcache download or parsing failed. Check DarkSpeed network access and your connection, then retry. If it still fails, reinstall over the existing app; restart the device only as a last resort.";
+"Waiting for network (%.0f seconds, attempt %lu)" = "Waiting for network (%.0f seconds, attempt %lu)";
+"Network connected; preparing kernelcache" = "Network connected; preparing kernelcache";
+"No valid response" = "No valid response";
+"Network wait timed out" = "Network wait timed out";
+"Could not connect after waiting %.0f seconds: %@\nCheck DarkSpeed network access and your connection, then retry." = "Could not connect after waiting %.0f seconds: %@\nCheck DarkSpeed network access and your connection, then retry.";
+"Network is not ready; waited %.0f seconds. Retrying in %.0f seconds" = "Network is not ready; waited %.0f seconds. Retrying in %.0f seconds";
+"Requesting network access" = "Requesting network access";
+"Startup failed" = "Startup failed";
+"Background keep-alive failed: %@" = "Background keep-alive failed: %@";
+"Background resource preparation failed: %@" = "Background resource preparation failed: %@";
+"Background keep-alive playback failed: %@" = "Background keep-alive playback failed: %@";
+"Screenshot-hiding container unavailable; using normal display" = "Screenshot-hiding container unavailable; using normal display";
+"Could not adopt the DarkSpeed environment." = "Could not adopt the DarkSpeed environment.";
+"DarkSpeed system data is unavailable." = "DarkSpeed system data is unavailable.";
+"DarkSpeed initialization complete" = "DarkSpeed initialization complete";
+"Initializing DarkSpeed" = "Initializing DarkSpeed";
+"DarkSpeed initialization failed (%d)" = "DarkSpeed initialization failed (%d)";
+"DarkSpeed initialization failed" = "DarkSpeed initialization failed";
+"Unknown error" = "Unknown error";
+"Closing HUD" = "Closing HUD";
+"HUD closed" = "HUD closed";
+"Preparing startup" = "Preparing startup";
+"Preparing system data" = "Preparing system data";
+"Kernelcache download or parsing failed. Network access may still be pending. Check network access and retry; if it still fails, reinstall over the existing app. Restart the device only as a last resort." = "Kernelcache download or parsing failed. Network access may still be pending. Check network access and retry; if it still fails, reinstall over the existing app. Restart the device only as a last resort.";
+"DarkSpeed startup failed. Retry or reinstall over the existing app; restart the device only as a last resort." = "DarkSpeed startup failed. Retry or reinstall over the existing app; restart the device only as a last resort.";
+"Locating SpringBoard" = "Locating SpringBoard";
+"SpringBoard is not ready, so the HUD cannot be created. Retry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard is not ready, so the HUD cannot be created. Retry or reinstall over the existing app; restart the device only as a last resort.";
+"Connecting to SpringBoard" = "Connecting to SpringBoard";
+"SpringBoard connection failed: " = "SpringBoard connection failed: ";
+"SpringBoard connection failed: %@\nRetry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard connection failed: %@\nRetry or reinstall over the existing app; restart the device only as a last resort.";
+"Creating SpringBoard HUD" = "Creating SpringBoard HUD";
+"SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort.";
+"SpringBoard HUD exception: %@\nRetry or reinstall over the existing app; restart the device only as a last resort." = "SpringBoard HUD exception: %@\nRetry or reinstall over the existing app; restart the device only as a last resort.";
+"SpringBoard HUD started" = "SpringBoard HUD started";
+"DarkSpeed is not enabled in this build." = "DarkSpeed is not enabled in this build.";
+"Waiting to start" = "Waiting to start";
