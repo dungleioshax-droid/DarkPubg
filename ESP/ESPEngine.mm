@@ -124,10 +124,10 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         return NO;
     }
     if (vit->second == 3) {
-        // target: check hp còn sống
+        // target huấn luyện: hiện cả khi bị bắn gục (hp 0) như Kernel GatherTarget.
+        // Chỉ cần đọc được hp là tính.
         float tCur = 0;
         if (!ESPMemoryRead(vmMap, actor + ESPOff_Target_CurHealth, &tCur, 4)) return NO;
-        if (!(tCur > 0)) return NO;
         if (outTeam) *outTeam = ESPTeam_Dummy;
         if (outHp) *outHp = tCur;
         return YES;
