@@ -74,15 +74,71 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     return world;
 }
 
+static BOOL ESPLevelAndCluster(uint64_t vmMap, uint64_t world, uint64_t *outLevel, uint64_t *outCluster) {
+    BOOL ok = NO;
+    // 1) PersistentLevel 0x30 (chuẩn)
+    uint64_t level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
+    if (ok && ESPIsUserPtr(level)) {
+        uint64_t cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
+        if (ok && ESPIsUserPtr(cluster)) {
+            if (outLevel) *outLevel = level;
+            if (outCluster) *outCluster = cluster;
+            return YES;
+        }
+    }
+    // 2) Levels[0] 0x440 (khi PersistentLevel chưa load)
+    {
+        uint64_t levelsData = ESPReadU64(vmMap, world + ESPOff_UWorld_Levels + 0x0, &ok);
+        uint32_t levelsN = ESPReadU32(vmMap, world + ESPOff_UWorld_Levels + 0x8, &ok);
+        if (ok && ESPIsUserPtr(levelsData) && levelsN > 0 && levelsN < 64) {
+            uint64_t lv0 = ESPReadU64(vmMap, levelsData, &ok);
+            if (ok && ESPIsUserPtr(lv0)) {
+                uint64_t cluster = ESPReadU64(vmMap, lv0 + ESPOff_ULevel_ActorCluster, &ok);
+                if (ok && ESPIsUserPtr(cluster)) {
+                    if (outLevel) *outLevel = lv0;
+                    if (outCluster) *outCluster = cluster;
+                    return YES;
+                }
+            }
+        }
+    }
+    // 3) CurrentLevel 0x468
+    {
+        uint64_t cur = ESPReadU64(vmMap, world + 0x468, &ok);
+        if (ok && ESPIsUserPtr(cur)) {
+            uint64_t cluster = ESPReadU64(vmMap, cur + ESPOff_ULevel_ActorCluster, &ok);
+            if (ok && ESPIsUserPtr(cluster)) {
+                if (outLevel) *outLevel = cur;
+                if (outCluster) *outCluster = cluster;
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 static BOOL ESPValidateWorld(uint64_t vmMap, uint64_t world) {
     BOOL ok = NO;
     uint64_t level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
-    if (!ok || !ESPIsUserPtr(level)) { g_espStep = 6; return NO; }
+    if (!ok || !ESPIsUserPtr(level)) {
+        // thử fallback Levels/CurrentLevel trước khi báo E61
+        uint64_t fbLevel = 0, fbCluster = 0;
+        if (ESPLevelAndCluster(vmMap, world, &fbLevel, &fbCluster)) return YES;
+        g_espStep = 61;
+        return NO;
+    }
     uint64_t cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
-    if (!ok || !ESPIsUserPtr(cluster)) { g_espStep = 6; return NO; }
+    if (!ok || !ESPIsUserPtr(cluster)) {
+        uint64_t fbLevel = 0, fbCluster = 0;
+        if (ESPLevelAndCluster(vmMap, world, &fbLevel, &fbCluster)) return YES;
+        g_espStep = 62;
+        return NO;
+    }
     uint64_t actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
     uint32_t actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
-    if (!ok || !ESPIsUserPtr(actorsData) || actorsCount > 30000) { g_espStep = 7; return NO; }
+    if (!ok) { g_espStep = 71; return NO; }
+    if (!ESPIsUserPtr(actorsData)) { g_espStep = 71; return NO; }
+    if (actorsCount > 30000) { g_espStep = 72; return NO; }
     // actorsCount==0 vẫn coi là world hợp lệ (sảnh), để status hiện 0 actors chứ không E7
     return YES;
 }
@@ -109,16 +165,14 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espStep = 3;
     uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
     if (!world) return r; // g_espStep đã set 3/4/5 bên trong
-    if (!ESPValidateWorld(vmMap, world)) return r; // g_espStep 6/7
+    if (!ESPValidateWorld(vmMap, world)) return r; // g_espStep 61/62/71/72
     g_espStep = 0;
     r.world = world;
 
     BOOL ok = NO;
-    uint64_t level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
-    if (!ok || !level) return r;
+    uint64_t level = 0, cluster = 0;
+    if (!ESPLevelAndCluster(vmMap, world, &level, &cluster)) return r;
     r.level = level;
-    uint64_t cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
-    if (!ok || !cluster) return r;
     r.actorCluster = cluster;
     uint64_t actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
     if (!ok) return r;
