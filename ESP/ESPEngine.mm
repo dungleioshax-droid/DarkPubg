@@ -19,6 +19,9 @@ extern "C" {
 
 // Chain nhanh GEngine->Viewport->World (không scan 200k objects).
 
+static BOOL ESPIsUserPtr(uint64_t p);
+static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
+
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
