@@ -49,6 +49,9 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
         memcpy(out + off, (void *)(uintptr_t)(sh.localAddress + pageOff), (size_t)chunk);
         mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
+        // vmmapremotepage tạo 1 memory-entry port cho mỗi page — phải nhả,
+        // không là leak hàng nghìn port/scan rồi bị Jetsam kill app.
+        if (sh.port) mach_port_deallocate(mach_task_self_, (mach_port_t)sh.port);
         off += chunk;
     }
     return YES;

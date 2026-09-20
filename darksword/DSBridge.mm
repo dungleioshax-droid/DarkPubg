@@ -611,6 +611,7 @@ static uint64_t ds_scan_process_base(uint64_t vmMap) {
             if (!shmem.used || !shmem.localAddress) return;
             uint32_t magic = *(volatile uint32_t *)(uintptr_t)shmem.localAddress;
             mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)shmem.localAddress, PAGE_SIZE);
+            if (shmem.port) mach_port_deallocate(mach_task_self_, (mach_port_t)shmem.port);
             if (magic == MH_MAGIC_64 || magic == MH_MAGIC) {
                 found = start;
                 *stop = YES;
