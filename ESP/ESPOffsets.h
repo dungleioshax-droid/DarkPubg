@@ -47,6 +47,7 @@ static const uint32_t ESPOff_Viewport_GameInstance = 0x80;
 
 // ULevel (size 0x4B8) — bản này KHÔNG có Actors trực tiếp, đi qua ActorCluster
 static const uint32_t ESPOff_ULevel_ActorCluster = 0xE0; // ULevelActorContainer*
+static const uint32_t ESPOff_ULevel_OwningWorld = 0xC0; // ULevel->OwningWorld (check chéo)
 static const uint32_t ESPOff_ActorCluster_Actors = 0x28; // TArray<AActor*>
 
 // AActor
