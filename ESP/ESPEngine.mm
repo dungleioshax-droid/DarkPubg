@@ -15,16 +15,12 @@ extern "C" {
 #import "utils.h"
 }
 
-// FUObjectItem size 0x18 (từ dump), Object ở +0x0
-static const uint32_t kFUObjectItemSize = 0x18;
-// TUObjectArray: Objects ở +0x0 là ptr tới chunk? Dump: TUObjectArray.Objects 0x0, NumElements 0xc
-// Thực tế GUObjectArray = struct { TUObjectArray* ... } — dùng cách đọc đơn giản:
-// GUObjectArray -> ObjObjects (0x10 từ FUObjectArray) -> TArray chunks.
-// Để giữ phase 1 ổn định, ta đi đường tắt: GEngine -> ... -> World?
-// Đơn giản + robust nhất hiện tại: enumerate GUObjectArray tìm Class Engine.World.
+// Chain nhanh GEngine->Viewport->World (không scan 200k objects).
 
-static uint64_t ESPObjObjectsRuntime(uint64_t gameBase) {
-    return ESPRuntime(gameBase, ESPDump_ObjObjects);
+static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
+
+static uint64_t ESPGEngineRuntime(uint64_t gameBase) {
+    return ESPRuntime(gameBase, ESPDump_GEngine);
 }
 
 static BOOL ESPReadPtr(uint64_t vmMap, uint64_t addr, uint64_t *out) {
@@ -36,48 +32,59 @@ static BOOL ESPReadPtr(uint64_t vmMap, uint64_t addr, uint64_t *out) {
     return YES;
 }
 
-// Tìm UWorld đầu tiên qua GUObjectArray.
-// GUObjectArray layout (UE4.25+): FUObjectArray { TUObjectArray ObjObjects @0x10 { TArray<FUObjectItem> ... } }
-// Ta đọc: guArray -> objObjectsPtr = *(guArray+0x10?) — nhưng dump đã cho ObjObjects riêng.
-// Đơn giản: ObjObjects = TArray base của FUObjectItem chunks? Thực tế ObjObjects là TUObjectArray*
-// Đọc NumElements ở ObjObjects+0xc, Objects ở ObjObjects+0x0 (ptr tới FUObjectItem array hoặc chunks).
-// Với Num 206k, nó là flat array (NumElementsPerChunk 0) nên Objects là ptr tới FUObjectItem[Num].
-static uint64_t ESPFindWorld(uint64_t vmMap, uint64_t gameBase, uint32_t *outNum) {
-    uint64_t objObjects = ESPObjObjectsRuntime(gameBase);
-    // objObjects là địa chỉ của TUObjectArray trong memory game (con trỏ tĩnh).
-    // Cần deref? Trong dump: ObjObjects: [<Base>+0x10A692D28] = 0x10F636D28 — đó là địa chỉ tĩnh chứa TUObjectArray.
-    // Nên đọc TUObjectArray tại đó.
+static BOOL ESPIsUserPtr(uint64_t p) {
+    return p >= 0x100000000ULL && p < 0x300000000000ULL;
+}
+
+// Chain nhanh, không scan 200k objects:
+// GEngine_static -> UGameEngine -> GameViewport(0x810) -> World(0x78),
+// validate World qua PersistentLevel->ActorCluster->Actors.
+static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
+    g_espStep = 3;
+    uint64_t geStatic = ESPGEngineRuntime(gameBase);
     BOOL ok = NO;
-    uint64_t objectsPtr = ESPReadU64(vmMap, objObjects + 0x0, &ok);
-    if (!ok || !objectsPtr) return 0;
-    uint32_t num = ESPReadU32(vmMap, objObjects + 0xc, &ok);
-    if (!ok || num == 0 || num > 500000) return 0;
-    if (outNum) *outNum = num;
-    uint32_t limit = num > ESP_MAX_ACTORS_SCAN * 40 ? ESP_MAX_ACTORS_SCAN * 40 : num;
-    // Quét tìm Object có ClassPrivate trỏ tới UClass tên "World"? Không có GNames decode ở phase 1
-    // nên dùng heuristic: UWorld size 0xE38, PersistentLevel ở +0x30 trỏ tới ULevel hợp lệ.
-    // Để tránh scan 200k objects nặng, chỉ check mỗi 7th + giới hạn 20k.
-    for (uint32_t i = 0; i < limit; i += 7) {
-        uint64_t itemAddr = objectsPtr + (uint64_t)i * kFUObjectItemSize;
-        uint64_t obj = 0;
-        if (!ESPReadPtr(vmMap, itemAddr + 0x0, &obj) || !obj) continue;
-        if (obj < 0x100000000ULL) continue;
-        uint64_t persistentLevel = 0;
-        if (!ESPReadPtr(vmMap, obj + ESPOff_UWorld_PersistentLevel, &persistentLevel)) continue;
-        if (!persistentLevel || persistentLevel < 0x100000000ULL) continue;
-        // persistentLevel phải có ActorCluster ptr hợp lệ
-        uint64_t cluster = 0;
-        if (!ESPReadPtr(vmMap, persistentLevel + ESPOff_ULevel_ActorCluster, &cluster)) continue;
-        if (!cluster || cluster < 0x100000000ULL) continue;
-        // cluster + 0x28 là TArray Actors: data ptr + count
-        uint64_t actorsData = 0;
-        if (!ESPReadPtr(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &actorsData)) continue;
-        uint32_t actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
-        if (!ok || actorsCount == 0 || actorsCount > 20000) continue;
-        if (!actorsData || actorsData < 0x100000000ULL) continue;
-        return obj; // UWorld candidate
+    uint64_t engine = ESPReadU64(vmMap, geStatic, &ok);
+    if (!ok || !ESPIsUserPtr(engine)) return 0;
+    g_espStep = 4;
+    uint64_t viewport = ESPReadU64(vmMap, engine + ESPOff_Engine_GameViewport, &ok);
+    if (!ok || !ESPIsUserPtr(viewport)) {
+        // Fallback: UGameEngine->GameInstance->... không cho World trực tiếp,
+        // thử GameInstance->LocalPlayers->PC->Pawn->Outer(Level)->OwningWorld
+        uint64_t gameInst = ESPReadU64(vmMap, engine + ESPOff_GameEngine_GameInstance, &ok);
+        if (!ok || !ESPIsUserPtr(gameInst)) return 0;
+        uint64_t lpData = ESPReadU64(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x0, &ok);
+        uint32_t lpN = ESPReadU32(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x8, &ok);
+        if (!ok || !ESPIsUserPtr(lpData) || lpN == 0 || lpN > 8) return 0;
+        uint64_t lp = ESPReadU64(vmMap, lpData, &ok);
+        if (!ok || !ESPIsUserPtr(lp)) return 0;
+        uint64_t pc = ESPReadU64(vmMap, lp + ESPOff_Player_PlayerController, &ok);
+        if (!ok || !ESPIsUserPtr(pc)) return 0;
+        uint64_t pawn = ESPReadU64(vmMap, pc + 0x528, &ok); // AcknowledgedPawn
+        if (!ok || !ESPIsUserPtr(pawn)) return 0;
+        uint64_t outer = ESPReadU64(vmMap, pawn + 0x20, &ok); // OuterPrivate -> ULevel?
+        if (!ok || !ESPIsUserPtr(outer)) return 0;
+        uint64_t world2 = ESPReadU64(vmMap, outer + 0xC0, &ok); // Level OwningWorld
+        if (!ok || !ESPIsUserPtr(world2)) return 0;
+        g_espStep = 5;
+        return world2;
     }
-    return 0;
+    g_espStep = 5;
+    uint64_t world = ESPReadU64(vmMap, viewport + ESPOff_Viewport_World, &ok);
+    if (!ok || !ESPIsUserPtr(world)) return 0;
+    return world;
+}
+
+static BOOL ESPValidateWorld(uint64_t vmMap, uint64_t world) {
+    BOOL ok = NO;
+    uint64_t level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
+    if (!ok || !ESPIsUserPtr(level)) { g_espStep = 6; return NO; }
+    uint64_t cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
+    if (!ok || !ESPIsUserPtr(cluster)) { g_espStep = 6; return NO; }
+    uint64_t actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
+    uint32_t actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
+    if (!ok || !ESPIsUserPtr(actorsData) || actorsCount > 30000) { g_espStep = 7; return NO; }
+    // actorsCount==0 vẫn coi là world hợp lệ (sảnh), để status hiện 0 actors chứ không E7
+    return YES;
 }
 
 ESPScanResult ESPEngineScan(uint64_t gameBase) {
@@ -86,21 +93,24 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     (void)gameBase;
     return r;
 #else
+    g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
     // Lấy proc game hiện tại qua Base? DSBridge đã cache proc, nhưng ở đây tự tìm lại nhẹ:
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) {
         // thử prefix truncated
         proc = procbyname("ShadowTrackerE");
-        if (!proc) return r;
+        if (!proc) { g_espStep = 1; return r; }
     }
     uint64_t task = taskbyproc(proc);
     uint64_t vmMap = task ? task_get_vm_map(task) : 0;
-    if (!vmMap) return r;
+    if (!vmMap) { g_espStep = 2; return r; }
 
-    uint32_t objNum = 0;
-    uint64_t world = ESPFindWorld(vmMap, gameBase, &objNum);
-    if (!world) return r;
+    g_espStep = 3;
+    uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
+    if (!world) return r; // g_espStep đã set 3/4/5 bên trong
+    if (!ESPValidateWorld(vmMap, world)) return r; // g_espStep 6/7
+    g_espStep = 0;
     r.world = world;
 
     BOOL ok = NO;
@@ -164,7 +174,11 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
         g_espCache = ESPEngineScan(gameBase);
         g_espCheckedAt = now;
     }
-    if (!g_espCache.world) return @"ESP: --";
+    if (!g_espCache.world) {
+        int step = g_espStep;
+        if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
+        return @"ESP: --";
+    }
     return [NSString stringWithFormat:@"ESP: %u actors / %u players",
             (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
 #endif

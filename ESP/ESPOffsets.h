@@ -37,6 +37,14 @@ static const uint32_t ESPOff_UWorld_PersistentLevel    = 0x30;
 static const uint32_t ESPOff_UWorld_OwningGameInstance = 0x470;
 static const uint32_t ESPOff_UWorld_Levels             = 0x440; // TArray<ULevel*>, fallback
 
+// UEngine / UGameEngine
+static const uint32_t ESPOff_Engine_GameViewport = 0x810; // UEngine->GameViewport
+static const uint32_t ESPOff_GameEngine_GameInstance = 0xE20; // UGameEngine->GameInstance
+
+// UGameViewportClient
+static const uint32_t ESPOff_Viewport_World = 0x78; // UWorld* trực tiếp, chain ngắn nhất
+static const uint32_t ESPOff_Viewport_GameInstance = 0x80;
+
 // ULevel (size 0x4B8) — bản này KHÔNG có Actors trực tiếp, đi qua ActorCluster
 static const uint32_t ESPOff_ULevel_ActorCluster = 0xE0; // ULevelActorContainer*
 static const uint32_t ESPOff_ActorCluster_Actors = 0x28; // TArray<AActor*>
