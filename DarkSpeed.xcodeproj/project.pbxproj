@@ -29,6 +29,12 @@
 		DSA87FCA18F17A9FCFB9C289 /* vnode.m in Sources */ = {isa = PBXBuildFile; fileRef = DS88795F4CEB0C0594BD685F /* vnode.m */; };
 		DSB100032B5BF5C6007235A6 /* DSBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSB100022B5BF5C6007235A6 /* DSBridge.mm */; };
 		DSB100042B5BF5C6007235A6 /* DSBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = DSB100022B5BF5C6007235A6 /* DSBridge.mm */; };
+		ESPB0MEMD000000000001 /* ESPMemory.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0MEMM000000000001 /* ESPMemory.mm */; };
+		ESPB0ENGD000000000001 /* ESPEngine.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0ENGM000000000001 /* ESPEngine.mm */; };
+		ESPB0OVLD000000000001 /* ESPOverlay.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0OVLM000000000001 /* ESPOverlay.mm */; };
+		ESPB0MEMS000000000001 /* ESPMemory.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0MEMM000000000001 /* ESPMemory.mm */; };
+		ESPB0ENGS000000000001 /* ESPEngine.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0ENGM000000000001 /* ESPEngine.mm */; };
+		ESPB0OVLS000000000001 /* ESPOverlay.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0OVLM000000000001 /* ESPOverlay.mm */; };
 		D52000000000000000000001 /* RemoteCall.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000001 /* RemoteCall.m */; };
 		D52000000000000000000002 /* exc.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000002 /* exc.m */; };
 		D52000000000000000000003 /* thread.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000003 /* thread.m */; };
@@ -146,6 +152,15 @@
 		DS88795F4CEB0C0594BD685F /* vnode.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = vnode.m; path = Vendor/darksword-kexploit/pe/vnode.m; sourceTree = SOURCE_ROOT; };
 		DSB100012B5BF5C6007235A6 /* DSBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = DSBridge.h; path = darksword/DSBridge.h; sourceTree = SOURCE_ROOT; };
 		DSB100022B5BF5C6007235A6 /* DSBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = DSBridge.mm; path = darksword/DSBridge.mm; sourceTree = SOURCE_ROOT; };
+		ESP0FFSET000000000001 /* ESPOffsets.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPOffsets.h; path = ESP/ESPOffsets.h; sourceTree = SOURCE_ROOT; };
+		ESP0CONF000000000001 /* ESPConfig.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPConfig.h; path = ESP/ESPConfig.h; sourceTree = SOURCE_ROOT; };
+		ESP0MEMH000000000001 /* ESPMemory.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPMemory.h; path = ESP/ESPMemory.h; sourceTree = SOURCE_ROOT; };
+		ESP0MEMM000000000001 /* ESPMemory.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPMemory.mm; path = ESP/ESPMemory.mm; sourceTree = SOURCE_ROOT; };
+		ESP0UEH00000000000001 /* ESPUE.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPUE.h; path = ESP/ESPUE.h; sourceTree = SOURCE_ROOT; };
+		ESP0ENGH000000000001 /* ESPEngine.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPEngine.h; path = ESP/ESPEngine.h; sourceTree = SOURCE_ROOT; };
+		ESP0ENGM000000000001 /* ESPEngine.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPEngine.mm; path = ESP/ESPEngine.mm; sourceTree = SOURCE_ROOT; };
+		ESP0OVLH000000000001 /* ESPOverlay.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPOverlay.h; path = ESP/ESPOverlay.h; sourceTree = SOURCE_ROOT; };
+		ESP0OVLM000000000001 /* ESPOverlay.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPOverlay.mm; path = ESP/ESPOverlay.mm; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000001 /* RemoteCall.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = RemoteCall.m; path = Vendor/darksword-kexploit/TaskRop/RemoteCall.m; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000002 /* exc.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = exc.m; path = Vendor/darksword-kexploit/TaskRop/exc.m; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000003 /* thread.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = thread.m; path = Vendor/darksword-kexploit/TaskRop/thread.m; sourceTree = SOURCE_ROOT; };
@@ -289,6 +304,22 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		ESP0GROUP00000000001 /* ESP */ = {
+			isa = PBXGroup;
+			children = (
+				ESP0FFSET000000000001 /* ESPOffsets.h */,
+				ESP0CONF000000000001 /* ESPConfig.h */,
+				ESP0MEMH000000000001 /* ESPMemory.h */,
+				ESP0MEMM000000000001 /* ESPMemory.mm */,
+				ESP0UEH00000000000001 /* ESPUE.h */,
+				ESP0ENGH000000000001 /* ESPEngine.h */,
+				ESP0ENGM000000000001 /* ESPEngine.mm */,
+				ESP0OVLH000000000001 /* ESPOverlay.h */,
+				ESP0OVLM000000000001 /* ESPOverlay.mm */,
+			);
+			path = ESP;
+			sourceTree = "<group>";
+		};
 		DSB100052B5BF5C6007235A6 /* darksword */ = {
 			isa = PBXGroup;
 			children = (
@@ -321,6 +352,7 @@
 				CC711D942B5BFE9F007235A6 /* libraries */,
 				CC711D032B5BF550007235A6 /* supports */,
 				DSB100052B5BF5C6007235A6 /* darksword */,
+				ESP0GROUP00000000001 /* ESP */,
 				CC711D1D2B5BF5C6007235A6 /* sources */,
 				CC8DDA972B66318E001C7C9E /* Frameworks */,
 			);
@@ -627,6 +659,9 @@
 				CC654E102DABD9C200D54F83 /* TSSettingsIndex.swift in Sources */,
 				CC654E112DABD9C200D54F83 /* HUDHelper.mm in Sources */,
 				DSB100042B5BF5C6007235A6 /* DSBridge.mm in Sources */,
+				ESPB0MEMS000000000001 /* ESPMemory.mm in Sources */,
+				ESPB0ENGS000000000001 /* ESPEngine.mm in Sources */,
+				ESPB0OVLS000000000001 /* ESPOverlay.mm in Sources */,
 				CC654E122DABD9C200D54F83 /* SPLarkPresentingAnimationController.swift in Sources */,
 				CC654E132DABD9C200D54F83 /* SPLarkDismissingAnimationController.swift in Sources */,
 				CC654E142DABD9C200D54F83 /* HUDBackdropView.mm in Sources */,
@@ -668,6 +703,9 @@
 				CC9130A72B62A33A006E3280 /* TSSettingsIndex.swift in Sources */,
 				CC711D4A2B5BF5C6007235A6 /* HUDHelper.mm in Sources */,
 				DSB100032B5BF5C6007235A6 /* DSBridge.mm in Sources */,
+				ESPB0MEMD000000000001 /* ESPMemory.mm in Sources */,
+				ESPB0ENGD000000000001 /* ESPEngine.mm in Sources */,
+				ESPB0OVLD000000000001 /* ESPOverlay.mm in Sources */,
 				D52000000000000000000001 /* RemoteCall.m in Sources */,
 				D52000000000000000000002 /* exc.m in Sources */,
 				D52000000000000000000003 /* thread.m in Sources */,

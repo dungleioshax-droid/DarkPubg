@@ -32,6 +32,7 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyDisplayMode = @"displayMode";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyShowBaseGame = @"showBaseGame";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyBaseGameName = @"baseGameName";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyShowESPBox = @"showESPBox";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";

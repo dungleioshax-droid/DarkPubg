@@ -64,6 +64,13 @@ OBJC_EXTERN NSString *DSBridgeGameProcessName(void);
 /// Force an immediate re-scan of the game process base (throttled internally).
 OBJC_EXTERN void DSBridgeRefreshGameBase(void);
 
+/// ESP Box status line for the HUD, e.g. @"ESP: 120 actors / 6 players"
+/// or @"ESP: --". Empty string when ESP display is disabled.
+OBJC_EXTERN NSString *DSBridgeESPStatus(void);
+
+/// Raw player-like actor count (0 when disabled / not ready).
+OBJC_EXTERN uint32_t DSBridgeESPCount(void);
+
 /// Posted on any DS progress / state change (observe on main queue).
 OBJC_EXTERN NSString * const DSBridgeProgressNotification;
 

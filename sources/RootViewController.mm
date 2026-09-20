@@ -602,12 +602,14 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         __strong typeof(weakSelf) strongSelf = weakSelf;
         [strongSelf->_mainButton setTitle:(strongSelf->_isRemoteHUDActive ? NSLocalizedString(@"Exit HUD", nil) : NSLocalizedString(@"Open HUD", nil)) forState:UIControlStateNormal];
         NSString *bridgeError = DSBridgeCompiledIn() ? DSBridgeLastError() : @"";
-        // Base Game status (ShadowTrackerExtra) — show in app so users can
+        // Base Game + ESP status — show in app so users can
         // verify without looking at the SpringBoard HUD.
         [strongSelf loadUserDefaults:NO];
         BOOL showBase = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowBaseGame] boolValue];
+        BOOL showESP = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowESPBox] boolValue];
         NSString *baseStatus = nil;
         NSString *baseProc = nil;
+        NSString *espStatus = nil;
         if (showBase && DSBridgeCompiledIn()) {
             @try {
                 baseStatus = DSBridgeGameStatus();
@@ -618,19 +620,33 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             if (baseStatus.length == 0) baseStatus = @"Base: --";
             if (baseProc.length == 0) baseProc = @"ShadowTrackerExtra";
         }
+        if (showESP && DSBridgeCompiledIn()) {
+            @try {
+                espStatus = DSBridgeESPStatus();
+            } @catch (__unused NSException *e) {
+                espStatus = nil;
+            }
+            if (espStatus.length == 0) espStatus = @"ESP: --";
+        }
+        NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
+        if (baseStatus) {
+            [extraLines addObject:baseProc ?: @"ShadowTrackerExtra"];
+            [extraLines addObject:baseStatus];
+        }
+        if (espStatus) [extraLines addObject:espStatus];
+        NSString *extraText = extraLines.count ? [extraLines componentsJoinedByString:@"\n"] : nil;
         if (!strongSelf->_isRemoteHUDActive && bridgeError.length > 0) {
-            if (baseStatus) {
-                [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@\n%@", bridgeError, baseProc, baseStatus]];
+            if (extraText) {
+                [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@", bridgeError, extraText]];
             } else {
                 [strongSelf->_authorLabel setText:bridgeError];
             }
-        } else if (baseStatus) {
-            // HUD active → hint is attributed; base needs plain text, so combine as plain.
-            // Keep it short: process + base line proves "lấy được base hay không".
+        } else if (extraText) {
+            // HUD active → hint is attributed; base/esp needs plain text, so combine as plain.
             NSString *hintPlain = strongSelf->_isRemoteHUDActive
                 ? NSLocalizedString(@"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD.", nil)
                 : NSLocalizedString(@"DarkSpeed by huami1314\nBased on TrollSpeed by i_82", nil);
-            [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@\n%@", hintPlain, baseProc, baseStatus]];
+            [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@", hintPlain, extraText]];
             [strongSelf->_authorLabel setTextAlignment:NSTextAlignmentCenter];
         } else {
             [strongSelf->_authorLabel setAttributedText:(strongSelf->_isRemoteHUDActive ? hintAttributedString : creditsAttributedString)];

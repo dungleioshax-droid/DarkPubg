@@ -109,6 +109,7 @@ static void ds_set_error(NSString *message) {
 #import "DSRemoteCall.h"
 #import <mach/mach.h>
 #import <mach-o/loader.h>
+#import "ESPEngine.h"
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
 extern "C" {
@@ -700,6 +701,50 @@ void DSBridgeRefreshGameBase(void) {
 #endif
 }
 
+// MARK: - ESP Box (isolated ESP/ folder)
+
+static BOOL ds_show_esp_from_prefs(NSDictionary *prefs) {
+    NSNumber *n = prefs ? prefs[HUDUserDefaultsKeyShowESPBox] : nil;
+    if (n) return n.boolValue;
+    return [NSUserDefaults.standardUserDefaults boolForKey:HUDUserDefaultsKeyShowESPBox];
+}
+
+NSString *DSBridgeESPStatus(void) {
+#if USE_DARKSWORD
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    if (prefs && !ds_show_esp_from_prefs(prefs)) return @"";
+    if (!ds_show_base_game_from_prefs(prefs)) {
+        // ESP cần base — nếu Base Game tắt, báo để user bật.
+        // Vẫn thử scan bằng base cache nếu có.
+    }
+    if (!ds_is_ready()) return @"ESP: wait…";
+    ds_ensure_game_base(prefs);
+    if (!g_gameBase) return @"ESP: --";
+    @try {
+        NSString *s = ESPEngineStatusText(g_gameBase);
+        return s ?: @"ESP: --";
+    } @catch (__unused NSException *e) {
+        return @"ESP: --";
+    }
+#else
+    return @"";
+#endif
+}
+
+uint32_t DSBridgeESPCount(void) {
+#if USE_DARKSWORD
+    if (!g_gameBase || !ds_is_ready()) return 0;
+    @try {
+        return ESPEnginePlayerCount(g_gameBase);
+    } @catch (__unused NSException *e) {
+        return 0;
+    }
+#else
+    return 0;
+#endif
+}
+
 static void ds_append_wav_value(NSMutableData *data, const void *value, NSUInteger size) {
     [data appendBytes:value length:size];
 }
@@ -890,6 +935,19 @@ static NSString *ds_base_game_line_for_prefs(NSDictionary *preferences) {
     return @"Base: --";
 }
 
+static NSString *ds_esp_line_for_prefs(NSDictionary *preferences) {
+    if (!ds_show_esp_from_prefs(preferences)) return nil;
+    if (!ds_is_ready()) return @"ESP: wait…";
+    ds_ensure_game_base(preferences);
+    if (!g_gameBase) return @"ESP: --";
+    @try {
+        NSString *s = ESPEngineStatusText(g_gameBase);
+        return s.length ? s : @"ESP: --";
+    } @catch (__unused NSException *e) {
+        return @"ESP: --";
+    }
+}
+
 static NSString *ds_display_text(NSDictionary *preferences,
                                  BOOL centered,
                                  BOOL focused,
@@ -929,7 +987,11 @@ static NSString *ds_display_text(NSDictionary *preferences,
 
     NSString *baseLine = ds_base_game_line_for_prefs(preferences);
     if (baseLine) {
-        return [main stringByAppendingFormat:@"\n%@", baseLine];
+        main = [main stringByAppendingFormat:@"\n%@", baseLine];
+    }
+    NSString *espLine = ds_esp_line_for_prefs(preferences);
+    if (espLine) {
+        main = [main stringByAppendingFormat:@"\n%@", espLine];
     }
     return main;
 }
@@ -971,7 +1033,8 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     }
     presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
     NSInteger baseLines = ds_show_base_game_from_prefs(preferences) ? 1 : 0;
-    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + baseLines;
+    NSInteger espLines = ds_show_esp_from_prefs(preferences) ? 1 : 0;
+    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + baseLines + espLines;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
     presentation.maskedCorners =
         presentation.centeredMost && !presentation.landscape
@@ -1959,6 +2022,8 @@ uint64_t DSBridgeGameBase(void) { return 0; }
 NSString *DSBridgeGameStatus(void) { return @""; }
 NSString *DSBridgeGameProcessName(void) { return @"ShadowTrackerExtra"; }
 void DSBridgeRefreshGameBase(void) {}
+NSString *DSBridgeESPStatus(void) { return @""; }
+uint32_t DSBridgeESPCount(void) { return 0; }
 
 #endif
 

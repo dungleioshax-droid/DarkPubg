@@ -132,6 +132,7 @@ static const char *HUD_UPLOAD_PREFIX = "▲";
 static const char *HUD_DOWNLOAD_PREFIX = "▼";
 static uint8_t HUD_DISPLAY_MODE = 0;  // 0=Speed, 1=FPS
 static uint8_t HUD_SHOW_BASE_GAME = 0;  // 0=hide, 1=show ShadowTrackerExtra base
+static uint8_t HUD_SHOW_ESP_BOX = 0;    // 0=hide, 1=show ESP status
 
 typedef struct {
     uint64_t inputBytes;
@@ -349,6 +350,19 @@ static NSString *legacyBaseGameLine(void)
     return status;
 }
 
+static NSString *legacyESPLine(void)
+{
+    if (!HUD_SHOW_ESP_BOX) return nil;
+    NSString *status = nil;
+    @try {
+        status = DSBridgeESPStatus();
+    } @catch (__unused NSException *e) {
+        status = nil;
+    }
+    if (status.length == 0) status = @"ESP: --";
+    return status;
+}
+
 static NSAttributedString *formattedAttributedString(BOOL isFocused)
 {
     @autoreleasepool
@@ -459,6 +473,13 @@ static NSAttributedString *formattedAttributedString(BOOL isFocused)
             }
             [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:baseLine attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
         }
+        NSString *espLine = legacyESPLine();
+        if (espLine) {
+            if ([mutableString length] > 0) {
+                [mutableString appendAttributedString:attributedLineSeparator];
+            }
+            [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:espLine attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
+        }
 
         return [mutableString copy];
     }
@@ -497,6 +518,10 @@ static NSAttributedString *formattedFPSAttributedString(BOOL isFocused)
         NSString *baseLine = legacyBaseGameLine();
         if (baseLine) {
             fpsString = [fpsString stringByAppendingFormat:@"\n%@", baseLine];
+        }
+        NSString *espLine = legacyESPLine();
+        if (espLine) {
+            fpsString = [fpsString stringByAppendingFormat:@"\n%@", espLine];
         }
         NSAttributedString *attributedString = [[NSAttributedString alloc] initWithString:fpsString attributes:@{
             NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
@@ -647,6 +672,9 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     BOOL showBaseGame = [self showBaseGame];
     HUD_SHOW_BASE_GAME = showBaseGame;
 
+    BOOL showESP = [self showESPBox];
+    HUD_SHOW_ESP_BOX = showESP;
+
     prevInputBytes = 0;
     prevOutputBytes = 0;
     needsBaselineReset = YES;
@@ -714,6 +742,13 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyShowBaseGame];
+    return mode != nil ? [mode boolValue] : NO;
+}
+
+- (BOOL)showESPBox
+{
+    [self loadUserDefaults:NO];
+    NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyShowESPBox];
     return mode != nil ? [mode boolValue] : NO;
 }
 
