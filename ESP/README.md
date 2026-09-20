@@ -26,29 +26,23 @@ Folder riêng cho ESP, không loạn dự án chính. Phase 1 đọc memory + đ
    - `ESP: N actors / M players` hoặc `ESP: --`.
 
 ## Nhận diện actor (khi GNames hỏng)
-`uname=0x0` trên log nghĩa là GNames chưa giải được, nên nhận diện phải dựa vào
-chữ ký field. Các lớp hình nhân trong sân tập:
+`uname=0x0` trên log nghĩa là GNames chưa giải được, nên nhận diện dựa vào VTable và chữ ký field:
 
-| Lớp | Cha | Field nhận diện |
-|---|---|---|
-| `AShootingPracticeTarget` | `AActor` | MaxHealth `0x4AC`, CurHealth `0x4D0`, bIsUp `0x4D4`, StaticMeshComp `0x4E8` (object chỉ dài ~0x508) |
-| `AShootingPracticeScoreTarget` | `ADecoratorActor` | MoveRoot `0x660`, CurrentWave `0x6B8`, bIsUp `0x6BC`, bIsRotating `0x6BD` (~0x710) |
-
-Hai lớp này **không** dùng chung layout: hình nhân người (ScoreTarget) không có
-MaxHealth/CurHealth ở 0x4AC/0x4D0, nên check theo field của lớp kia luôn trượt.
+- **PersistentLevel**: Quét trực tiếp `PersistentLevel` (offset `0x30`), nơi chứa toàn bộ player, bot và hình nhân (`AShootingPracticeTarget`). Không quét streaming levels vì streaming levels chỉ chứa địa hình/cây cối tĩnh, làm phình số actors lên 830 và gây lag/nhận diện nhầm.
+- **Player**: Học VTable từ pawn của chính mình (`localPlayer`). Mọi player/bot cùng class `ASTExtraPlayerCharacter` đều có chung VTable này. Khi fallback heuristic, yêu cầu `VTable` khớp (nếu đã học) và `HealthMax` trong khoảng 50..2000.
+- **Hình nhân huấn luyện** (`AShootingPracticeTarget : AActor`):
+  - `StaticMeshComp` (0x4E8) hợp lệ, `RootComponent` (0x208) hợp lệ.
+  - Không có `SkeletalMesh` (0x510).
+  - `MaxHealth` (0x4AC) trong khoảng 50..2000, `CurHealth` (0x4D0) trong khoảng 0..MaxHealth.
 
 ## Log chẩn đoán
 `Documents/ESP.log` (lấy qua Files app / Filza). Mỗi world mới ghi 2 lượt chi tiết:
 
-- `levels cands=.. ok=.. cand0act=..` — số level và actor từng level.
-- `scan start actors=<level lớn nhất> union=<tổng mọi level> levels=..`
-- `uname diag ...` — giá trị thật ở static GNames + chuỗi đọc được từ từng candidate.
-- `diag pawn=0x.. inList=.. vTable=.. mesh=.. hp=..` — field của pawn mình, và nó
-  có nằm trong mảng actors không (kiểm tra chéo offset + mảng actors).
-- `a[i] 0x.. r=<rule> w=<window OK> ...` — 24 actor đầu: rule 1=vtable 2=tên
-  player 3=tên hình nhân 4=chữ ký character 5=chữ ký target 6=chữ ký hình nhân người.
-- `diag vtHist(..) 0x..:n ...` — histogram VTable (player/hình nhân mỗi lớp 1 VTable).
-- `scan done enemies=.. dummy=.. win=../.. vt=.. nm=.. dnm=.. ch=.. dm=.. sc=.. no=..`
+- `scan start actors=<số actor PersistentLevel> level=0x.. base=0x..`
+- `diag pawn=0x.. inList=.. vTable=.. mesh=.. hp=..` — field của pawn mình.
+- `a[i] 0x.. r=<rule> w=<window OK> ...` — 24 actor đầu: rule 1=vtable 2=tên player 3=tên hình nhân 4=chữ ký character 5=chữ ký target.
+- `diag vtHist(..) 0x..:n ...` — histogram VTable.
+- `scan done enemies=.. dummy=.. win=../.. vt=.. nm=.. dnm=.. ch=.. dm=.. no=..`
 
 ## Phase 2 (chưa làm, để sẵn stub)
 - `ESPOverlay` sẽ tạo `UIWindow` full-screen trong SpringBoard + pool `UIView` viền box (4 view mỏng/box) + `UILabel` khoảng cách. Tính `WorldToScreen` từ `PlayerCameraManager::CameraCache (FMinimalViewInfo)`.

@@ -46,32 +46,22 @@ typedef struct {
     float hp, hpMax, tCur, tMax;
     uint8_t bHidden, bDead, tIsUp;
     int team;
-    // Hình nhân "người" AShootingPracticeScoreTarget : ADecoratorActor — layout
-    // RIÊNG, không có MaxHealth/CurHealth ở 0x4AC/0x4D0 như AShootingPracticeTarget.
-    // MoveRoot 0x660, CurrentWave 0x6B8, bIsUp 0x6BC, bIsRotating 0x6BD.
-    uint64_t stMove;
-    int stWave;
-    uint8_t stIsUp, stRot;
-    BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget, hasTeam, hasScore;
+    BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget, hasTeam;
     BOOL window; // đọc được cả cửa sổ 1 lần => mọi field đều đáng tin
 } ESPActorFields;
 
 // Chẩn đoán: vì sao 1 actor bị loại (ghi vào ESP.log ở lượt quét chi tiết
 // đầu tiên của mỗi world). rule: 1=vtable 2=tên player 3=tên hình nhân
-// 4=chữ ký character 5=chữ ký target 6=chữ ký hình nhân người (decorator)
-// 0=không khớp -1=bị lọc (ẩn/chết/team)
+// 4=chữ ký character 5=chữ ký target 0=không khớp -1=bị lọc (ẩn/chết/team)
 typedef struct {
     int rule;
     int win;
     int nearChar;
     int nearDummy;
-    int nearScore;
     int team;
     unsigned tIsUp;
     float hp, hpMax, tCur, tMax;
-    uint64_t vt, mesh, tMesh, root, stMove;
-    int stWave;
-    unsigned stIsUp, stRot;
+    uint64_t vt, mesh, tMesh, root;
     uint32_t nameID;
 } ESPClassifyDiag;
 
@@ -129,11 +119,6 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
         f->tMax = ESPWinF32(win, ESPOff_Target_MaxHealth);
         f->tIsUp = win[ESPOff_Target_IsUp];
         f->hasTarget = YES;
-        f->stMove = ESPWinU64(win, ESPOff_Score_MoveRoot);
-        f->stWave = (int)ESPWinU32(win, ESPOff_Score_CurrentWave);
-        f->stIsUp = win[ESPOff_Score_IsUp];
-        f->stRot = win[ESPOff_Score_IsRotating];
-        f->hasScore = YES;
         return;
     }
     // Fallback: object nằm sát cuối vùng mapped -> đọc lẻ từng field.
@@ -162,15 +147,6 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
         ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &f->tCur)) {
         f->tIsUp = ESPReadU8(vmMap, actor + ESPOff_Target_IsUp, &ok);
         f->hasTarget = ok;
-    }
-    f->stMove = ESPReadU64(vmMap, actor + ESPOff_Score_MoveRoot, &ok);
-    if (ok) {
-        f->stWave = (int)ESPReadU32(vmMap, actor + ESPOff_Score_CurrentWave, &ok);
-        if (ok) {
-            f->stIsUp = ESPReadU8(vmMap, actor + ESPOff_Score_IsUp, &ok);
-            f->stRot = ok ? ESPReadU8(vmMap, actor + ESPOff_Score_IsRotating, &ok) : 0;
-            f->hasScore = ok;
-        }
     }
 }
 
@@ -234,16 +210,19 @@ static void ESPVerdictSet(uint64_t actor, char v, int team) {
 
 // Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
 // verdict 1=character, 3=target huấn luyện, 2=other.
-// verdict 2 hết hạn sau kESPverdictExpiryFrames scans để đánh giá lại
-// (tránh kẹt 1/4 do lúc map chưa load đã kết luận).
-static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam, float *outHp,
+// verdict 2 hết hạn sau kESPverdictExpiryFrames scans để đánh giá lại.
+static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPawn, int *outTeam, float *outHp,
                        ESPClassifyDiag *diag) {
     if (diag) {
         memset(diag, 0, sizeof(*diag));
         diag->rule = -2;
         diag->nearChar = -1;
         diag->nearDummy = -1;
-        diag->nearScore = -1;
+    }
+    // Lọc chính mình (local pawn) ngay từ đầu
+    if (myPawn && actor == myPawn) {
+        if (diag) diag->rule = -4;
+        return NO;
     }
     auto vit = g_espVerdict.find(actor);
     if (vit != g_espVerdict.end() && vit->second == 2) {
@@ -275,10 +254,6 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
             diag->tMax = f.tMax;
             diag->tIsUp = f.tIsUp;
             diag->team = f.team;
-            diag->stMove = f.stMove;
-            diag->stWave = f.stWave;
-            diag->stIsUp = f.stIsUp;
-            diag->stRot = f.stRot;
         }
         // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
         if (f.hasVtable && g_espPlayerVTable && f.vtable == g_espPlayerVTable) {
@@ -300,9 +275,6 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
                     goto check_live;
                 }
                 // 1b) Hình nhân huấn luyện (ShootingPracticeTarget) nhận theo TÊN.
-                // Check cũ theo field (StaticMesh 0x4E8 + KHÔNG có 0x510) sai
-                // vì 0x510 nằm NGOÀI object ShootingPracticeTarget (~0x4F8) —
-                // đọc ra rác heap nên chỉ 1-3/4 con khớp. Tên thì luôn khớp.
                 if (ESPIsTrainingDummyName(nm)) {
                     if (diag) diag->rule = 3;
                     ESPVerdictSet(actor, 3, ESPTeam_Dummy);
@@ -313,32 +285,39 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
                 }
             }
         }
-        // 2) heuristic Mesh/Health/Team (dự phòng khi GNames fail)
-        // Thử character trước (Mesh skeletal 0x510). Không đòi f.window nữa:
-        // window đọc cả 0xF00 byte có thể fail, field đọc lẻ vẫn đúng giá trị.
+        // 2) Heuristic Mesh/Health/Team (dự phòng khi GNames fail)
+        // Yêu cầu: SkeletalMesh hợp lệ, HealthMax 50..2000, Health 0..hpMax,
+        // và nếu đã biết player VTable thì VTable PHẢI khớp (như Kernel sameClass).
         if (f.hasMesh && ESPIsUserPtr(f.mesh) &&
-            f.hasHp && f.hp >= 0 && f.hp <= 2000 && f.hpMax > 0 && f.hpMax <= 2000 &&
+            f.hasHp && f.hp >= 0 && f.hpMax >= 50 && f.hpMax <= 2000 && f.hp <= f.hpMax + 50 &&
             f.hasTeam && f.team >= 0 && f.team <= 200000000) {
-            if (diag) diag->rule = 4;
-            ESPVerdictSet(actor, 1, f.team);
-            goto check_live;
+            bool sameClass = YES;
+            if (g_espPlayerVTable) {
+                sameClass = (f.hasVtable && f.vtable == g_espPlayerVTable);
+            }
+            if (sameClass) {
+                if (!g_espPlayerVTable && f.hasVtable && f.vtable) {
+                    g_espPlayerVTable = f.vtable;
+                    ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
+                }
+                if (diag) diag->rule = 4;
+                ESPVerdictSet(actor, 1, f.team);
+                goto check_live;
+            }
         }
         if (diag && f.hasMesh && ESPIsUserPtr(f.mesh)) diag->nearChar = 1;
-        // 3) Hình nhân huấn luyện (ShootingPracticeTarget) theo field — dự phòng
-        // khi GNames hỏng. Mọi field dùng ở đây đều NẰM TRONG object (~0x4F8):
-        // MaxHealth 0x4AC, CurHealth 0x4D0, bIsUp 0x4D4, StaticMeshComp 0x4E8.
-        // KHÔNG test "không phải character" bằng field NGOÀI object (0x510 mesh,
-        // 0xE60 hp) nữa: với hình nhân mấy chỗ đó là rác heap nên lúc được 1-3/4
-        // con, lúc 0/4. Lẫn player/hình nhân không sao — cả hai đều được tính.
-        if (f.hasTarget && ESPIsUserPtr(f.tMesh) && ESPIsUserPtr(f.root) &&
+        // 3) Hình nhân huấn luyện (ShootingPracticeTarget) theo field — dự phòng khi GNames hỏng.
+        // StaticMeshComp (0x4E8), RootComponent (0x208), KHÔNG có SkeletalMesh (0x510),
+        // MaxHealth (0x4AC) trong khoảng 50..2000, CurHealth (0x4D0) trong khoảng 0..MaxHealth.
+        // Giống hoàn toàn Kernel: tMesh && !sMesh && tRoot && tMax>=50 && tCur>=0 && tCur<=tMax.
+        if (f.hasTarget && ESPIsUserPtr(f.tMesh) && (!f.hasMesh || !ESPIsUserPtr(f.mesh)) &&
+            f.hasRoot && ESPIsUserPtr(f.root) &&
             f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
             (f.tIsUp == 0 || f.tIsUp == 1)) {
             if (diag) diag->rule = 5;
             ESPVerdictSet(actor, 3, ESPTeam_Dummy);
             if (outTeam) *outTeam = ESPTeam_Dummy;
             if (outHp) *outHp = f.tCur;
-            // Log tên vài con đầu để biết tên instance thật của hình nhân
-            // (xem Documents/ESP.log qua Files app).
             static int s_dummyLogs = 0;
             if (s_dummyLogs < 8) {
                 char dnm[64] = {0};
@@ -354,35 +333,12 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
             return YES;
         }
         if (diag && f.hasTarget && ESPIsUserPtr(f.tMesh)) diag->nearDummy = 1;
-        if (diag && f.hasScore && ESPIsUserPtr(f.stMove)) diag->nearScore = 1;
-        // 4) Hình nhân "người" (AShootingPracticeScoreTarget : ADecoratorActor).
-        // Đây mới là mấy con hình nhân hay gặp trong sân tập: layout riêng
-        // (MoveRoot 0x660, CurrentWave 0x6B8, bIsUp/bIsRotating 0x6BC/0x6BD),
-        // KHÔNG có MaxHealth/CurHealth ở 0x4AC/0x4D0 nên mọi check cũ đều trượt.
-        // (không đòi RootComponent: decorator actor có thể chỉ dùng MoveRoot)
-        if (f.hasScore && ESPIsUserPtr(f.stMove) &&
-            f.stWave >= 0 && f.stWave <= 1000 && f.stIsUp <= 1 && f.stRot <= 1) {
-            if (diag) diag->rule = 6;
-            ESPVerdictSet(actor, 3, ESPTeam_Dummy);
-            if (outTeam) *outTeam = ESPTeam_Dummy;
-            if (outHp) *outHp = 0;
-            static int s_scoreLogs = 0;
-            if (s_scoreLogs < 4) {
-                ESPLog("score dummy: move=0x%llx wave=%d up=%u rot=%u",
-                       (unsigned long long)f.stMove, f.stWave, (unsigned)f.stIsUp, (unsigned)f.stRot);
-                s_scoreLogs++;
-            }
-            return YES;
-        }
         ESPVerdictSet(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
         if (diag) diag->rule = 0;
         return NO;
     }
     if (vit->second == 3) {
-        // target huấn luyện: hiện cả khi bị bắn gục (hp 0) như Kernel GatherTarget.
-        // Không bắt buộc đọc được hp: hình nhân người (ScoreTarget) không có
-        // field hp ở 0x4D0, đòi đọc được là mất luôn con đó khỏi số đếm.
         float tCur = 0;
         (void)ESPMemoryRead(vmMap, actor + ESPOff_Target_CurHealth, &tCur, 4);
         if (outTeam) *outTeam = ESPTeam_Dummy;
@@ -390,11 +346,16 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         return YES;
     }
 check_live:;
-    // 1 lần đọc cửa sổ cho check sống (trước đây 3-4 lần map page/actor/scan).
+    // 1 lần đọc cửa sổ cho check sống.
     ESPActorFields f;
     ESPActorFieldsRead(vmMap, actor, &f);
     if ((f.bHidden & 0x1) || (f.bDead & 0x1)) {
         if (diag) diag->rule = -1;
+        return NO;
+    }
+    // Lọc chính mình (local pawn)
+    if (myPawn && actor == myPawn) {
+        if (diag) diag->rule = -4;
         return NO;
     }
     int team = INT_MIN;
@@ -406,7 +367,7 @@ check_live:;
         if (tit != g_espTeamCache.end()) team = tit->second;
     }
     // Không lọc theo hp: người/hình nhân bị bắn gục (hp 0) vẫn tính như Kernel
-    // (chỉ loại theo bHidden/bDead) — hp>0 trước đây làm mất con vừa bị gục.
+    // (chỉ loại theo bHidden/bDead).
     if (myTeam != INT_MIN && team != INT_MIN && team == myTeam && team != ESPTeam_Dummy) {
         if (diag) diag->rule = -4; // đồng đội
         return NO;
@@ -549,90 +510,37 @@ static BOOL ESPActorsOfLevel(uint64_t vmMap, uint64_t level, uint64_t *outData, 
     return ESPIsUserPtr(data) || count == 0;
 }
 
-// Quét tất cả Levels của World (qua decrypt 0xA0/0x448) và trả về danh sách
-// level có TArray actors. Set g_espStep 61/62/63 khi fail.
-#define ESP_MAX_SCAN_LEVELS 24
-static BOOL g_espAnyLevelOwningOk = NO;
-static BOOL g_espDeepScanLog = NO; // chỉ log danh sách level ở lượt quét đầy đủ
-
-static int ESPCollectLevels(uint64_t vmMap, uint64_t world,
-                            uint64_t *outLevel, uint64_t *outData, uint32_t *outCount,
-                            int maxLv) {
-    BOOL ok = NO;
-    uint64_t candidates[ESP_MAX_SCAN_LEVELS];
-    int nCand = 0;
-    // 1) PersistentLevel
-    {
-        uint64_t lv = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
-        if (ok && ESPIsUserPtr(lv) && nCand < ESP_MAX_SCAN_LEVELS) candidates[nCand++] = lv;
-    }
-    // 2) CurrentLevel 0x468
-    {
-        uint64_t cur = ESPReadU64(vmMap, world + 0x468, &ok);
-        if (ok && ESPIsUserPtr(cur)) {
-            BOOL dup = NO;
-            for (int i = 0; i < nCand; i++) if (candidates[i] == cur) { dup = YES; break; }
-            if (!dup && nCand < ESP_MAX_SCAN_LEVELS) candidates[nCand++] = cur;
-        }
-    }
-    // 3) Levels[] array (streaming levels — PUBG map lớn)
-    {
-        uint64_t levelsData = ESPReadU64(vmMap, world + ESPOff_UWorld_Levels + 0x0, &ok);
-        uint32_t levelsN = ESPReadU32(vmMap, world + ESPOff_UWorld_Levels + 0x8, &ok);
-        if (ok && ESPIsUserPtr(levelsData) && levelsN > 0 && levelsN <= 32) {
-            for (uint32_t i = 0; i < levelsN && nCand < ESP_MAX_SCAN_LEVELS; i++) {
-                uint64_t lv = ESPReadU64(vmMap, levelsData + (uint64_t)i * 8, &ok);
-                if (!ok || !ESPIsUserPtr(lv)) continue;
-                BOOL dup = NO;
-                for (int j = 0; j < nCand; j++) if (candidates[j] == lv) { dup = YES; break; }
-                if (!dup) candidates[nCand++] = lv;
-            }
-        }
-    }
-    if (nCand == 0) { g_espStep = 61; return 0; }
-    int n = 0;
-    uint32_t cand0Count = 0;
-    g_espAnyLevelOwningOk = NO;
-    for (int i = 0; i < nCand; i++) {
-        uint64_t lv = candidates[i];
-        // check chéo: Level.OwningWorld phải == world (nếu đọc được)
-        uint64_t ow = ESPReadU64(vmMap, lv + ESPOff_ULevel_OwningWorld, &ok);
-        if (ok && ow == world) g_espAnyLevelOwningOk = YES;
-        uint64_t ad = 0; uint32_t ac = 0;
-        if (!ESPActorsOfLevel(vmMap, lv, &ad, &ac)) continue;
-        if (i == 0) cand0Count = ac;
-        if (n < maxLv) { outLevel[n] = lv; outData[n] = ad; outCount[n] = ac; n++; }
-    }
-    if (g_espDeepScanLog) {
-        ESPLog("levels cands=%d ok=%d cand0act=%u", nCand, n, (unsigned)cand0Count);
-    }
-    return n;
-}
-
-// Giữ lại cho đường quét nhẹ: level nhiều actor nhất.
+// PersistentLevel là level chính chứa players, bots, dummies và dynamic actors (như Kernel kPersistentLevel = 0x30).
+// Không quét streaming levels (Levels[]) vì chúng chỉ chứa địa hình/cây cối tĩnh, làm tăng từ 139 lên 830 actors và gây lag/nhận nhầm.
 static BOOL ESPLevelAndActors(uint64_t vmMap, uint64_t world, uint64_t *outLevel,
                               uint64_t *outActorsData, uint32_t *outActorsCount) {
-    uint64_t lv[ESP_MAX_SCAN_LEVELS];
-    uint64_t ad[ESP_MAX_SCAN_LEVELS];
-    uint32_t ac[ESP_MAX_SCAN_LEVELS];
-    int n = ESPCollectLevels(vmMap, world, lv, ad, ac, ESP_MAX_SCAN_LEVELS);
-    if (n == 0) return NO; // g_espStep đã là 61
-    uint64_t bestLv = 0, bestAd = 0;
-    uint32_t bestCount = 0;
-    for (int i = 0; i < n; i++) {
-        if (bestLv == 0) { bestLv = lv[i]; bestAd = ad[i]; bestCount = ac[i]; }
-        if (ac[i] > bestCount) { bestCount = ac[i]; bestLv = lv[i]; bestAd = ad[i]; }
+    if (!ESPIsUserPtr(world)) return NO;
+    BOOL ok = NO;
+    // 1) PersistentLevel
+    uint64_t pLevel = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
+    if (ok && ESPIsUserPtr(pLevel)) {
+        uint64_t ad = 0;
+        uint32_t ac = 0;
+        if (ESPActorsOfLevel(vmMap, pLevel, &ad, &ac) && (ESPIsUserPtr(ad) || ac == 0)) {
+            if (outLevel) *outLevel = pLevel;
+            if (outActorsData) *outActorsData = ad;
+            if (outActorsCount) *outActorsCount = ac;
+            return YES;
+        }
     }
-    if (bestLv && (ESPIsUserPtr(bestAd) || bestCount == 0)) {
-        // cand0 = PersistentLevel (level Kernel dùng), best = level nhiều actor
-        // nhất — lệch nhau nghĩa là players/hình nhân có thể nằm level khác.
-        if (outLevel) *outLevel = bestLv;
-        if (outActorsData) *outActorsData = bestAd;
-        if (outActorsCount) *outActorsCount = bestCount;
-        return YES;
+    // 2) Fallback: CurrentLevel 0x468
+    uint64_t curLevel = ESPReadU64(vmMap, world + 0x468, &ok);
+    if (ok && ESPIsUserPtr(curLevel) && curLevel != pLevel) {
+        uint64_t ad = 0;
+        uint32_t ac = 0;
+        if (ESPActorsOfLevel(vmMap, curLevel, &ad, &ac) && (ESPIsUserPtr(ad) || ac == 0)) {
+            if (outLevel) *outLevel = curLevel;
+            if (outActorsData) *outActorsData = ad;
+            if (outActorsCount) *outActorsCount = ac;
+            return YES;
+        }
     }
-    // Không level nào decrypt được actors: phân biệt world sai vs actors sai
-    g_espStep = g_espAnyLevelOwningOk ? 62 : 63;
+    g_espStep = 62;
     return NO;
 }
 
@@ -645,49 +553,7 @@ static BOOL ESPValidateWorld(uint64_t vmMap, uint64_t world) {
         if (!ESPIsUserPtr(ad) && ac != 0) { g_espStep = 71; return NO; }
         return YES;
     }
-    // g_espStep đã là 61/62/63
     return NO;
-}
-
-// Gom actor của TẤT CẢ level thành 1 danh sách (dedup). Trước đây chỉ quét
-// level nhiều actor nhất, nên nếu player/hình nhân nằm ở level streaming khác
-// thì không bao giờ được đếm (log: 452 actors mà 0 players).
-static uint32_t ESPBuildActorUnion(uint64_t vmMap, uint64_t world,
-                                   uint64_t *out, uint32_t maxOut,
-                                   uint64_t *outBestLevel, uint32_t *outBestCount,
-                                   int *outLevelN) {
-    static uint64_t lv[ESP_MAX_SCAN_LEVELS];
-    static uint64_t ad[ESP_MAX_SCAN_LEVELS];
-    static uint32_t ac[ESP_MAX_SCAN_LEVELS];
-    int n = ESPCollectLevels(vmMap, world, lv, ad, ac, ESP_MAX_SCAN_LEVELS);
-    if (outLevelN) *outLevelN = n;
-    uint64_t bestLv = 0;
-    uint32_t bestCount = 0;
-    uint32_t used = 0;
-    static std::unordered_set<uint64_t> seen;
-    if (n > 1) seen.clear();
-    for (int i = 0; i < n; i++) {
-        if (ac[i] > bestCount) { bestCount = ac[i]; bestLv = lv[i]; }
-        if (used >= maxOut) continue; // vẫn đếm level nhưng khỏi đọc thêm
-        if (!ESPIsUserPtr(ad[i]) || ac[i] == 0) continue;
-        uint32_t got = 0;
-        while (got < ac[i]) {
-            uint32_t chunk = ac[i] - got;
-            if (chunk > 2048) chunk = 2048; // 16KB / lượt map page
-            static uint64_t buf[2048];
-            if (!ESPReadWindow(vmMap, ad[i] + (uint64_t)got * 8, buf, (uint64_t)chunk * 8)) break;
-            for (uint32_t k = 0; k < chunk; k++) {
-                uint64_t a = buf[k];
-                if (!ESPIsUserPtr(a)) continue;
-                if (n > 1 && !seen.insert(a).second) continue;
-                if (used < maxOut) out[used++] = a;
-            }
-            got += chunk;
-        }
-    }
-    if (outBestLevel) *outBestLevel = bestLv;
-    if (outBestCount) *outBestCount = bestCount;
-    return used;
 }
 
 ESPScanResult ESPEngineScan(uint64_t gameBase) {
@@ -699,10 +565,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
     g_espFrame++; // frame để verdict 2 hết hạn rồi đánh giá lại
-    // Lấy proc game hiện tại qua Base? DSBridge đã cache proc, nhưng ở đây tự tìm lại nhẹ:
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) {
-        // thử prefix truncated
         proc = procbyname("ShadowTrackerE");
         if (!proc) { g_espStep = 1; return r; }
     }
@@ -717,31 +581,39 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espStep = 0;
     r.world = world;
 
-    BOOL ok = NO;
-    // Gom actor của TẤT CẢ level (không chỉ level nhiều actor nhất): nếu
-    // player/hình nhân nằm ở level streaming khác thì lần trước bị bỏ sót sạch.
-    g_espDeepScanLog = (g_espVerboseLeft > 0);
-    static uint64_t s_union[ESP_MAX_ACTORS_SCAN];
-    uint64_t bestLevel = 0;
-    uint32_t bestLevelCount = 0;
-    int levelN = 0;
-    uint32_t unionN = ESPBuildActorUnion(vmMap, world, s_union, ESP_MAX_ACTORS_SCAN,
-                                         &bestLevel, &bestLevelCount, &levelN);
-    if (unionN == 0) { ESPLog("scan actors FAIL step=%d", g_espStep); return r; }
-    r.level = bestLevel;
-    r.actorCluster = 0; // không dùng cluster ở bản này (decrypt 0xA0/0x448)
-    r.actorCount = unionN;
-    ESPLog("scan start actors=%u union=%u levels=%d base=0x%llx",
-           (unsigned)bestLevelCount, (unsigned)unionN, levelN, (unsigned long long)gameBase);
+    uint64_t level = 0;
+    uint64_t actorsData = 0;
+    uint32_t actorsCount = 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount) || !actorsData || actorsCount == 0) {
+        ESPLog("scan actors FAIL step=%d", g_espStep);
+        return r;
+    }
+    r.level = level;
+    r.actorCluster = 0;
+    r.actorCount = actorsCount;
+    ESPLog("scan start actors=%u level=0x%llx base=0x%llx",
+           (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
     // Giải mã GNames 1 lần cho cả scan (để đọc tên class)
     g_espUName = ESPResolveUName(vmMap, gameBase);
     ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
 
-    uint32_t scanN = unionN;
-    // Lượt quét chi tiết: log field của 24 actor đầu + histogram VTable, chỉ
-    // chạy ở (các) lượt đầu của mỗi world để không spam log.
+    uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
+    static uint64_t s_actors[ESP_MAX_ACTORS_SCAN];
+    uint32_t got = 0;
+    while (got < scanN) {
+        uint32_t chunk = scanN - got;
+        if (chunk > 2048) chunk = 2048;
+        if (!ESPReadWindow(vmMap, actorsData + (uint64_t)got * 8, s_actors + got, (uint64_t)chunk * 8)) {
+            for (uint32_t k = 0; k < chunk; k++) {
+                BOOL okk = NO;
+                s_actors[got + k] = ESPReadU64(vmMap, actorsData + (uint64_t)(got + k) * 8, &okk);
+            }
+        }
+        got += chunk;
+    }
+
     BOOL verbose = (g_espVerboseLeft > 0) || (g_espVerdictWorld != world);
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
@@ -752,8 +624,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) {
             myTeam = t;
             myPawn = lp;
-            // Học VTable player ngay từ pawn của mình (như Kernel): các actor
-            // sau chỉ cần so VTable là ra player, khỏi đọc FName từng con.
+            // Học VTable player ngay từ pawn của mình (như Kernel)
             if (lp && !g_espPlayerVTable) {
                 BOOL okv = NO;
                 uint64_t vt = ESPReadU64(vmMap, lp, &okv);
@@ -767,11 +638,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
     }
     if (verbose) {
-        // Kiểm tra chéo: pawn của mình có nằm trong mảng actors không + field
-        // của chính nó có đúng offset không (Mesh/HP/Team/NameID).
         int inList = -1;
         for (uint32_t i = 0; i < scanN; i++) {
-            if (s_union[i] == myPawn && myPawn) { inList = (int)i; break; }
+            if (s_actors[i] == myPawn && myPawn) { inList = (int)i; break; }
         }
         ESPActorFields pf;
         ESPActorFieldsRead(vmMap, myPawn, &pf);
@@ -784,10 +653,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espProgressTotal.store((int)scanN);
     g_espProgress.store(0);
     uint32_t enemies = 0;
-    uint32_t dummies = 0; // để dòng "scan ok" tách player thật vs hình nhân
+    uint32_t dummies = 0;
     uint32_t nVt = 0, nName = 0, nDummyName = 0, nChar = 0, nDummySig = 0;
-    uint32_t nScore = 0, nNo = 0, nFiltered = 0, nCached = 0;
-    uint32_t nearChar = 0, nearDummy = 0, nearScore = 0, winOK = 0, winFail = 0;
+    uint32_t nNo = 0, nFiltered = 0, nCached = 0;
+    uint32_t nearChar = 0, nearDummy = 0, winOK = 0, winFail = 0;
     std::unordered_map<uint64_t, uint32_t> vtHist;
     uint64_t sample = 0;
     ESPVector samplePos = {0,0,0};
@@ -795,43 +664,36 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     int logged = 0;
     for (uint32_t i = 0; i < scanN; i++) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
-        uint64_t actor = s_union[i];
+        uint64_t actor = s_actors[i];
         if (!ESPIsUserPtr(actor)) continue;
-        // Phân loại hết trong 1 lượt: mỗi actor chỉ còn 1 lần đọc cửa sổ, nên
-        // không cần xoay 1/3 như trước (xoay làm số players nhảy 1 -> 3).
         r.scanned++;
         int team = 0; float hp = 0;
         ESPClassifyDiag dg;
-        BOOL isEnemy = ESPIsEnemy(vmMap, actor, myTeam, &team, &hp, &dg);
+        BOOL isEnemy = ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg);
         switch (dg.rule) {
             case 1: nVt++; break;
             case 2: nName++; break;
             case 3: nDummyName++; break;
             case 4: nChar++; break;
             case 5: nDummySig++; break;
-            case 6: nScore++; break;
             case 0: nNo++; break;
             case -1: case -4: nFiltered++; break;
             case -3: nCached++; break;
             default: break;
         }
-        // rule -2 = đường cache (hình nhân đã biết), -3 = verdict 2 còn hạn:
-        // 2 trường hợp này không đọc field nên không tính vào thống kê window.
         BOOL readFields = (dg.rule != -2 && dg.rule != -3);
         if (readFields) {
             if (dg.win) winOK++; else winFail++;
             if (dg.nearChar == 1) nearChar++;
             if (dg.nearDummy == 1) nearDummy++;
-            if (dg.nearScore == 1) nearScore++;
         }
         if (dg.vt) vtHist[dg.vt]++;
         if (verbose && logged < 24) {
-            ESPLog("a[%u] 0x%llx r=%d w=%d vt=0x%llx nid=0x%x m=0x%llx hp=%.0f/%.0f team=%d tm=0x%llx tMax=%.0f tCur=%.0f up=%u sm=0x%llx sw=%d sup=%u srt=%u nc=%d nd=%d ns=%d",
+            ESPLog("a[%u] 0x%llx r=%d w=%d vt=0x%llx nid=0x%x m=0x%llx hp=%.0f/%.0f team=%d tm=0x%llx tMax=%.0f tCur=%.0f up=%u nc=%d nd=%d",
                    i, (unsigned long long)actor, dg.rule, dg.win, (unsigned long long)dg.vt,
                    dg.nameID, (unsigned long long)dg.mesh, dg.hp, dg.hpMax, dg.team,
                    (unsigned long long)dg.tMesh, dg.tMax, dg.tCur, dg.tIsUp,
-                   (unsigned long long)dg.stMove, dg.stWave, dg.stIsUp, dg.stRot,
-                   dg.nearChar, dg.nearDummy, dg.nearScore);
+                   dg.nearChar, dg.nearDummy);
             logged++;
         }
         if (!isEnemy) continue;
@@ -839,8 +701,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         if (team == ESPTeam_Dummy) dummies++;
         if (!sample) {
             sample = actor;
-            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-            if (ok && ESPIsUserPtr(root)) {
+            BOOL okRoot = NO;
+            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &okRoot);
+            if (okRoot && ESPIsUserPtr(root)) {
                 ESPVector v = {0,0,0};
                 if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &v, sizeof(v))) {
                     samplePos = v;
@@ -856,16 +719,14 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.sampleActor = sample;
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
-    ESPLog("scan done enemies=%u dummy=%u scanned=%u win=%u/%u vt=%u nm=%u dnm=%u ch=%u dm=%u sc=%u no=%u filt=%u cache=%u nc=%u nd=%u ns=%u dt=%.1fs",
+    ESPLog("scan done enemies=%u dummy=%u scanned=%u win=%u/%u vt=%u nm=%u dnm=%u ch=%u dm=%u no=%u filt=%u cache=%u nc=%u nd=%u dt=%.1fs",
            (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
            (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
-           (unsigned)nChar, (unsigned)nDummySig, (unsigned)nScore, (unsigned)nNo,
+           (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
            (unsigned)nFiltered, (unsigned)nCached, (unsigned)nearChar,
-           (unsigned)nearDummy, (unsigned)nearScore,
+           (unsigned)nearDummy,
            CFAbsoluteTimeGetCurrent() - t0);
     if (verbose) {
-        // Histogram VTable: cho biết trong mảng actor có bao nhiêu class khác
-        // nhau (player / hình nhân / bot là các VTable riêng).
         std::vector<std::pair<uint64_t, uint32_t>> vts(vtHist.begin(), vtHist.end());
         std::sort(vts.begin(), vts.end(), [](const std::pair<uint64_t,uint32_t> &a,
                                              const std::pair<uint64_t,uint32_t> &b) {
@@ -988,18 +849,12 @@ static uint32_t ESPFastActors(uint64_t gameBase, uint64_t *outWorld) {
     uint64_t world = ESPReadU64(vmMap, viewport + ESPOff_Viewport_World, &ok);
     if (!ok || !ESPIsUserPtr(world)) return 0;
     if (outWorld) *outWorld = world;
-    // Đếm TỔNG actor của mọi level (số mà lượt quét đầy đủ sẽ duyệt qua).
-    static uint64_t lv[ESP_MAX_SCAN_LEVELS];
-    static uint64_t ad[ESP_MAX_SCAN_LEVELS];
-    static uint32_t ac[ESP_MAX_SCAN_LEVELS];
-    int n = ESPCollectLevels(vmMap, world, lv, ad, ac, ESP_MAX_SCAN_LEVELS);
-    if (n <= 0) return 0;
-    uint32_t total = 0;
-    for (int i = 0; i < n; i++) {
-        if (ac[i] > 20000) return 0;
-        total += ac[i];
+    uint64_t level = 0, ad = 0;
+    uint32_t ac = 0;
+    if (ESPLevelAndActors(vmMap, world, &level, &ad, &ac)) {
+        return ac;
     }
-    return total;
+    return 0;
 }
 
 NSString *ESPEngineStatusText(uint64_t gameBase) {
@@ -1242,7 +1097,8 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
-    { int t = INT_MIN; if (ESPMyTeamAndPawn(vmMap, world, NULL, &t)) myTeam = t; }
+    uint64_t myPawn = 0;
+    { int t = INT_MIN; uint64_t lp = 0; if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) { myTeam = t; myPawn = lp; } }
     uint32_t bulkN2 = scanN > 2048 ? 2048 : scanN;
     static uint64_t s_boxBuf[2048];
     BOOL haveBulk2 = ESPReadWindow(vmMap, actorsData, s_boxBuf, (uint64_t)bulkN2 * 8);
@@ -1260,7 +1116,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         }
         if (!ESPIsUserPtr(actor)) continue;
         int team = 0; float hp = 0;
-        if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp, NULL)) continue;
+        if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, NULL)) continue;
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative
         // ( ComponentToWorld 0x1D0 để dự phòng nếu Relative fail — xem offset.h )
         ESPVector pos = {0,0,0};
@@ -1285,12 +1141,9 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             }
         }
         if (!gotPos) {
-            // Hình nhân: hình nhân người (ScoreTarget) nằm ở MoveRoot 0x660 còn
-            // target sân tập ở StaticMeshComp 0x4E8 — cả hai đều có
-            // ComponentToWorld (0x1D0) + Translation (+0x10).
-            for (int k = 0; k < 2 && !gotPos; k++) {
-                uint64_t comp = ESPReadU64(vmMap, actor + (k == 0 ? ESPOff_Target_Mesh : ESPOff_Score_MoveRoot), &ok);
-                if (!ok || !ESPIsUserPtr(comp)) continue;
+            // Hình nhân: target sân tập ở StaticMeshComp 0x4E8
+            uint64_t comp = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
+            if (ok && ESPIsUserPtr(comp)) {
                 ESPVector v = {0,0,0};
                 if (ESPMemoryRead(vmMap, comp + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
                     fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 &&

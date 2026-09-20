@@ -78,14 +78,6 @@ static const uint32_t ESPOff_Target_MaxHealth = 0x4AC; // float
 static const uint32_t ESPOff_Target_Mesh = 0x4E8; // UStaticMeshComponent*
 static const uint32_t ESPOff_Target_IsUp = 0x4D4; // bool 0/1
 
-// Hình nhân "người" AShootingPracticeScoreTarget : ADecoratorActor : ALuaActor
-// (SDK: MoveRoot 0x660, TargetBodyDataMap 0x668, CurrentWave 0x6B8, bIsUp 0x6BC,
-//  bIsRotating 0x6BD, UpDownChangeSpeed 0x6C0, hết object ~0x710)
-static const uint32_t ESPOff_Score_MoveRoot = 0x660;   // USceneComponent*
-static const uint32_t ESPOff_Score_CurrentWave = 0x6B8; // int
-static const uint32_t ESPOff_Score_IsUp = 0x6BC;        // bool 0/1
-static const uint32_t ESPOff_Score_IsRotating = 0x6BD;  // bool 0/1
-
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
 static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)
