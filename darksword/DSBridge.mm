@@ -1871,30 +1871,13 @@ static void ds_update_rate(void) {
         g_hudActive.store(false);
     }
 
-    // ESP Box thật: tính boxes trong app (có KRW) rồi đẩy rects sang SpringBoard.
+    // ESP Box thật: TẠM TẮT overlay để tránh respring SpringBoard.
+    // Text ESP (actors/players) vẫn chạy. Bao giờ overlay cứng mới bật lại
+    // bằng kDSESPOverlayEnabled.
     @try {
-        BOOL wantESP = ds_show_esp_from_prefs(preferences);
-        if (!wantESP || !g_gameBase) {
-            if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
-        } else {
-            CGRect screenBounds; UIEdgeInsets insets;
-            ds_screen_geometry(&screenBounds, &insets);
-            CGRect portrait = screenBounds;
-            // UIScreen bounds luôn portrait — landscape thì swap để ra size game.
-            int orient = (int)ds_interface_orientation();
-            BOOL land = UIInterfaceOrientationIsLandscape((UIInterfaceOrientation)orient);
-            float gw = land ? portrait.size.height : portrait.size.width;
-            float gh = land ? portrait.size.width : portrait.size.height;
-            if (gw < 100 || gh < 100) {
-                ds_esp_overlay_hide(g_springBoard);
-            } else {
-                ESPBox2D boxes[ESPOverlayMaxBoxes];
-                int n = ESPEngineBoxes(g_gameBase, gw, gh, boxes, ESPOverlayMaxBoxes);
-                ds_esp_overlay_update(g_springBoard, boxes, n, portrait, orient);
-            }
-        }
+        if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
     } @catch (NSException *exception) {
-        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
+        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay hide failed: %{public}@", exception.reason);
     }
 }
 
