@@ -26,6 +26,8 @@ static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
+static int g_espPasses = 0; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
+static int g_espSliceTurn = 0; // xoay vòng 1/3 actors/lượt như Kernel
 static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
 static std::atomic_int g_espProgressTotal{0};
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
@@ -44,6 +46,8 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdictFrame.clear();
         g_espVerdictWorld = world;
         g_espPlayerVTable = 0; // học lại VTable cho world mới
+        g_espPasses = 0;
+        g_espSliceTurn = 0;
     }
 }
 
@@ -470,6 +474,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             if (!ok2) continue;
         }
         if (!actor || actor < 0x100000000ULL) continue;
+        // Actor chưa biết thì chỉ phân loại ở lượt của nó (xoay 1/3 như Kernel
+        // s_frame % 3) — đã biết rồi thì check sống luôn (rẻ: verdict 2 = 0 read).
+        if (g_espVerdict.find(actor) == g_espVerdict.end() && (int)(i % 3) != (g_espSliceTurn % 3)) continue;
         r.scanned++;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
@@ -487,6 +494,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
     }
     g_espProgress.store((int)scanN);
+    g_espSliceTurn = (g_espSliceTurn + 1) % 3;
+    g_espPasses++;
     r.playerLike = enemies;
     r.sampleActor = sample;
     r.samplePos = samplePos;
@@ -499,6 +508,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
 static CFAbsoluteTime g_espCheckedAt = 0;
 static ESPScanResult g_espCache = {0};
+static int g_espCachePasses = 0; // số lượt lúc cache được ghi
 static std::atomic_bool g_espScanning(false);
 static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiện tại
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
@@ -541,6 +551,7 @@ void ESPEngineRequestScan(uint64_t gameBase) {
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
             ESPScanResult r = ESPEngineScan(gameBase);
             g_espCache = r;
+            g_espCachePasses = g_espPasses;
             g_espCheckedAt = CFAbsoluteTimeGetCurrent();
             g_espLastScanSeconds = g_espCheckedAt - t0;
             g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
@@ -558,6 +569,11 @@ static NSString *ESPCacheText(void) {
         int step = g_espStep;
         if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
         return @"ESP: --";
+    }
+    // Chưa đủ 3 lượt xoay thì số players còn thiếu — đánh dấu ~ đang warmup
+    if (g_espCachePasses < 3) {
+        return [NSString stringWithFormat:@"ESP: %u actors / %u~ players",
+                (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
     }
     return [NSString stringWithFormat:@"ESP: %u actors / %u players",
             (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
