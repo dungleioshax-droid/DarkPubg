@@ -8,6 +8,8 @@
 #import "ESPOffsets.h"
 #import "ESPMemory.h"
 #import "ESPConfig.h"
+#import "ESPName.h"
+#import "ESPLog.h"
 #include <unordered_map>
 #include <limits.h>
 #include <atomic>
@@ -26,6 +28,8 @@ static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
 static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
 static std::atomic_int g_espProgressTotal{0};
+static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
+static uint64_t g_espPlayerVTable = 0; // VTable class player đã học
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
 static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
@@ -39,6 +43,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espTeamCache.clear();
         g_espVerdictFrame.clear();
         g_espVerdictWorld = world;
+        g_espPlayerVTable = 0; // học lại VTable cho world mới
     }
 }
 
@@ -88,6 +93,36 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
     }
     BOOL ok = NO;
     if (vit == g_espVerdict.end()) {
+        // 0) VTable đã học: 1 read là xong (như Kernel PlayerVTable)
+        {
+            BOOL ok0 = NO;
+            uint64_t vt = ESPReadU64(vmMap, actor, &ok0);
+            if (ok0 && g_espPlayerVTable && vt == g_espPlayerVTable) {
+                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok0);
+                if (ok0 && team >= 0 && team <= 200000000) {
+                    ESPVerdictSet(actor, 1, team);
+                    goto check_live;
+                }
+            }
+        }
+        // 1) FName qua GNames (như Kernel GetFName -> IsASTExtraPlayerCharacter)
+        if (g_espUName) {
+            char nm[64] = {0};
+            if (ESPActorName(vmMap, g_espUName, actor, nm) && ESPIsPlayerCharacterName(nm)) {
+                BOOL ok0 = NO;
+                uint64_t vt = ESPReadU64(vmMap, actor, &ok0);
+                if (ok0 && vt && !g_espPlayerVTable) {
+                    g_espPlayerVTable = vt;
+                    ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)vt, nm);
+                }
+                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok0);
+                if (ok0 && team >= 0 && team <= 200000000) {
+                    ESPVerdictSet(actor, 1, team);
+                    goto check_live;
+                }
+            }
+        }
+        // 2) heuristic Mesh/Health/Team (dự phòng khi GNames fail)
         // Thử character trước (Mesh skeletal 0x510)
         uint64_t mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
         if (ok && ESPIsUserPtr(mesh)) {
@@ -388,8 +423,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
     g_espStep = 3;
     uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
-    if (!world) return r; // g_espStep đã set 3/4/5 bên trong
-    if (!ESPValidateWorld(vmMap, world)) return r; // g_espStep 61/62/71/72
+    if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx", g_espStep, (unsigned long long)gameBase); return r; }
+    if (!ESPValidateWorld(vmMap, world)) { ESPLog("scan validate FAIL step=%d", g_espStep); return r; }
     g_espStep = 0;
     r.world = world;
 
@@ -397,11 +432,17 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     uint64_t level = 0;
     uint64_t actorsData = 0;
     uint32_t actorsCount = 0;
-    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) return r;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) { ESPLog("scan actors FAIL step=%d", g_espStep); return r; }
     r.level = level;
     r.actorCluster = 0; // không dùng cluster ở bản này (decrypt 0xA0/0x448)
     r.actorCount = actorsCount;
-    if (!actorsData || actorsCount == 0 || actorsCount > 20000) return r;
+    if (!actorsData || actorsCount == 0 || actorsCount > 20000) { ESPLog("scan bad count=%u", (unsigned)actorsCount); return r; }
+    ESPLog("scan start actors=%u base=0x%llx", (unsigned)actorsCount, (unsigned long long)gameBase);
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+
+    // Giải mã GNames 1 lần cho cả scan (để đọc tên class)
+    g_espUName = ESPResolveUName(vmMap, gameBase);
+    ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
 
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     ESPVerdictResetIfWorldChanged(world);
@@ -450,6 +491,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.sampleActor = sample;
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
+    ESPLog("scan done enemies=%u scanned=%u dt=%.1fs", (unsigned)enemies, (unsigned)r.scanned,
+           CFAbsoluteTimeGetCurrent() - t0);
     return r;
 #endif
 }
