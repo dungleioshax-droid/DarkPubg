@@ -107,6 +107,8 @@ static void ds_set_error(NSString *message) {
 #if USE_DARKSWORD
 
 #import "DSRemoteCall.h"
+#import <mach/mach.h>
+#import <mach-o/loader.h>
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
 extern "C" {
@@ -114,6 +116,20 @@ extern "C" {
 #import "offsets.h"
 #import "utils.h"
 }
+
+// Forward declarations from TaskRop/vm.m (avoid pulling the full RemoteCall.h
+// which clashes with our DSRemoteCall.h shim). Layout must match
+// `struct vmshmem` in Vendor/darksword-kexploit/TaskRop/RemoteCall.h.
+struct vmshmem {
+    uint64_t port;
+    uint64_t remoteAddress;
+    uint64_t localAddress;
+    bool used;
+};
+extern "C" void vmmapiterateentries(uint64_t vmmapptr,
+    void (^itblock)(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop));
+extern "C" struct vmshmem vmmapremotepage(uint64_t vmMap, uint64_t address);
+extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
 
 static const NSInteger kDSSpringBoardHUDTag = 0x54534844; // "TSHD"
 static const CGFloat kDSHUDMinFontSize = 9.0;
@@ -468,6 +484,222 @@ static NSDictionary *ds_hud_preferences(void) {
     return preferences;
 }
 
+// MARK: - Base Game (ShadowTrackerExtra / PUBG Mobile)
+
+static NSString * const kDSDefaultGameProcessName = @"ShadowTrackerExtra";
+static const NSTimeInterval kDSGameBaseCacheTTL = 3.0;
+static uint64_t g_gameBase = 0;
+static pid_t g_gamePid = 0;
+static NSString *g_gameFoundName = nil;
+static CFAbsoluteTime g_gameBaseCheckedAt = 0;
+static BOOL g_gameBaseChecking = NO;
+
+static NSString *ds_game_process_name_from_prefs(NSDictionary *prefs) {
+    id raw = prefs ? prefs[HUDUserDefaultsKeyBaseGameName] : nil;
+    if ([raw isKindOfClass:NSString.class] && [(NSString *)raw length] > 0) {
+        return (NSString *)raw;
+    }
+    id stdRaw = [NSUserDefaults.standardUserDefaults objectForKey:HUDUserDefaultsKeyBaseGameName];
+    if ([stdRaw isKindOfClass:NSString.class] && [(NSString *)stdRaw length] > 0) {
+        return (NSString *)stdRaw;
+    }
+    return kDSDefaultGameProcessName;
+}
+
+static BOOL ds_show_base_game_from_prefs(NSDictionary *prefs) {
+    NSNumber *n = prefs ? prefs[HUDUserDefaultsKeyShowBaseGame] : nil;
+    if (n) return n.boolValue;
+    return [NSUserDefaults.standardUserDefaults boolForKey:HUDUserDefaultsKeyShowBaseGame];
+}
+
+// p_comm is truncated (MAXCOMLEN 16), so "ShadowTrackerExtra" (18 chars)
+// never matches with strcmp. Try exact first, then prefix/substring via proclist.
+static uint64_t ds_find_game_proc(const char *wanted, pid_t *outPid, NSString **outFoundName) {
+    if (outPid) *outPid = 0;
+    if (outFoundName) *outFoundName = nil;
+    if (!wanted || !wanted[0]) return 0;
+    if (!ds_is_ready()) return 0;
+
+    uint64_t proc = procbyname(wanted);
+    if (proc) {
+        if (outPid) *outPid = (pid_t)ds_kread32(proc + off_proc_p_pid);
+        if (outFoundName) *outFoundName = [NSString stringWithUTF8String:wanted];
+        return proc;
+    }
+
+    // Prefix of the truncated p_comm (first 15 chars) + full substring search.
+    size_t wantedLen = strlen(wanted);
+    size_t prefixLen = wantedLen > 15 ? 15 : wantedLen;
+    char prefix[32] = {0};
+    if (prefixLen > 0) {
+        strncpy(prefix, wanted, prefixLen);
+        proc = procbyname(prefix);
+        if (proc) {
+            if (outPid) *outPid = (pid_t)ds_kread32(proc + off_proc_p_pid);
+            if (outFoundName) {
+                char tmp[33] = {0};
+                ds_kread(proc + off_proc_p_name, tmp, 32);
+                *outFoundName = [NSString stringWithUTF8String:tmp];
+            }
+            return proc;
+        }
+    }
+
+    int count = 0;
+    proc_entry_t *list = proclist("", &count);
+    if (!list) return 0;
+    uint64_t best = 0;
+    pid_t bestPid = 0;
+    NSString *bestName = nil;
+    // Pass 1: prefix match. Pass 2: substring "Shadow"/wanted.
+    for (int pass = 0; pass < 2 && !best; pass++) {
+        for (int i = 0; i < count; i++) {
+            const char *n = list[i].name;
+            if (!n || !n[0]) continue;
+            BOOL match = NO;
+            if (pass == 0) {
+                match = (prefixLen > 0 && strncmp(n, prefix, prefixLen) == 0);
+            } else {
+                match = (strstr(n, prefix) != NULL) || (strstr(n, "Shadow") != NULL);
+            }
+            if (match) {
+                uint64_t p = procbypid(list[i].pid);
+                if (!p) continue;
+                best = p;
+                bestPid = list[i].pid;
+                bestName = [NSString stringWithUTF8String:n];
+                break;
+            }
+        }
+    }
+    free_proclist(list);
+    if (best) {
+        if (outPid) *outPid = bestPid;
+        if (outFoundName) *outFoundName = bestName;
+    }
+    return best;
+}
+
+static uint64_t ds_scan_process_base(uint64_t vmMap) {
+    if (!vmMap) return 0;
+    __block uint64_t found = 0;
+    // Pass 1: entries that look like a file-backed __TEXT (alias == 0), like decrypt.m.
+    // Pass 2: any mapping with MH_MAGIC_64.
+    for (int pass = 0; pass < 2 && !found; pass++) {
+        vmmapiterateentries(vmMap, ^(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop) {
+            if (found) return;
+            if (start < 0x100000000ULL) return;
+            if (start >= 0xFFFFFF8000000000ULL) return;
+            if (end <= start || (end - start) < 0x4000) return;
+            if (pass == 0 && off_vm_map_entry_vme_alias) {
+                uint64_t raw = ds_kread64(entry + off_vm_map_entry_vme_alias);
+                if ((raw >> 12) != 0) return;
+            }
+            struct vmshmem shmem = vmmapremotepage(vmMap, start);
+            if (!shmem.used || !shmem.localAddress) return;
+            uint32_t magic = *(volatile uint32_t *)(uintptr_t)shmem.localAddress;
+            mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)shmem.localAddress, PAGE_SIZE);
+            if (magic == MH_MAGIC_64 || magic == MH_MAGIC) {
+                found = start;
+                *stop = YES;
+            }
+        });
+    }
+    return found;
+}
+
+static void ds_refresh_game_base_locked(NSString *wantedName) {
+    if (g_gameBaseChecking) return;
+    g_gameBaseChecking = YES;
+    @try {
+        const char *cname = wantedName.UTF8String;
+        if (!cname || !cname[0]) cname = kDSDefaultGameProcessName.UTF8String;
+        pid_t pid = 0;
+        NSString *foundName = nil;
+        uint64_t proc = ds_find_game_proc(cname, &pid, &foundName);
+        if (!proc) {
+            // Keep last known base for display stability, but mark pid 0 = not running.
+            g_gamePid = 0;
+            g_gameFoundName = nil;
+            // If we never found a base, clear it; otherwise keep stale base with "stale" status.
+            if (g_gameBase == 0) {
+                g_gameFoundName = nil;
+            }
+            g_gameBaseCheckedAt = CFAbsoluteTimeGetCurrent();
+            return;
+        }
+        uint64_t task = taskbyproc(proc);
+        uint64_t vmMap = task ? task_get_vm_map(task) : 0;
+        uint64_t base = ds_scan_process_base(vmMap);
+        if (base) {
+            g_gameBase = base;
+            g_gamePid = pid;
+            g_gameFoundName = foundName ?: wantedName;
+        } else {
+            // Process running but base scan failed — keep old base if any.
+            g_gamePid = pid;
+            if (g_gameBase == 0) g_gameFoundName = foundName;
+        }
+        g_gameBaseCheckedAt = CFAbsoluteTimeGetCurrent();
+    } @finally {
+        g_gameBaseChecking = NO;
+    }
+}
+
+static void ds_ensure_game_base(NSDictionary *prefs) {
+    if (!ds_is_ready()) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_gameBaseCheckedAt < kDSGameBaseCacheTTL && g_gameBaseCheckedAt > 0) return;
+    NSString *wanted = ds_game_process_name_from_prefs(prefs);
+    ds_refresh_game_base_locked(wanted);
+}
+
+uint64_t DSBridgeGameBase(void) {
+#if USE_DARKSWORD
+    return g_gameBase;
+#else
+    return 0;
+#endif
+}
+
+NSString *DSBridgeGameProcessName(void) {
+    NSDictionary *prefs = nil;
+#if USE_DARKSWORD
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+#endif
+    NSString *name = prefs ? ds_game_process_name_from_prefs(prefs) : kDSDefaultGameProcessName;
+    return name ?: kDSDefaultGameProcessName;
+}
+
+NSString *DSBridgeGameStatus(void) {
+#if USE_DARKSWORD
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    if (prefs && !ds_show_base_game_from_prefs(prefs)) return @"";
+    if (!ds_is_ready()) return @"Base: wait…";
+    // Refresh synchronously only when stale; called from UI (Settings) or HUD timer.
+    ds_ensure_game_base(prefs);
+    if (g_gameBase) {
+        if (g_gamePid > 0) {
+            return [NSString stringWithFormat:@"Base: 0x%llX", (unsigned long long)g_gameBase];
+        }
+        return [NSString stringWithFormat:@"Base: 0x%llX (stale)", (unsigned long long)g_gameBase];
+    }
+    return @"Base: --";
+#else
+    return @"";
+#endif
+}
+
+void DSBridgeRefreshGameBase(void) {
+#if USE_DARKSWORD
+    g_gameBaseCheckedAt = 0;
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    ds_ensure_game_base(prefs ?: @{});
+#endif
+}
+
 static void ds_append_wav_value(NSMutableData *data, const void *value, NSUInteger size) {
     [data appendBytes:value length:size];
 }
@@ -646,38 +878,60 @@ static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
     if (safeInsets) *safeInsets = currentInsets;
 }
 
+static NSString *ds_base_game_line_for_prefs(NSDictionary *preferences) {
+    if (!ds_show_base_game_from_prefs(preferences)) return nil;
+    ds_ensure_game_base(preferences);
+    if (g_gameBase) {
+        if (g_gamePid > 0) {
+            return [NSString stringWithFormat:@"Base: 0x%llX", (unsigned long long)g_gameBase];
+        }
+        return [NSString stringWithFormat:@"Base: 0x%llX (stale)", (unsigned long long)g_gameBase];
+    }
+    return @"Base: --";
+}
+
 static NSString *ds_display_text(NSDictionary *preferences,
                                  BOOL centered,
                                  BOOL focused,
                                  double down,
                                  double up) {
+    NSString *main = nil;
     if (ds_pref_bool(preferences, HUDUserDefaultsKeyDisplayMode)) {
         CFIndex current = CARenderServerGetDirtyFrameCount(NULL);
         if (g_needsFPSBaselineReset) {
             g_previousDirtyFrameCount = current;
             g_needsFPSBaselineReset = NO;
-            return @"0 FPS";
+            main = @"0 FPS";
+        } else {
+            CFIndex frameDiff = MAX((CFIndex)0, current - g_previousDirtyFrameCount);
+            g_previousDirtyFrameCount = current;
+            CGFloat maximumFPS = UIScreen.mainScreen.maximumFramesPerSecond;
+            main = [NSString stringWithFormat:@"%.0f FPS", MIN((CGFloat)frameDiff, maximumFPS)];
         }
-        CFIndex frameDiff = MAX((CFIndex)0, current - g_previousDirtyFrameCount);
-        g_previousDirtyFrameCount = current;
-        CGFloat maximumFPS = UIScreen.mainScreen.maximumFramesPerSecond;
-        return [NSString stringWithFormat:@"%.0f FPS", MIN((CGFloat)frameDiff, maximumFPS)];
+    } else {
+        BOOL bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
+        BOOL alternateArrows = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
+        BOOL incomingOnly = ds_pref_bool(preferences, HUDUserDefaultsKeySingleLineMode);
+        NSString *downloadPrefix = alternateArrows ? @"↓" : @"▼";
+        NSString *uploadPrefix = alternateArrows ? @"↑" : @"▲";
+        NSString *download = [NSString stringWithFormat:@"%@\u00a0%@",
+                              downloadPrefix, ds_format_speed(down, bitrate, focused)];
+        if (incomingOnly) {
+            main = download;
+        } else {
+            NSString *upload = [NSString stringWithFormat:@"%@\u00a0%@",
+                                uploadPrefix, ds_format_speed(up, bitrate, focused)];
+            main = centered
+                ? [NSString stringWithFormat:@"%@\t%@", download, upload]
+                : [NSString stringWithFormat:@"%@\n%@", upload, download];
+        }
     }
 
-    BOOL bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
-    BOOL alternateArrows = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
-    BOOL incomingOnly = ds_pref_bool(preferences, HUDUserDefaultsKeySingleLineMode);
-    NSString *downloadPrefix = alternateArrows ? @"↓" : @"▼";
-    NSString *uploadPrefix = alternateArrows ? @"↑" : @"▲";
-    NSString *download = [NSString stringWithFormat:@"%@\u00a0%@",
-                          downloadPrefix, ds_format_speed(down, bitrate, focused)];
-    if (incomingOnly) return download;
-
-    NSString *upload = [NSString stringWithFormat:@"%@\u00a0%@",
-                        uploadPrefix, ds_format_speed(up, bitrate, focused)];
-    return centered
-        ? [NSString stringWithFormat:@"%@\t%@", download, upload]
-        : [NSString stringWithFormat:@"%@\n%@", upload, download];
+    NSString *baseLine = ds_base_game_line_for_prefs(preferences);
+    if (baseLine) {
+        return [main stringByAppendingFormat:@"\n%@", baseLine];
+    }
+    return main;
 }
 
 static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
@@ -716,7 +970,8 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
         presentation.cornerRadius = large ? kDSHUDMaxCornerRadius : kDSHUDMinCornerRadius;
     }
     presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
-    presentation.numberOfLines = presentation.centered || presentation.singleLine ? 1 : 2;
+    NSInteger baseLines = ds_show_base_game_from_prefs(preferences) ? 1 : 0;
+    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + baseLines;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
     presentation.maskedCorners =
         presentation.centeredMost && !presentation.landscape
@@ -1700,6 +1955,10 @@ BOOL DSBridgeSetHUDEnabled(BOOL enabled) {
 BOOL DSBridgeHUDEnabled(void) { return NO; }
 double DSBridgeProgress(void) { return 0.0; }
 BOOL DSBridgeIsRunning(void) { return NO; }
+uint64_t DSBridgeGameBase(void) { return 0; }
+NSString *DSBridgeGameStatus(void) { return @""; }
+NSString *DSBridgeGameProcessName(void) { return @"ShadowTrackerExtra"; }
+void DSBridgeRefreshGameBase(void) {}
 
 #endif
 

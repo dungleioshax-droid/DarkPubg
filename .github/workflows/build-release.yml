@@ -41,6 +41,14 @@ jobs:
         run: |
           DARKSPEED_UNSIGNED=1 ./build-darkspeed.sh
 
+      - name: Verify arm64e slice
+        run: |
+          APP_BIN="DarkSpeed.xcarchive/Products/Applications/DarkSpeed.app/DarkSpeed"
+          echo "Checking $APP_BIN"
+          lipo -info "$APP_BIN"
+          lipo -info "$APP_BIN" | grep -q "arm64e" || (echo "ERROR: missing arm64e slice (need ARCHS=arm64e via supports/darksword.xcconfig)" >&2; exit 1)
+          echo "arm64e OK"
+
       - name: Collect symbols
         run: |
           zip -qry packages/DarkSpeed_${{ env.PKG_VERSION }}_symbols.zip DarkSpeed.xcarchive/dSYMs

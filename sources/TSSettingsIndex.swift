@@ -18,6 +18,7 @@ enum TSSettingsIndex: Int, CaseIterable {
     case usesLargeFont
     case usesArrowPrefixes
     case usesBitrate
+    case showBaseGame
 
     var key: String {
         switch self {
@@ -41,6 +42,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyUsesArrowPrefixes
         case .usesBitrate:
             return HUDUserDefaultsKeyUsesBitrate
+        case .showBaseGame:
+            return HUDUserDefaultsKeyShowBaseGame
         }
     }
 
@@ -66,6 +69,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("Prefixes", comment: "TSSettingsIndex")
         case .usesBitrate:
             return NSLocalizedString("Unit", comment: "TSSettingsIndex")
+        case .showBaseGame:
+            return NSLocalizedString("Base Game", comment: "TSSettingsIndex")
         }
     }
 
@@ -81,7 +86,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             }
         case .keepInPlace: fallthrough
         case .hideAtSnapshot: fallthrough
-        case .singleLineMode:
+        case .singleLineMode: fallthrough
+        case .showBaseGame:
             return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
         case .usesInvertedColor:
             return highlighted ? NSLocalizedString("Inverted", comment: "TSSettingsIndex") : NSLocalizedString("Classic", comment: "TSSettingsIndex")

@@ -602,8 +602,36 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         __strong typeof(weakSelf) strongSelf = weakSelf;
         [strongSelf->_mainButton setTitle:(strongSelf->_isRemoteHUDActive ? NSLocalizedString(@"Exit HUD", nil) : NSLocalizedString(@"Open HUD", nil)) forState:UIControlStateNormal];
         NSString *bridgeError = DSBridgeCompiledIn() ? DSBridgeLastError() : @"";
+        // Base Game status (ShadowTrackerExtra) — show in app so users can
+        // verify without looking at the SpringBoard HUD.
+        [strongSelf loadUserDefaults:NO];
+        BOOL showBase = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowBaseGame] boolValue];
+        NSString *baseStatus = nil;
+        NSString *baseProc = nil;
+        if (showBase && DSBridgeCompiledIn()) {
+            @try {
+                baseStatus = DSBridgeGameStatus();
+                baseProc = DSBridgeGameProcessName();
+            } @catch (__unused NSException *e) {
+                baseStatus = nil;
+            }
+            if (baseStatus.length == 0) baseStatus = @"Base: --";
+            if (baseProc.length == 0) baseProc = @"ShadowTrackerExtra";
+        }
         if (!strongSelf->_isRemoteHUDActive && bridgeError.length > 0) {
-            [strongSelf->_authorLabel setText:bridgeError];
+            if (baseStatus) {
+                [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@\n%@", bridgeError, baseProc, baseStatus]];
+            } else {
+                [strongSelf->_authorLabel setText:bridgeError];
+            }
+        } else if (baseStatus) {
+            // HUD active → hint is attributed; base needs plain text, so combine as plain.
+            // Keep it short: process + base line proves "lấy được base hay không".
+            NSString *hintPlain = strongSelf->_isRemoteHUDActive
+                ? NSLocalizedString(@"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD.", nil)
+                : NSLocalizedString(@"DarkSpeed by huami1314\nBased on TrollSpeed by i_82", nil);
+            [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@\n%@", hintPlain, baseProc, baseStatus]];
+            [strongSelf->_authorLabel setTextAlignment:NSTextAlignmentCenter];
         } else {
             [strongSelf->_authorLabel setAttributedText:(strongSelf->_isRemoteHUDActive ? hintAttributedString : creditsAttributedString)];
         }

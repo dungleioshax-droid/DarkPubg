@@ -48,6 +48,22 @@ OBJC_EXTERN double DSBridgeProgress(void);
 /// YES while the serialized bootstrap / SpringBoard attach is running.
 OBJC_EXTERN BOOL DSBridgeIsRunning(void);
 
+/// Base address (mach-o __TEXT) of the target game process.
+/// Returns 0 when Base Game is disabled, DarkSword is not ready,
+/// or the process is not running. Default target is ShadowTrackerExtra
+/// (PUBG Mobile); override via HUDUserDefaultsKeyBaseGameName.
+OBJC_EXTERN uint64_t DSBridgeGameBase(void);
+
+/// Human-readable game-base line for the HUD, e.g. @"Base: 0x1007C0000"
+/// or @"Base: --". Empty string when Base Game display is disabled.
+OBJC_EXTERN NSString *DSBridgeGameStatus(void);
+
+/// Resolved game process name (custom or default ShadowTrackerExtra).
+OBJC_EXTERN NSString *DSBridgeGameProcessName(void);
+
+/// Force an immediate re-scan of the game process base (throttled internally).
+OBJC_EXTERN void DSBridgeRefreshGameBase(void);
+
 /// Posted on any DS progress / state change (observe on main queue).
 OBJC_EXTERN NSString * const DSBridgeProgressNotification;
 

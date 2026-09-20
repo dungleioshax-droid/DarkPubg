@@ -15,6 +15,7 @@
 #import "HUDPresetPosition.h"
 #import "HUDRootViewController.h"
 #import "HUDBackdropLabel.h"
+#import "DSBridge.h"
 #import "DarkSpeed-Swift.h"
 
 #ifdef __cplusplus
@@ -130,6 +131,7 @@ static uint8_t HUD_SHOW_SECOND_SPEED_IN_NEW_LINE = 0;
 static const char *HUD_UPLOAD_PREFIX = "▲";
 static const char *HUD_DOWNLOAD_PREFIX = "▼";
 static uint8_t HUD_DISPLAY_MODE = 0;  // 0=Speed, 1=FPS
+static uint8_t HUD_SHOW_BASE_GAME = 0;  // 0=hide, 1=show ShadowTrackerExtra base
 
 typedef struct {
     uint64_t inputBytes;
@@ -330,6 +332,23 @@ static NSAttributedString *attributedDownloadPrefix = nil;
 static NSAttributedString *attributedInlineSeparator = nil;
 static NSAttributedString *attributedLineSeparator = nil;
 
+static NSString *legacyBaseGameLine(void)
+{
+    if (!HUD_SHOW_BASE_GAME) return nil;
+    NSString *status = nil;
+    @try {
+        status = DSBridgeGameStatus();
+    } @catch (__unused NSException *e) {
+        status = nil;
+    }
+    if (status.length == 0) {
+        // DarkSword not compiled in or disabled — still show placeholder
+        // so SpringBoard HUD proves the toggle is ON.
+        status = @"Base: --";
+    }
+    return status;
+}
+
 static NSAttributedString *formattedAttributedString(BOOL isFocused)
 {
     @autoreleasepool
@@ -433,6 +452,14 @@ static NSAttributedString *formattedAttributedString(BOOL isFocused)
             }
         }
 
+        NSString *baseLine = legacyBaseGameLine();
+        if (baseLine) {
+            if ([mutableString length] > 0) {
+                [mutableString appendAttributedString:attributedLineSeparator];
+            }
+            [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:baseLine attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
+        }
+
         return [mutableString copy];
     }
 }
@@ -467,6 +494,10 @@ static NSAttributedString *formattedFPSAttributedString(BOOL isFocused)
         shouldUpdateSpeedLabel = YES;
 
         NSString *fpsString = [NSString stringWithFormat:@"%.0f FPS", fps];
+        NSString *baseLine = legacyBaseGameLine();
+        if (baseLine) {
+            fpsString = [fpsString stringByAppendingFormat:@"\n%@", baseLine];
+        }
         NSAttributedString *attributedString = [[NSAttributedString alloc] initWithString:fpsString attributes:@{
             NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
         }];
@@ -613,6 +644,9 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     BOOL displayMode = [self displayMode];
     HUD_DISPLAY_MODE = displayMode;
 
+    BOOL showBaseGame = [self showBaseGame];
+    HUD_SHOW_BASE_GAME = showBaseGame;
+
     prevInputBytes = 0;
     prevOutputBytes = 0;
     needsBaselineReset = YES;
@@ -673,6 +707,13 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyDisplayMode];
+    return mode != nil ? [mode boolValue] : NO;
+}
+
+- (BOOL)showBaseGame
+{
+    [self loadUserDefaults:NO];
+    NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeyShowBaseGame];
     return mode != nil ? [mode boolValue] : NO;
 }
 
