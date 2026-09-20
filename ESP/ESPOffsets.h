@@ -71,6 +71,12 @@ static const uint32_t ESPOff_Char_Dead = 0xE7C; // bit0 mask 0x1
 static const uint32_t ESPOff_Char_Team = 0x998; // int
 static const int32_t ESPTeam_Dummy = 100000005; // hình nhân, luôn hiện
 
+// Hình nhân huấn luyện AShootingPracticeTarget (từ offset.h)
+static const uint32_t ESPOff_Target_CurHealth = 0x4D0; // float
+static const uint32_t ESPOff_Target_MaxHealth = 0x4AC; // float
+static const uint32_t ESPOff_Target_Mesh = 0x4E8; // UStaticMeshComponent*
+static const uint32_t ESPOff_Target_IsUp = 0x4D4; // bool 0/1
+
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
 static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)

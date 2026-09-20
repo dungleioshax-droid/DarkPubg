@@ -54,34 +54,63 @@ static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, 
 }
 
 // Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
-// verdict 2 (other) được cache để lần sau khỏi đọc.
+// verdict 1=character, 3=target huấn luyện, 2=other (cache để lần sau khỏi đọc).
 static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam, float *outHp) {
     auto vit = g_espVerdict.find(actor);
     if (vit != g_espVerdict.end() && vit->second == 2) return NO;
     BOOL ok = NO;
     if (vit == g_espVerdict.end()) {
+        // Thử character trước (Mesh skeletal 0x510)
         uint64_t mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
-        if (!ok || !ESPIsUserPtr(mesh)) {
-            if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-            g_espVerdict[actor] = 2;
-            return NO;
+        if (ok && ESPIsUserPtr(mesh)) {
+            float hp = 0, mx = 0;
+            if (ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4) &&
+                ESPMemoryRead(vmMap, actor + ESPOff_Char_HealthMax, &mx, 4)) {
+                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
+                if (ok && hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000) {
+                    if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
+                    g_espVerdict[actor] = 1;
+                    g_espTeamCache[actor] = team;
+                    goto check_live;
+                }
+            }
         }
-        float hp = 0, mx = 0;
-        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4) ||
-            !ESPMemoryRead(vmMap, actor + ESPOff_Char_HealthMax, &mx, 4)) {
-            g_espVerdict[actor] = 2;
-            return NO;
-        }
-        int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
-        if (!ok || !(hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000)) {
-            if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-            g_espVerdict[actor] = 2;
-            return NO;
+        // Thử hình nhân huấn luyện (StaticMesh 0x4E8, không skeletal 0x510)
+        {
+            uint64_t tMesh = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
+            uint64_t sMesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
+            uint64_t tRoot = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+            if (ok && ESPIsUserPtr(tMesh) && !ESPIsUserPtr(sMesh) && ESPIsUserPtr(tRoot)) {
+                float tCur = 0, tMax = 0;
+                uint8_t isUp = 0;
+                if (ESPMemoryRead(vmMap, actor + ESPOff_Target_CurHealth, &tCur, 4) &&
+                    ESPMemoryRead(vmMap, actor + ESPOff_Target_MaxHealth, &tMax, 4) &&
+                    ESPMemoryRead(vmMap, actor + ESPOff_Target_IsUp, &isUp, 1)) {
+                    if (tMax >= 50 && tMax <= 2000 && tCur >= 0 && tCur <= tMax && (isUp == 0 || isUp == 1)) {
+                        if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
+                        g_espVerdict[actor] = 3;
+                        g_espTeamCache[actor] = ESPTeam_Dummy;
+                        if (outTeam) *outTeam = ESPTeam_Dummy;
+                        if (outHp) *outHp = tCur;
+                        return YES;
+                    }
+                }
+            }
         }
         if (g_espVerdict.size() > 3000) { g_espVerdict.clear(); g_espTeamCache.clear(); }
-        g_espVerdict[actor] = 1;
-        g_espTeamCache[actor] = team;
+        g_espVerdict[actor] = 2;
+        return NO;
     }
+    if (vit->second == 3) {
+        // target: check hp còn sống
+        float tCur = 0;
+        if (!ESPMemoryRead(vmMap, actor + ESPOff_Target_CurHealth, &tCur, 4)) return NO;
+        if (!(tCur > 0)) return NO;
+        if (outTeam) *outTeam = ESPTeam_Dummy;
+        if (outHp) *outHp = tCur;
+        return YES;
+    }
+check_live:;
     int team = INT_MIN;
     auto tit = g_espTeamCache.find(actor);
     if (tit != g_espTeamCache.end()) {
