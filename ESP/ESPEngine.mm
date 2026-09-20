@@ -242,19 +242,33 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
             ESPVerdictSet(actor, 1, f.team);
             goto check_live;
         }
-        // 3) Hình nhân theo field — dự phòng khi GNames hỏng: StaticMesh 0x4E8 +
-        // health hình nhân hợp lệ + KHÔNG đọc ra signature của character
-        // (thay cho check 0x510 vốn đọc rác ngoài object).
-        {
-            BOOL looksLikeCharacter = f.hasHp && f.hp > 0 && f.hp <= 2000 && f.hpMax > 0 && f.hpMax <= 2000;
-            if (f.hasTarget && !looksLikeCharacter && ESPIsUserPtr(f.tMesh) && ESPIsUserPtr(f.root) &&
-                f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
-                (f.tIsUp == 0 || f.tIsUp == 1)) {
-                ESPVerdictSet(actor, 3, ESPTeam_Dummy);
-                if (outTeam) *outTeam = ESPTeam_Dummy;
-                if (outHp) *outHp = f.tCur;
-                return YES;
+        // 3) Hình nhân huấn luyện (ShootingPracticeTarget) theo field — dự phòng
+        // khi GNames hỏng. Mọi field dùng ở đây đều NẰM TRONG object (~0x4F8):
+        // MaxHealth 0x4AC, CurHealth 0x4D0, bIsUp 0x4D4, StaticMeshComp 0x4E8.
+        // KHÔNG test "không phải character" bằng field NGOÀI object (0x510 mesh,
+        // 0xE60 hp) nữa: với hình nhân mấy chỗ đó là rác heap nên lúc được 1-3/4
+        // con, lúc 0/4. Lẫn player/hình nhân không sao — cả hai đều được tính.
+        if (f.hasTarget && ESPIsUserPtr(f.tMesh) && ESPIsUserPtr(f.root) &&
+            f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
+            (f.tIsUp == 0 || f.tIsUp == 1)) {
+            ESPVerdictSet(actor, 3, ESPTeam_Dummy);
+            if (outTeam) *outTeam = ESPTeam_Dummy;
+            if (outHp) *outHp = f.tCur;
+            // Log tên vài con đầu để biết tên instance thật của hình nhân
+            // (xem Documents/ESP.log qua Files app).
+            static int s_dummyLogs = 0;
+            if (s_dummyLogs < 8) {
+                char dnm[64] = {0};
+                if (g_espUName && f.hasName && ESPActorNameByID(vmMap, g_espUName, f.nameID, dnm)) {
+                    ESPLog("dummy(field) name=%s tMax=%.0f tCur=%.0f isUp=%u",
+                           dnm, f.tMax, f.tCur, (unsigned)f.tIsUp);
+                } else {
+                    ESPLog("dummy(field) name=? tMax=%.0f tCur=%.0f isUp=%u",
+                           f.tMax, f.tCur, (unsigned)f.tIsUp);
+                }
+                s_dummyLogs++;
             }
+            return YES;
         }
         ESPVerdictSet(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
