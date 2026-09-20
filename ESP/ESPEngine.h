@@ -11,11 +11,15 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// Quét 1 lần (đồng bộ, gọi từ ds_bridge_queue). gameBase = DSBridgeGameBase().
-// Trả về struct thô, không chạm UI.
+// Quét 1 lần (đồng bộ, NẶNG — chỉ gọi từ hàng đợi nền ESP, không gọi từ UI/tick).
+// gameBase = DSBridgeGameBase(). Trả về struct thô, không chạm UI.
 ESPScanResult ESPEngineScan(uint64_t gameBase);
 
+// Đặt lịch quét nền nếu cache cũ (không block, gộp lịch). Gọi thoải mái từ tick/UI.
+void ESPEngineRequestScan(uint64_t gameBase);
+
 // Text ngắn cho HUD SpringBoard, vd: @"ESP: 123 actors / 8 players" hoặc @"ESP: --".
+// KHÔNG quét đồng bộ nữa — chỉ đọc cache + đặt lịch quét nền.
 NSString *ESPEngineStatusText(uint64_t gameBase);
 
 // Text cache KHÔNG quét (dùng cho UI main thread — không bao giờ block).

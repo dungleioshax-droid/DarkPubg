@@ -10,6 +10,7 @@
 #import "ESPConfig.h"
 #include <unordered_map>
 #include <limits.h>
+#include <atomic>
 
 extern "C" {
 #import "darksword.h"
@@ -449,6 +450,47 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
 static CFAbsoluteTime g_espCheckedAt = 0;
 static ESPScanResult g_espCache = {0};
+static std::atomic_bool g_espScanning(false);
+
+static dispatch_queue_t ESPScanQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.huami.darkspeed.esp-scan", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+void ESPEngineRequestScan(uint64_t gameBase) {
+#if !USE_DARKSWORD
+    (void)gameBase;
+    return;
+#else
+    if (!gameBase || !ds_is_ready()) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_espCheckedAt < ESP_CACHE_TTL && g_espCheckedAt > 0) return;
+    bool expected = false;
+    if (!g_espScanning.compare_exchange_strong(expected, true)) return; // đang quét rồi
+    dispatch_async(ESPScanQueue(), ^{
+        @autoreleasepool {
+            ESPScanResult r = ESPEngineScan(gameBase);
+            g_espCache = r;
+            g_espCheckedAt = CFAbsoluteTimeGetCurrent();
+        }
+        g_espScanning.store(false);
+    });
+#endif
+}
+
+static NSString *ESPCacheText(void) {
+    if (!g_espCache.world) {
+        int step = g_espStep;
+        if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
+        return @"ESP: --";
+    }
+    return [NSString stringWithFormat:@"ESP: %u actors / %u players",
+            (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
+}
 
 NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!gameBase) return @"ESP: --";
@@ -457,20 +499,9 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     return @"ESP: --";
 #else
     if (!ds_is_ready()) return @"ESP: wait…";
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - g_espCheckedAt < ESP_CACHE_TTL && g_espCheckedAt > 0) {
-        // dùng cache
-    } else {
-        g_espCache = ESPEngineScan(gameBase);
-        g_espCheckedAt = now;
-    }
-    if (!g_espCache.world) {
-        int step = g_espStep;
-        if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
-        return @"ESP: --";
-    }
-    return [NSString stringWithFormat:@"ESP: %u actors / %u players",
-            (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
+    ESPEngineRequestScan(gameBase); // nền, không block
+    if (g_espCheckedAt == 0) return @"ESP: ..";
+    return ESPCacheText();
 #endif
 }
 
@@ -480,11 +511,7 @@ uint32_t ESPEnginePlayerCount(uint64_t gameBase) {
     (void)gameBase;
     return 0;
 #else
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - g_espCheckedAt >= ESP_CACHE_TTL || g_espCheckedAt == 0) {
-        g_espCache = ESPEngineScan(gameBase);
-        g_espCheckedAt = now;
-    }
+    ESPEngineRequestScan(gameBase); // nền, không block
     return g_espCache.playerLike;
 #endif
 }
@@ -493,14 +520,8 @@ NSString *ESPEngineCachedStatusText(void) {
 #if !USE_DARKSWORD
     return @"ESP: --";
 #else
-    if (g_espCheckedAt == 0) return @"ESP: --";
-    if (!g_espCache.world) {
-        int step = g_espStep;
-        if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
-        return @"ESP: --";
-    }
-    return [NSString stringWithFormat:@"ESP: %u actors / %u players",
-            (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
+    if (g_espCheckedAt == 0) return @"ESP: ..";
+    return ESPCacheText();
 #endif
 }
 
