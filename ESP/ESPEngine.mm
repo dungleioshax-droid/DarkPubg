@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <limits.h>
 #include <atomic>
+#include <string.h>
 
 extern "C" {
 #import "darksword.h"
@@ -24,6 +25,112 @@ extern "C" {
 
 static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
+
+// --- Cửa sổ actor: 1 lần map page lấy HẾT field (trước đây ~8 lần map page) ---
+// 0x0 VTable, 0x18 FName, 0xE8 bHidden, 0x208 RootComponent,
+// 0x4AC/0x4D0/0x4D4/0x4E8 hình nhân, 0x510 Mesh, 0x998 TeamID,
+// 0xE60/0xE64 Health/HealthMax, 0xE7C bDead — tất cả nằm trong 0xF00 byte đầu.
+// Mỗi lần đọc 1 field = 1 vòng allocate + make_memory_entry + map + dealloc
+// (+1 port) trong kernel. Quét vài trăm actor x ~8 field là hàng nghìn vòng
+// -> app bị Jetsam kill giữa lúc quét (scan đứng ~50%). Đọc 1 cửa sổ 0xF00
+// byte chỉ còn 1-2 vòng cho mỗi actor.
+#define ESP_ACTOR_WINDOW 0xF00
+
+typedef struct {
+    uint64_t vtable, root, mesh, tMesh;
+    uint32_t nameID;
+    float hp, hpMax, tCur, tMax;
+    uint8_t bHidden, bDead, tIsUp;
+    int team;
+    BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget;
+    BOOL window; // đọc được cả cửa sổ 1 lần => mọi field đều đáng tin
+} ESPActorFields;
+
+static inline uint64_t ESPWinU64(const uint8_t *b, uint32_t off) {
+    uint64_t v = 0;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
+
+static inline uint32_t ESPWinU32(const uint8_t *b, uint32_t off) {
+    uint32_t v = 0;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
+
+static inline float ESPWinF32(const uint8_t *b, uint32_t off) {
+    float v = 0;
+    memcpy(&v, b + off, sizeof(v));
+    return v;
+}
+
+static BOOL ESPReadF32(uint64_t vmMap, uint64_t addr, float *out) {
+    BOOL ok = NO;
+    uint32_t raw = ESPReadU32(vmMap, addr, &ok);
+    if (ok && out) memcpy(out, &raw, sizeof(raw));
+    return ok;
+}
+
+// Đọc hết field của 1 actor. Không fail cứng: field nào không đọc được thì
+// has* = NO, caller tự quyết định (giữ nguyên hành vi cũ khi thiếu field).
+static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f) {
+    memset(f, 0, sizeof(*f));
+    f->team = INT_MIN;
+    if (!ESPIsUserPtr(actor)) return;
+    uint8_t win[ESP_ACTOR_WINDOW];
+    if (ESPMemoryRead(vmMap, actor, win, sizeof(win))) {
+        f->window = YES;
+        f->vtable = ESPWinU64(win, 0x0);
+        f->hasVtable = YES;
+        f->nameID = ESPWinU32(win, 0x18);
+        f->hasName = YES;
+        f->bHidden = win[ESPOff_Actor_HiddenFlag];
+        f->bDead = win[ESPOff_Char_Dead];
+        f->root = ESPWinU64(win, ESPOff_Actor_RootComponent);
+        f->hasRoot = YES;
+        f->mesh = ESPWinU64(win, ESPOff_Char_Mesh);
+        f->hasMesh = YES;
+        f->team = (int)ESPWinU32(win, ESPOff_Char_Team);
+        f->hasTeam = YES;
+        f->hp = ESPWinF32(win, ESPOff_Char_Health);
+        f->hpMax = ESPWinF32(win, ESPOff_Char_HealthMax);
+        f->hasHp = YES;
+        f->tMesh = ESPWinU64(win, ESPOff_Target_Mesh);
+        f->tCur = ESPWinF32(win, ESPOff_Target_CurHealth);
+        f->tMax = ESPWinF32(win, ESPOff_Target_MaxHealth);
+        f->tIsUp = win[ESPOff_Target_IsUp];
+        f->hasTarget = YES;
+        return;
+    }
+    // Fallback: object nằm sát cuối vùng mapped -> đọc lẻ từng field.
+    BOOL ok = NO;
+    f->vtable = ESPReadU64(vmMap, actor + 0x0, &ok);
+    f->hasVtable = ok;
+    f->nameID = ESPReadU32(vmMap, actor + 0x18, &ok);
+    f->hasName = ok;
+    f->bHidden = ESPReadU8(vmMap, actor + ESPOff_Actor_HiddenFlag, &ok);
+    f->bDead = ESPReadU8(vmMap, actor + ESPOff_Char_Dead, &ok);
+    f->root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+    f->hasRoot = ok;
+    f->mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
+    f->hasMesh = ok;
+    uint32_t rawTeam = ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
+    if (ok) {
+        f->team = (int)rawTeam;
+        f->hasTeam = YES;
+    } else {
+        f->team = INT_MIN;
+    }
+    f->hasHp = ESPReadF32(vmMap, actor + ESPOff_Char_Health, &f->hp);
+    (void)ESPReadF32(vmMap, actor + ESPOff_Char_HealthMax, &f->hpMax);
+    f->tMesh = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
+    if (ok && ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &f->tMax) &&
+        ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &f->tCur)) {
+        f->tIsUp = ESPReadU8(vmMap, actor + ESPOff_Target_IsUp, &ok);
+        f->hasTarget = ok;
+    }
+}
+
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
 static int g_espPasses = 0; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
@@ -95,72 +202,46 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         g_espTeamCache.erase(actor);
         vit = g_espVerdict.end();
     }
-    BOOL ok = NO;
     if (vit == g_espVerdict.end()) {
-        // 0) VTable đã học: 1 read là xong (như Kernel PlayerVTable)
-        {
-            BOOL ok0 = NO;
-            uint64_t vt = ESPReadU64(vmMap, actor, &ok0);
-            if (ok0 && g_espPlayerVTable && vt == g_espPlayerVTable) {
-                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok0);
-                if (ok0 && team >= 0 && team <= 200000000) {
-                    ESPVerdictSet(actor, 1, team);
-                    goto check_live;
-                }
-            }
+        // 1 lần đọc cửa sổ actor: đủ field cho mọi nhánh phân loại bên dưới.
+        ESPActorFields f;
+        ESPActorFieldsRead(vmMap, actor, &f);
+        // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
+        if (f.hasVtable && g_espPlayerVTable && f.vtable == g_espPlayerVTable) {
+            ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
+            goto check_live;
         }
         // 1) FName qua GNames (như Kernel GetFName -> IsASTExtraPlayerCharacter)
-        if (g_espUName) {
+        if (g_espUName && f.hasName) {
             char nm[64] = {0};
-            if (ESPActorName(vmMap, g_espUName, actor, nm) && ESPIsPlayerCharacterName(nm)) {
-                BOOL ok0 = NO;
-                uint64_t vt = ESPReadU64(vmMap, actor, &ok0);
-                if (ok0 && vt && !g_espPlayerVTable) {
-                    g_espPlayerVTable = vt;
-                    ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)vt, nm);
+            if (ESPActorNameByID(vmMap, g_espUName, f.nameID, nm) && ESPIsPlayerCharacterName(nm)) {
+                if (f.hasVtable && f.vtable && !g_espPlayerVTable) {
+                    g_espPlayerVTable = f.vtable;
+                    ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
                 }
-                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok0);
-                if (ok0 && team >= 0 && team <= 200000000) {
-                    ESPVerdictSet(actor, 1, team);
-                    goto check_live;
-                }
+                ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
+                goto check_live;
             }
         }
         // 2) heuristic Mesh/Health/Team (dự phòng khi GNames fail)
         // Thử character trước (Mesh skeletal 0x510)
-        uint64_t mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
-        if (ok && ESPIsUserPtr(mesh)) {
-            float hpmx[2] = {0, 0}; // hp+max kề nhau: 1 lần đọc 8B thay vì 2
-            if (ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hpmx, 8)) {
-                float hp = hpmx[0], mx = hpmx[1];
-                int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
-                if (ok && hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000) {
-                    ESPVerdictSet(actor, 1, team);
-                    goto check_live;
-                }
-            }
+        if (f.window && ESPIsUserPtr(f.mesh) &&
+            f.hp >= 0 && f.hp <= 2000 && f.hpMax > 0 && f.hpMax <= 2000 &&
+            f.hasTeam && f.team >= 0 && f.team <= 200000000) {
+            ESPVerdictSet(actor, 1, f.team);
+            goto check_live;
         }
         // Thử hình nhân huấn luyện (StaticMesh 0x4E8, không skeletal 0x510)
-        {
-            uint64_t tMesh = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
-            uint64_t sMesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
-            uint64_t tRoot = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-            if (ok && ESPIsUserPtr(tMesh) && !ESPIsUserPtr(sMesh) && ESPIsUserPtr(tRoot)) {
-                float tCur = 0, tMax = 0;
-                uint8_t isUp = 0;
-                if (ESPMemoryRead(vmMap, actor + ESPOff_Target_CurHealth, &tCur, 4) &&
-                    ESPMemoryRead(vmMap, actor + ESPOff_Target_MaxHealth, &tMax, 4) &&
-                    ESPMemoryRead(vmMap, actor + ESPOff_Target_IsUp, &isUp, 1)) {
-                    if (tMax >= 50 && tMax <= 2000 && tCur >= 0 && tCur <= tMax && (isUp == 0 || isUp == 1)) {
-                        ESPVerdictSet(actor, 3, ESPTeam_Dummy);
-                        if (outTeam) *outTeam = ESPTeam_Dummy;
-                        if (outHp) *outHp = tCur;
-                        return YES;
-                    }
-                }
+        if (f.hasTarget && ESPIsUserPtr(f.tMesh) && !ESPIsUserPtr(f.mesh) && ESPIsUserPtr(f.root)) {
+            if (f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
+                (f.tIsUp == 0 || f.tIsUp == 1)) {
+                ESPVerdictSet(actor, 3, ESPTeam_Dummy);
+                if (outTeam) *outTeam = ESPTeam_Dummy;
+                if (outHp) *outHp = f.tCur;
+                return YES;
             }
         }
-        ESPVerdictSet(actor, 2, 0);
+        ESPVerdictSet(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
         return NO;
     }
@@ -174,26 +255,23 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         return YES;
     }
 check_live:;
+    // 1 lần đọc cửa sổ cho check sống (trước đây 3-4 lần map page/actor/scan).
+    ESPActorFields f;
+    ESPActorFieldsRead(vmMap, actor, &f);
+    if ((f.bHidden & 0x1) || (f.bDead & 0x1)) return NO;
     int team = INT_MIN;
-    auto tit = g_espTeamCache.find(actor);
-    if (tit != g_espTeamCache.end()) {
-        team = tit->second;
-    } else {
-        team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
-        if (!ok) return NO;
+    if (f.hasTeam && f.team >= 0 && f.team <= 200000000) {
+        team = f.team;
         g_espTeamCache[actor] = team;
+    } else {
+        auto tit = g_espTeamCache.find(actor);
+        if (tit != g_espTeamCache.end()) team = tit->second;
     }
-    uint8_t hid = ESPReadU8(vmMap, actor + ESPOff_Actor_HiddenFlag, &ok);
-    if (!ok) return NO;
-    uint8_t dead = ESPReadU8(vmMap, actor + ESPOff_Char_Dead, &ok);
-    if (!ok) return NO;
-    if ((hid & 0x1) || (dead & 0x1)) return NO;
-    float hp = 0;
-    if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4)) return NO;
-    if (!(hp > 0 && hp <= 2000)) return NO;
-    if (myTeam != INT_MIN && team == myTeam && team != ESPTeam_Dummy) return NO;
+    // hp: chỉ loại khi đọc được cả cửa sổ (fallback có thể miss field).
+    if (f.window && !(f.hp > 0 && f.hp <= 2000)) return NO;
+    if (myTeam != INT_MIN && team != INT_MIN && team == myTeam && team != ESPTeam_Dummy) return NO;
     if (outTeam) *outTeam = team;
-    if (outHp) *outHp = hp;
+    if (outHp) *outHp = f.hasHp ? f.hp : 0;
     return YES;
 }
 
@@ -451,7 +529,23 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
-    { int t = INT_MIN; uint64_t lp = 0; if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) myTeam = t; }
+    {
+        int t = INT_MIN;
+        uint64_t lp = 0;
+        if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) {
+            myTeam = t;
+            // Học VTable player ngay từ pawn của mình (như Kernel): các actor
+            // sau chỉ cần so VTable là ra player, khỏi đọc FName từng con.
+            if (lp && !g_espPlayerVTable) {
+                BOOL okv = NO;
+                uint64_t vt = ESPReadU64(vmMap, lp, &okv);
+                if (okv && ESPIsUserPtr(vt)) {
+                    g_espPlayerVTable = vt;
+                    ESPLog("learned player VTable=0x%llx from local pawn", (unsigned long long)vt);
+                }
+            }
+        }
+    }
     // Đọc gộp toàn bộ mảng pointers 1 lần (như Kernel ReadBuf):
     // 452 actors lẻ = 452 mappings, gộp = 1-2 mappings.
     uint32_t bulkN = scanN > 2048 ? 2048 : scanN;
@@ -473,7 +567,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok2);
             if (!ok2) continue;
         }
-        if (!actor || actor < 0x100000000ULL) continue;
+        if (!ESPIsUserPtr(actor)) continue;
         // Actor chưa biết thì chỉ phân loại ở lượt của nó (xoay 1/3 như Kernel
         // s_frame % 3) — đã biết rồi thì check sống luôn (rẻ: verdict 2 = 0 read).
         if (g_espVerdict.find(actor) == g_espVerdict.end() && (int)(i % 3) != (g_espSliceTurn % 3)) continue;
@@ -514,6 +608,8 @@ static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiệ
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
 static double g_espLastScanSeconds = 0; // lần quét xong gần nhất mất bao lâu
 static int g_espLastScanEnemies = -1; // -1 = chưa xong lần nào
+static uint32_t g_espLightActors = 0; // actors của lần quét nhẹ gần nhất
+static uint64_t g_espLightWorld = 0;  // world tương ứng (0 = chưa quét được)
 
 static dispatch_queue_t ESPScanQueue(void) {
     static dispatch_queue_t q;
@@ -616,10 +712,20 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!ds_is_ready()) return @"ESP: wait…";
     ESPEngineRequestScan(gameBase); // lọc players chạy nền, không block
     if (g_espCheckedAt != 0) return ESPCacheText();
-    // Chưa lọc xong lần nào — quét nhẹ lấy số actors hiện ngay
-    uint64_t w = 0;
-    uint32_t actors = ESPFastActors(gameBase, &w);
-    if (w && actors <= 20000) {
+    // Chưa lọc xong lần nào: quét nhẹ lấy số actors hiện ngay — nhưng KHÔNG
+    // đọc kernel song song với scan nền (vmmapremotepage không re-entrant,
+    // 2 thread cùng đọc là hỏng vm entry -> respring). Trong lúc scan thì
+    // dùng lại số actors của lần quét nhẹ trước.
+    if (!g_espScanning.load()) {
+        uint64_t w = 0;
+        uint32_t fresh = ESPFastActors(gameBase, &w);
+        if (w && fresh <= 20000) {
+            g_espLightActors = fresh;
+            g_espLightWorld = w;
+        }
+    }
+    if (g_espLightWorld) {
+        uint32_t actors = g_espLightActors;
         int prog = g_espProgress.load();
         int total = g_espProgressTotal.load();
         if (actors > 0) {
@@ -847,7 +953,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok2);
             if (!ok2) continue;
         }
-        if (!actor || actor < 0x100000000ULL) continue;
+        if (!ESPIsUserPtr(actor)) continue;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative

@@ -19,6 +19,10 @@ uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase);
 // NO nếu fail. Dùng cache theo ID nên lần sau rẻ.
 BOOL ESPActorName(uint64_t vmMap, uint64_t uname, uint64_t actor, char outName[64]);
 
+// Như ESPActorName nhưng nhận sẵn FName ID (actor+0x18) — dùng khi đã đọc
+// sẵn cửa sổ actor, khỏi tốn thêm 1 lần map page.
+BOOL ESPActorNameByID(uint64_t vmMap, uint64_t uname, uint32_t fid, char outName[64]);
+
 // So tên với list class player của Kernel (STExtraPlayerCharacter...).
 BOOL ESPIsPlayerCharacterName(const char *name);
 

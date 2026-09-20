@@ -6,6 +6,7 @@
 #import "ESPMemory.h"
 #import "ESPConfig.h"
 #import <mach/mach.h>
+#include <mutex>
 
 #if USE_DARKSWORD
 extern "C" {
@@ -23,6 +24,19 @@ struct ESPShmem {
 extern "C" struct ESPShmem vmmapremotepage(uint64_t vmMap, uint64_t address);
 extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
 
+// vmmapremotepage() không re-entrant: nó tạo memory entry rồi bump
+// vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng đọc
+// (ESP scan ở queue nền + HUD tick ở bridge queue) có thể ghi đè refcount
+// của cùng vm_object -> vm_object bị free sớm -> panic/respring.
+// Mọi đường đọc memory game phải đi qua mutex này.
+static std::mutex s_espReadMutex;
+
+// Chỉ nhận địa chỉ userspace của process game (4GB..0x3000_0000_0000).
+// Pointer rác trong Actor array rơi xuống kernel walk sẽ treo/panic.
+static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
+    return addr >= 0x100000000ULL && addr < 0x300000000000ULL;
+}
+
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     if (!proc) return 0;
     if (!ds_is_ready()) return 0;
@@ -35,6 +49,9 @@ uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
     if (!vmMap || !remoteAddr || !buf || !len) return NO;
     if (len > 0x10000) return NO; // chặn đọc quá lớn 1 lần
+    if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
+    if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
     uint64_t off = 0;
     uint8_t *out = (uint8_t *)buf;
     while (off < len) {

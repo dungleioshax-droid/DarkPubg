@@ -158,7 +158,15 @@ BOOL ESPActorName(uint64_t vmMap, uint64_t uname, uint64_t actor, char outName[6
     if (!uname || !actor) return NO;
     BOOL ok = NO;
     uint32_t fid = ESPReadU32(vmMap, actor + 0x18, &ok); // NamePrivate.ComparisonIndex
-    if (!ok || fid >= kFNameMaxID) return NO;
+    if (!ok) return NO;
+    return ESPActorNameByID(vmMap, uname, fid, outName);
+}
+
+BOOL ESPActorNameByID(uint64_t vmMap, uint64_t uname, uint32_t fid, char outName[64]) {
+    if (outName) outName[0] = '\0';
+    if (!uname || !outName) return NO;
+    if (fid >= kFNameMaxID) return NO;
+    BOOL ok = NO;
     auto it = s_nameCache.find(fid);
     if (it != s_nameCache.end()) {
         const std::string &s = it->second;
