@@ -74,21 +74,88 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     return world;
 }
 
-static BOOL ESPClusterActors(uint64_t vmMap, uint64_t cluster, uint64_t *outData, uint32_t *outCount) {
+static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok) {
+    uint8_t v = 0;
+    BOOL r = ESPMemoryRead(vmMap, addr, &v, sizeof(v));
+    if (ok) *ok = r;
+    return v;
+}
+
+// Port từ /home/dungle/Kernel/esp/unity_api/unity.mm DecryptActorsArray(Level, 0xA0, 0x448).
+// Trả về địa chỉ của TArray Actors (đọc data ở +0x0, count ở +0x8). 0 nếu fail.
+static uint64_t ESPDecryptActorsArray(uint64_t vmMap, uint64_t uLevel) {
+    if (!ESPIsUserPtr(uLevel)) return 0;
     BOOL ok = NO;
-    uint64_t data = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
+    uint64_t vA0 = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_Actors, &ok);
+    if (ok && vA0 > 0) return uLevel + ESPOff_ULevel_Actors;
+    uint64_t v448 = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_EncryptedActors, &ok);
+    if (ok && v448 > 0) return uLevel + ESPOff_ULevel_EncryptedActors;
+    uint64_t enc[4] = {0,0,0,0};
+    for (int i = 0; i < 4; i++) {
+        enc[i] = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_EncryptedActors + 0x10 + (uint64_t)i * 8, &ok);
+        if (!ok) return 0;
+    }
+    if (enc[0] > 0) {
+        uint32_t vals[8] = {0,0,0,0,0,0,0,0};
+        for (int i = 0; i < 8; i++) {
+            vals[i] = ESPReadU32(vmMap, enc[0] + 0x80 + (uint64_t)i * 4, &ok);
+            if (!ok) return 0;
+        }
+        uint8_t b[8] = {0,0,0,0,0,0,0,0};
+        for (int i = 0; i < 8; i++) {
+            b[i] = ESPReadU8(vmMap, enc[0] + vals[i], &ok);
+            if (!ok) return 0;
+        }
+        // Giữ nguyên logic gốc (|| trả về 0/1) — nhánh này hiếm khi chạy ở bản này.
+        uint64_t r = ((((uint64_t)(b[0] || (b[1] < 8)) || (b[2] < 0x10))) & 0xFFFFFFULL)
+            || ((uint64_t)b[3] < 0x18)
+            || ((uint64_t)b[4] < 0x20));
+        r = (r & 0xFFFF00FFFFFFFFFFULL)
+            || ((uint64_t)b[5] < 0x28)
+            || ((uint64_t)b[6] < 0x30)
+            || ((uint64_t)b[7] < 0x38);
+        return r;
+    } else if (enc[1] > 0) {
+        uint64_t ea = ESPReadU64(vmMap, enc[1], &ok);
+        if (!ok || ea == 0) return 0;
+        uint64_t r = ((uint64_t)(uint16_t)(ea - 0x400) & 0xFF00ULL)
+            || ((uint64_t)(uint8_t)(ea - 0x04))
+            || ((ea + 0xFC0000ULL) & 0xFF0000ULL)
+            || ((ea - 0x4000000ULL) & 0xFF000000ULL)
+            || ((ea + 0xFC00000000ULL) & 0xFF00000000ULL)
+            || ((ea + 0xFC0000000000ULL) & 0xFF0000000000ULL)
+            || ((ea + 0xFC000000000000ULL) & 0xFF000000000000ULL)
+            || ((ea - 0x400000000000000ULL) & 0xFF00000000000000ULL);
+        return r;
+    } else if (enc[2] > 0) {
+        uint64_t ea = ESPReadU64(vmMap, enc[2], &ok);
+        if (!ok || ea == 0) return 0;
+        return (ea > 0x38) | (ea < (64 - 0x38));
+    } else if (enc[3] > 0) {
+        uint64_t ea = ESPReadU64(vmMap, enc[3], &ok);
+        if (!ok || ea == 0) return 0;
+        return ea ^ 0xCDCD00ULL;
+    }
+    return 0;
+}
+
+static BOOL ESPActorsOfLevel(uint64_t vmMap, uint64_t level, uint64_t *outData, uint32_t *outCount) {
+    uint64_t arr = ESPDecryptActorsArray(vmMap, level);
+    if (!arr) return NO;
+    BOOL ok = NO;
+    uint64_t data = ESPReadU64(vmMap, arr + 0x0, &ok);
     if (!ok) return NO;
-    uint32_t count = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
+    uint32_t count = ESPReadU32(vmMap, arr + 0x8, &ok);
     if (!ok || count > 30000) return NO;
-    // data==0 + count==0 (level trống) vẫn ok — caller tự quyết
     if (outData) *outData = data;
     if (outCount) *outCount = count;
     return ESPIsUserPtr(data) || count == 0;
 }
 
-// Quét tất cả Levels của World, chọn level có nhiều actors nhất.
-// Trả về level/cluster tốt nhất. Set g_espStep 61/62/63 khi fail.
-static BOOL ESPLevelAndCluster(uint64_t vmMap, uint64_t world, uint64_t *outLevel, uint64_t *outCluster) {
+// Quét tất cả Levels của World, chọn level có nhiều actors nhất (qua decrypt 0xA0/0x448).
+// Trả về level + TArray actors tốt nhất. Set g_espStep 61/62/63 khi fail.
+static BOOL ESPLevelAndActors(uint64_t vmMap, uint64_t world, uint64_t *outLevel,
+                              uint64_t *outActorsData, uint32_t *outActorsCount) {
     BOOL ok = NO;
     uint64_t candidates[18];
     int nCand = 0;
@@ -121,8 +188,9 @@ static BOOL ESPLevelAndCluster(uint64_t vmMap, uint64_t world, uint64_t *outLeve
         }
     }
     if (nCand == 0) { g_espStep = 61; return NO; }
-    // Chọn level có actors nhiều nhất + cluster hợp lệ
-    uint64_t bestLv = 0, bestCl = 0;
+    // Chọn level có actors nhiều nhất (qua decrypt 0xA0/0x448)
+    uint64_t bestLv = 0;
+    uint64_t bestAd = 0;
     uint32_t bestCount = 0;
     BOOL anyLevelOwningOk = NO;
     for (int i = 0; i < nCand; i++) {
@@ -130,33 +198,29 @@ static BOOL ESPLevelAndCluster(uint64_t vmMap, uint64_t world, uint64_t *outLeve
         // check chéo: Level.OwningWorld phải == world (nếu đọc được)
         uint64_t ow = ESPReadU64(vmMap, lv + ESPOff_ULevel_OwningWorld, &ok);
         if (ok && ow == world) anyLevelOwningOk = YES;
-        uint64_t cl = ESPReadU64(vmMap, lv + ESPOff_ULevel_ActorCluster, &ok);
-        if (!ok || !ESPIsUserPtr(cl)) continue;
         uint64_t ad = 0; uint32_t ac = 0;
-        if (!ESPClusterActors(vmMap, cl, &ad, &ac)) continue;
-        if (ac > bestCount) { bestCount = ac; bestLv = lv; bestCl = cl; }
-        if (bestLv == 0) { bestLv = lv; bestCl = cl; }
+        if (!ESPActorsOfLevel(vmMap, lv, &ad, &ac)) continue;
+        if (ac > bestCount) { bestCount = ac; bestLv = lv; bestAd = ad; }
+        if (bestLv == 0) { bestLv = lv; bestAd = ad; bestCount = ac; }
     }
-    if (bestLv && bestCl) {
+    if (bestLv && (ESPIsUserPtr(bestAd) || bestCount == 0)) {
         if (outLevel) *outLevel = bestLv;
-        if (outCluster) *outCluster = bestCl;
+        if (outActorsData) *outActorsData = bestAd;
+        if (outActorsCount) *outActorsCount = bestCount;
         return YES;
     }
-    // Không level nào có cluster hợp lệ: phân biệt world sai vs cluster sai
+    // Không level nào decrypt được actors: phân biệt world sai vs actors sai
     g_espStep = anyLevelOwningOk ? 62 : 63;
     return NO;
 }
 
 static BOOL ESPValidateWorld(uint64_t vmMap, uint64_t world) {
-    uint64_t lv = 0, cl = 0;
-    if (ESPLevelAndCluster(vmMap, world, &lv, &cl)) {
-        // check actors data/count (g_espStep 71/72 nếu sai)
-        BOOL ok = NO;
-        uint64_t actorsData = ESPReadU64(vmMap, cl + ESPOff_ActorCluster_Actors + 0x0, &ok);
-        uint32_t actorsCount = ESPReadU32(vmMap, cl + ESPOff_ActorCluster_Actors + 0x8, &ok);
-        if (!ok) { g_espStep = 71; return NO; }
-        if (actorsCount > 30000) { g_espStep = 72; return NO; }
-        if (!ESPIsUserPtr(actorsData) && actorsCount != 0) { g_espStep = 71; return NO; }
+    uint64_t lv = 0;
+    uint64_t ad = 0;
+    uint32_t ac = 0;
+    if (ESPLevelAndActors(vmMap, world, &lv, &ad, &ac)) {
+        if (ac > 30000) { g_espStep = 72; return NO; }
+        if (!ESPIsUserPtr(ad) && ac != 0) { g_espStep = 71; return NO; }
         return YES;
     }
     // g_espStep đã là 61/62/63
@@ -190,14 +254,12 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.world = world;
 
     BOOL ok = NO;
-    uint64_t level = 0, cluster = 0;
-    if (!ESPLevelAndCluster(vmMap, world, &level, &cluster)) return r;
+    uint64_t level = 0;
+    uint64_t actorsData = 0;
+    uint32_t actorsCount = 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) return r;
     r.level = level;
-    r.actorCluster = cluster;
-    uint64_t actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
-    if (!ok) return r;
-    uint32_t actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
-    if (!ok) return r;
+    r.actorCluster = 0; // không dùng cluster ở bản này (decrypt 0xA0/0x448)
     r.actorCount = actorsCount;
     if (!actorsData || actorsCount == 0 || actorsCount > 20000) return r;
 
@@ -342,45 +404,41 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
 }
 
 BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float screenH, float *outX, float *outY, float *outDist) {
+    // Port đúng công thức Kernel/esp/unity_api/unity.mm World2Screen
+    // (cả 2 trục đều dùng screenCenterX).
     if (screenW <= 0 || screenH <= 0) return NO;
     if (!(cam.fov >= 10 && cam.fov <= 170)) return NO;
-    float aspect = cam.aspect;
-    if (!(aspect > 0.3 && aspect < 4.0)) aspect = screenW / screenH;
-    // UE FRotator degrees -> radians
     const float kPi = 3.141592653589793f;
-    float pitch = cam.rotation.pitch * kPi / 180.0f;
-    float yaw   = cam.rotation.yaw   * kPi / 180.0f;
-    float roll  = cam.rotation.roll  * kPi / 180.0f;
-    float cp = cosf(pitch), sp = sinf(pitch);
-    float cy = cosf(yaw),   sy = sinf(yaw);
-    float cr = cosf(roll),  sr = sinf(roll);
-    // UE axes (cm): X forward, Y right, Z up
-    // Forward = (cp*cy, cp*sy, sp)? UE pitch dương nhìn lên? Dùng chuẩn:
-    // forward=(cp*cy, cp*sy, sp), right=(-sy, cy, 0) bỏ roll, up tính đủ.
-    // Để gồm roll cho đúng:
-    ESPVector fwd = { cp*cy, cp*sy, sp };
-    // Right trước roll: (-sy, cy, 0), Up trước roll: (-sp*cy, -sp*sy, cp)
-    ESPVector r0 = { -sy, cy, 0 };
-    ESPVector u0 = { -sp*cy, -sp*sy, cp };
-    ESPVector right = { r0.x*cr + u0.x*sr, r0.y*cr + u0.y*sr, r0.z*cr + u0.z*sr };
-    ESPVector up    = { u0.x*cr - r0.x*sr, u0.y*cr - r0.y*sr, u0.z*cr - r0.z*sr };
+    float radPitch = cam.rotation.pitch * kPi / 180.0f;
+    float radYaw   = cam.rotation.yaw   * kPi / 180.0f;
+    float radRoll  = cam.rotation.roll  * kPi / 180.0f;
+    float SP = sinf(radPitch), CP = cosf(radPitch);
+    float SY = sinf(radYaw),   CY = cosf(radYaw);
+    float SR = sinf(radRoll),  CR = cosf(radRoll);
+    // Hàng ma trận như RotatorToMatrix gốc
+    float m00 = CP*CY, m01 = CP*SY, m02 = SP;
+    float m10 = SR*SP*CY - CR*SY, m11 = SR*SP*SY + CR*CY, m12 = -SR*CP;
+    float m20 = -(CR*SP*CY + SR*SY), m21 = CY*SR - CR*SP*SY, m22 = CR*CP;
     ESPVector d = { world.x - cam.location.x, world.y - cam.location.y, world.z - cam.location.z };
-    float distM = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z) / 100.0f; // cm -> m
-    float x = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z; // depth (forward)
-    if (x < 100.0f) return NO; // sau lưng / quá gần (1m)
-    float y = d.x*right.x + d.y*right.y + d.z*right.z;
-    float z = d.x*up.x + d.y*up.y + d.z*up.z;
+    // vTransformed = (dot(d,Y), dot(d,Z), dot(d,X)) theo code gốc
+    float tx = d.x*m10 + d.y*m11 + d.z*m12;
+    float ty = d.x*m20 + d.y*m21 + d.z*m22;
+    float tz = d.x*m00 + d.y*m01 + d.z*m02;
+    if (tz < 1.0f) tz = 1.0f;
+    float distM = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z) / 100.0f;
+    float cx = screenW * 0.5f, cyC = screenH * 0.5f;
     float tanHalf = tanf(cam.fov * kPi / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return NO;
-    float cx = screenW * 0.5f, cyC = screenH * 0.5f;
-    float sx = cx + (y / (x * tanHalf * aspect)) * cx;
-    float syC = cyC - (z / (x * tanHalf)) * cyC;
+    float sx = cx + tx * (cx / tanHalf) / tz;
+    float syC = cyC - ty * (cx / tanHalf) / tz;
     if (outX) *outX = sx;
     if (outY) *outY = syC;
     if (outDist) *outDist = distM;
-    // ngoài màn hình vẫn trả YES để caller tự lọc margin? Ở đây lọc luôn:
     if (sx < -100 || sx > screenW + 100 || syC < -100 || syC > screenH + 100) return NO;
     if (distM > 350.0f) return NO;
+    // sau lưng thật: depth chưa rotate < 0 (dự phòng, vì tz đã clamp)
+    float depth = d.x*(CP*CY) + d.y*(CP*SY) + d.z*SP;
+    if (depth < 100.0f) return NO;
     return YES;
 }
 
@@ -397,25 +455,25 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) return 0;
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
-    // Lấy actors từ cache/scan
+    // Lấy actors từ cache/scan (qua decrypt 0xA0/0x448, không qua cluster)
     uint64_t world = g_espCache.world;
-    uint64_t level = 0, cluster = 0, actorsData = 0;
-    uint32_t actorsCount = 0;
     BOOL ok = NO;
     if (!world) {
         ESPScanResult r = ESPEngineScan(gameBase);
         world = r.world;
+        if (world) {
+            // dùng actors từ scan mới nhất nếu có
+            if (r.actorCount > 0) {
+                // r đã có actorCount nhưng không giữ actorsData — đọc lại rẻ:
+            }
+        }
     }
     if (!world) return 0;
-    // Đọc lại level/cluster để tươi (rẻ, không scan GUObject)
-    level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
-    if (!ok || !level) return 0;
-    cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
-    if (!ok || !cluster) return 0;
-    actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
-    if (!ok) return 0;
-    actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
-    if (!ok || actorsCount == 0 || actorsCount > 20000) return 0;
+    uint64_t level = 0;
+    uint64_t actorsData = 0;
+    uint32_t actorsCount = 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) return 0;
+    if (!actorsData || actorsCount == 0 || actorsCount > 20000) return 0;
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     // Lấy vị trí mình để bỏ qua self (actor gần camera <2m)
     int n = 0;
@@ -424,26 +482,36 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
         uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
         if (!ok || !actor || actor < 0x100000000ULL) continue;
-        // Vị trí world: thử ReplicatedMovement Location trước
+        // Vị trí world theo source Kernel: Root.Relative + Parent.Relative
+        // ( ComponentToWorld 0x1D0 để dự phòng nếu Relative fail — xem offset.h )
         ESPVector pos = {0,0,0};
         BOOL gotPos = NO;
         {
-            ESPVector v = {0,0,0};
-            if (ESPMemoryRead(vmMap, actor + ESPOff_Actor_ReplicatedMovement + ESPOff_RepMovement_Location, &v, sizeof(v))) {
-                // lọc vector rác
-                if (fabsf(v.x) < 200000 && fabsf(v.y) < 200000 && fabsf(v.z) < 200000 && (v.x != 0 || v.y != 0 || v.z != 0)) {
-                    pos = v; gotPos = YES;
+            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+            if (ok && ESPIsUserPtr(root)) {
+                ESPVector loc = {0,0,0};
+                if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
+                    fabsf(loc.x) < 300000 && fabsf(loc.y) < 300000 && fabsf(loc.z) < 300000 &&
+                    (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
+                    uint64_t parent = ESPReadU64(vmMap, root + ESPOff_Scene_AttachedParent, &ok);
+                    if (ok && ESPIsUserPtr(parent)) {
+                        ESPVector pl = {0,0,0};
+                        if (ESPMemoryRead(vmMap, parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
+                            fabsf(pl.x) < 300000 && fabsf(pl.y) < 300000 && fabsf(pl.z) < 300000) {
+                            loc.x += pl.x; loc.y += pl.y; loc.z += pl.z;
+                        }
+                    }
+                    pos = loc; gotPos = YES;
                 }
             }
         }
         if (!gotPos) {
-            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-            if (!ok || !root) continue;
             ESPVector v = {0,0,0};
-            if (!ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &v, sizeof(v))) continue;
-            if (fabsf(v.x) > 200000 || fabsf(v.y) > 200000 || fabsf(v.z) > 200000) continue;
-            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
-            pos = v; gotPos = YES;
+            if (ESPMemoryRead(vmMap, actor + ESPOff_Actor_ReplicatedMovement + ESPOff_RepMovement_Location, &v, sizeof(v))) {
+                if (fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 && (v.x != 0 || v.y != 0 || v.z != 0)) {
+                    pos = v; gotPos = YES;
+                }
+            }
         }
         if (!gotPos) continue;
         float sx = 0, sy = 0, dist = 0;

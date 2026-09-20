@@ -45,8 +45,15 @@ static const uint32_t ESPOff_GameEngine_GameInstance = 0xE20; // UGameEngine->Ga
 static const uint32_t ESPOff_Viewport_World = 0x78; // UWorld* trực tiếp, chain ngắn nhất
 static const uint32_t ESPOff_Viewport_GameInstance = 0x80;
 
-// ULevel (size 0x4B8) — bản này KHÔNG có Actors trực tiếp, đi qua ActorCluster
-static const uint32_t ESPOff_ULevel_ActorCluster = 0xE0; // ULevelActorContainer*
+// ULevel (size 0x4B8)
+// Actors THẬT theo source Kernel/esp/drawing_view (đã chạy được):
+//   Level+0xA0 = TArray Actors (nếu !=0 dùng luôn)
+//   Level+0x448 = TArray mã hoá (nếu !=0 dùng luôn)
+//   còn lại giải mã qua struct ở Level+0x448+0x10 (xem DecryptActorsArray)
+// ActorCluster 0xE0 ở bản này trống (E62) — giữ lại để tham khảo.
+static const uint32_t ESPOff_ULevel_Actors = 0xA0;
+static const uint32_t ESPOff_ULevel_EncryptedActors = 0x448;
+static const uint32_t ESPOff_ULevel_ActorCluster = 0xE0; // ULevelActorContainer* (trống ở bản này)
 static const uint32_t ESPOff_ULevel_OwningWorld = 0xC0; // ULevel->OwningWorld (check chéo)
 static const uint32_t ESPOff_ActorCluster_Actors = 0x28; // TArray<AActor*>
 
@@ -57,6 +64,7 @@ static const uint32_t ESPOff_RepMovement_Location = 0x18;      // +0x110 = Actor
 
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
+static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)
 
 // Camera chain (PUBG UE4, từ SDK/Engine.hpp)
 // UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
