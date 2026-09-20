@@ -9,7 +9,6 @@
 #import "ESPMemory.h"
 #import "ESPConfig.h"
 
-#if USE_DARKSWORD
 extern "C" {
 #import "darksword.h"
 #import "offsets.h"
