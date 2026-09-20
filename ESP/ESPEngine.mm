@@ -24,6 +24,8 @@ static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
+static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
+static std::atomic_int g_espProgressTotal{0};
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
 static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
@@ -455,8 +457,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 static CFAbsoluteTime g_espCheckedAt = 0;
 static ESPScanResult g_espCache = {0};
 static std::atomic_bool g_espScanning(false);
-static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
-static std::atomic_int g_espProgressTotal{0};
 static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiện tại
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
 
