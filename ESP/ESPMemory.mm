@@ -73,6 +73,32 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     }
     return YES;
 }
+
+// 1 page là 4K hoặc 16K tuỳ build — chặn trên cho buffer trên stack.
+#define ESP_MAX_PAGE 0x4000ULL
+
+BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    if (!vmMap || !remoteAddr || !buf || !len) return NO;
+    if (len > 0x40000) return NO;
+    if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
+    if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    if ((uint64_t)PAGE_SIZE > ESP_MAX_PAGE) return NO;
+    uint8_t pageBuf[ESP_MAX_PAGE];
+    uint8_t *out = (uint8_t *)buf;
+    uint64_t off = 0;
+    while (off < len) {
+        uint64_t addr = remoteAddr + off;
+        uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t pageOff = addr - pageStart;
+        uint64_t chunk = (uint64_t)PAGE_SIZE - pageOff;
+        if (chunk > len - off) chunk = len - off;
+        // đọc nguyên 1 page từ địa chỉ page-align: đúng dạng map đang chạy được.
+        if (!ESPMemoryRead(vmMap, pageStart, pageBuf, (uint64_t)PAGE_SIZE)) return NO;
+        memcpy(out + off, pageBuf + pageOff, (size_t)chunk);
+        off += chunk;
+    }
+    return YES;
+}
 #else
 // Simulator / non-DarkSword: không có kernel RW — stub để link được.
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
@@ -80,6 +106,10 @@ uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     return 0;
 }
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
+    return NO;
+}
+BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
     (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
     return NO;
 }

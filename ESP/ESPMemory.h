@@ -20,6 +20,12 @@ uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc);
 // Đọc len bytes từ địa chỉ ảo của game vào buf. Trả về YES nếu đọc đủ.
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
 
+// Đọc dài an toàn: chia thành từng page và mỗi lần chỉ map ĐÚNG 1 page tại địa
+// chỉ page-align (vmmapremotepage chỉ map được 1 page; đọc vượt page trong 1
+// lần gọi sẽ fail ở chunk thứ 2 — log thực tế: đọc 0xF00 byte luôn fail nên
+// phải rơi xuống ~11 lần đọc lẻ/actor, pass quét 20s).
+BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
+
 // Helpers
 static inline uint64_t ESPReadU64(uint64_t vmMap, uint64_t addr, BOOL *ok) {
     uint64_t v = 0;

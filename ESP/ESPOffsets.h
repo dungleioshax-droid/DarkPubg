@@ -71,15 +71,26 @@ static const uint32_t ESPOff_Char_Dead = 0xE7C; // bit0 mask 0x1
 static const uint32_t ESPOff_Char_Team = 0x998; // int
 static const int32_t ESPTeam_Dummy = 100000005; // hình nhân, luôn hiện
 
-// Hình nhân huấn luyện AShootingPracticeTarget (từ offset.h)
+// Hình nhân huấn luyện AShootingPracticeTarget : AActor (từ offset.h)
+// (object chỉ dài ~0x508 — đọc quá mốc đó là rác heap của object kế bên)
 static const uint32_t ESPOff_Target_CurHealth = 0x4D0; // float
 static const uint32_t ESPOff_Target_MaxHealth = 0x4AC; // float
 static const uint32_t ESPOff_Target_Mesh = 0x4E8; // UStaticMeshComponent*
 static const uint32_t ESPOff_Target_IsUp = 0x4D4; // bool 0/1
 
+// Hình nhân "người" AShootingPracticeScoreTarget : ADecoratorActor : ALuaActor
+// (SDK: MoveRoot 0x660, TargetBodyDataMap 0x668, CurrentWave 0x6B8, bIsUp 0x6BC,
+//  bIsRotating 0x6BD, UpDownChangeSpeed 0x6C0, hết object ~0x710)
+static const uint32_t ESPOff_Score_MoveRoot = 0x660;   // USceneComponent*
+static const uint32_t ESPOff_Score_CurrentWave = 0x6B8; // int
+static const uint32_t ESPOff_Score_IsUp = 0x6BC;        // bool 0/1
+static const uint32_t ESPOff_Score_IsRotating = 0x6BD;  // bool 0/1
+
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
 static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)
+static const uint32_t ESPOff_Comp_ComponentToWorld = 0x1D0; // FTransform
+static const uint32_t ESPOff_Transform_Translation = 0x10;   // FQuat 0x0 + FVector 0x10
 
 // Camera chain (PUBG UE4, từ SDK/Engine.hpp)
 // UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
