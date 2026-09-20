@@ -451,6 +451,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 static CFAbsoluteTime g_espCheckedAt = 0;
 static ESPScanResult g_espCache = {0};
 static std::atomic_bool g_espScanning(false);
+static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiện tại
+static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
 
 static dispatch_queue_t ESPScanQueue(void) {
     static dispatch_queue_t q;
@@ -470,13 +472,24 @@ void ESPEngineRequestScan(uint64_t gameBase) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - g_espCheckedAt < ESP_CACHE_TTL && g_espCheckedAt > 0) return;
     bool expected = false;
-    if (!g_espScanning.compare_exchange_strong(expected, true)) return; // đang quét rồi
+    if (!g_espScanning.compare_exchange_strong(expected, true)) {
+        // Đang quét — nếu kẹt quá lâu thì nhả cờ cho quét lại
+        if (g_espScanStart > 0 && now - g_espScanStart > kESPScanStuckTimeout) {
+            g_espScanning.store(false);
+            expected = false;
+            if (!g_espScanning.compare_exchange_strong(expected, true)) return;
+        } else {
+            return;
+        }
+    }
+    g_espScanStart = now;
     dispatch_async(ESPScanQueue(), ^{
         @autoreleasepool {
             ESPScanResult r = ESPEngineScan(gameBase);
             g_espCache = r;
             g_espCheckedAt = CFAbsoluteTimeGetCurrent();
         }
+        g_espScanStart = 0;
         g_espScanning.store(false);
     });
 #endif
@@ -500,7 +513,16 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
 #else
     if (!ds_is_ready()) return @"ESP: wait…";
     ESPEngineRequestScan(gameBase); // nền, không block
-    if (g_espCheckedAt == 0) return @"ESP: ..";
+    if (g_espCheckedAt == 0) {
+        // Chưa quét xong lần nào — hiện số giây đang quét để biết có kẹt không
+        if (g_espScanStart > 0) {
+            int el = (int)(CFAbsoluteTimeGetCurrent() - g_espScanStart);
+            if (el < 0) el = 0;
+            if (el > 999) el = 999;
+            return [NSString stringWithFormat:@"ESP: .. %ds", el];
+        }
+        return @"ESP: ..";
+    }
     return ESPCacheText();
 #endif
 }
