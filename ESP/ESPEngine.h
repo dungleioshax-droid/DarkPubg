@@ -26,6 +26,10 @@ NSString *ESPEngineStatusText(uint64_t gameBase);
 // Trả @"ESP: --" nếu chưa có cache.
 NSString *ESPEngineCachedStatusText(void);
 
+// Dòng trạng thái quét cho màn hình app (cache, không block):
+// @"scan 45% 12s" đang quét, @"scan ok 4/452 8.2s", @"scan fail E62 3.1s", @"scan idle".
+NSString *ESPEngineScanInfoText(void);
+
 // Số players thô (để HUD khác dùng nếu cần).
 uint32_t ESPEnginePlayerCount(uint64_t gameBase);
 

@@ -74,6 +74,10 @@ OBJC_EXTERN NSString *DSBridgeESPStatus(void);
 /// Cached ESP status WITHOUT scanning (safe for main thread UI).
 OBJC_EXTERN NSString *DSBridgeESPCachedStatus(void);
 
+/// Cached scan progress info WITHOUT scanning (safe for main thread UI).
+/// e.g. @"scan 45% 12s", @"scan ok 4 8.2s", @"scan fail E62 3.1s", @"scan idle".
+OBJC_EXTERN NSString *DSBridgeESPScanInfo(void);
+
 /// Raw player-like actor count (0 when disabled / not ready).
 OBJC_EXTERN uint32_t DSBridgeESPCount(void);
 

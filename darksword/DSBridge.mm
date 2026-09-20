@@ -791,6 +791,19 @@ NSString *DSBridgeESPCachedStatus(void) {
 #endif
 }
 
+NSString *DSBridgeESPScanInfo(void) {
+#if USE_DARKSWORD
+    @try {
+        NSString *s = ESPEngineScanInfoText();
+        return s ?: @"scan idle";
+    } @catch (__unused NSException *e) {
+        return @"scan idle";
+    }
+#else
+    return @"scan sim";
+#endif
+}
+
 static void ds_append_wav_value(NSMutableData *data, const void *value, NSUInteger size) {
     [data appendBytes:value length:size];
 }
@@ -2276,6 +2289,7 @@ NSString *DSBridgeGameProcessName(void) { return @"ShadowTrackerExtra"; }
 void DSBridgeRefreshGameBase(void) {}
 NSString *DSBridgeESPStatus(void) { return @""; }
 NSString *DSBridgeESPCachedStatus(void) { return @""; }
+NSString *DSBridgeESPScanInfo(void) { return @"scan sim"; }
 uint32_t DSBridgeESPCount(void) { return 0; }
 
 #endif

@@ -502,6 +502,8 @@ static ESPScanResult g_espCache = {0};
 static std::atomic_bool g_espScanning(false);
 static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiện tại
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
+static double g_espLastScanSeconds = 0; // lần quét xong gần nhất mất bao lâu
+static int g_espLastScanEnemies = -1; // -1 = chưa xong lần nào
 
 static dispatch_queue_t ESPScanQueue(void) {
     static dispatch_queue_t q;
@@ -536,9 +538,14 @@ void ESPEngineRequestScan(uint64_t gameBase) {
     g_espProgressTotal.store(0);
     dispatch_async(ESPScanQueue(), ^{
         @autoreleasepool {
+            CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
             ESPScanResult r = ESPEngineScan(gameBase);
             g_espCache = r;
             g_espCheckedAt = CFAbsoluteTimeGetCurrent();
+            g_espLastScanSeconds = g_espCheckedAt - t0;
+            g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
+            ESPLog("scan finished dt=%.1fs enemies=%d step=%d", g_espLastScanSeconds,
+                   g_espLastScanEnemies, g_espStep);
         }
         g_espScanStart = 0;
         g_espScanning.store(false);
@@ -638,6 +645,31 @@ NSString *ESPEngineCachedStatusText(void) {
 #else
     if (g_espCheckedAt == 0) return @"ESP: ..";
     return ESPCacheText();
+#endif
+}
+
+NSString *ESPEngineScanInfoText(void) {
+#if !USE_DARKSWORD
+    return @"scan sim";
+#else
+    if (g_espScanning.load()) {
+        int prog = g_espProgress.load();
+        int total = g_espProgressTotal.load();
+        double el = (g_espScanStart > 0) ? (CFAbsoluteTimeGetCurrent() - g_espScanStart) : 0;
+        if (el < 0) el = 0;
+        if (prog >= 0 && total > 0) {
+            int pct = (int)((int64_t)prog * 100 / total);
+            if (pct < 0) pct = 0;
+            if (pct > 99) pct = 99;
+            return [NSString stringWithFormat:@"scan %d%% %.0fs", pct, el];
+        }
+        return [NSString stringWithFormat:@"scan .. %.0fs", el];
+    }
+    if (g_espCheckedAt == 0) return @"scan idle";
+    if (g_espLastScanEnemies >= 0) {
+        return [NSString stringWithFormat:@"scan ok %d %.1fs", g_espLastScanEnemies, g_espLastScanSeconds];
+    }
+    return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
 #endif
 }
 

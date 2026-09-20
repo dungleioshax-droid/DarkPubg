@@ -610,6 +610,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         NSString *baseStatus = nil;
         NSString *baseProc = nil;
         NSString *espStatus = nil;
+        NSString *espScan = nil;
         if (showBase && DSBridgeCompiledIn()) {
             @try {
                 // Dùng cached (không quét trên main thread để tránh treo).
@@ -625,6 +626,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             @try {
                 // Dùng cached (không quét trên main thread để tránh treo).
                 espStatus = DSBridgeESPCachedStatus();
+                espScan = DSBridgeESPScanInfo();
             } @catch (__unused NSException *e) {
                 espStatus = nil;
             }
@@ -636,6 +638,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             [extraLines addObject:baseStatus];
         }
         if (espStatus) [extraLines addObject:espStatus];
+        if (espScan) [extraLines addObject:espScan];
         NSString *extraText = extraLines.count ? [extraLines componentsJoinedByString:@"\n"] : nil;
         if (!strongSelf->_isRemoteHUDActive && bridgeError.length > 0) {
             if (extraText) {
