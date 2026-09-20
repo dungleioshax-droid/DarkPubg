@@ -410,11 +410,14 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     uint32_t bulkN = scanN > 2048 ? 2048 : scanN;
     static uint64_t s_actorBuf[2048];
     BOOL haveBulk = ESPMemoryRead(vmMap, actorsData, s_actorBuf, (uint64_t)bulkN * 8);
+    g_espProgressTotal.store((int)scanN);
+    g_espProgress.store(0);
     uint32_t enemies = 0;
     uint64_t sample = 0;
     ESPVector samplePos = {0,0,0};
     BOOL hasPos = NO;
     for (uint32_t i = 0; i < scanN; i++) {
+        if ((i & 15) == 0) g_espProgress.store((int)i);
         uint64_t actor = 0;
         if (haveBulk && i < bulkN) {
             actor = s_actorBuf[i];
@@ -440,6 +443,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             }
         }
     }
+    g_espProgress.store((int)scanN);
     r.playerLike = enemies;
     r.sampleActor = sample;
     r.samplePos = samplePos;
@@ -451,6 +455,8 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 static CFAbsoluteTime g_espCheckedAt = 0;
 static ESPScanResult g_espCache = {0};
 static std::atomic_bool g_espScanning(false);
+static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
+static std::atomic_int g_espProgressTotal{0};
 static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiện tại
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
 
@@ -483,6 +489,8 @@ void ESPEngineRequestScan(uint64_t gameBase) {
         }
     }
     g_espScanStart = now;
+    g_espProgress.store(-1);
+    g_espProgressTotal.store(0);
     dispatch_async(ESPScanQueue(), ^{
         @autoreleasepool {
             ESPScanResult r = ESPEngineScan(gameBase);
@@ -546,7 +554,17 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     uint64_t w = 0;
     uint32_t actors = ESPFastActors(gameBase, &w);
     if (w && actors <= 20000) {
-        if (actors > 0) return [NSString stringWithFormat:@"ESP: %u actors / ..", (unsigned)actors];
+        int prog = g_espProgress.load();
+        int total = g_espProgressTotal.load();
+        if (actors > 0) {
+            if (prog >= 0 && total > 0) {
+                int pct = (int)((int64_t)prog * 100 / total);
+                if (pct < 0) pct = 0;
+                if (pct > 99) pct = 99;
+                return [NSString stringWithFormat:@"ESP: %u actors / .. %d%%", (unsigned)actors, pct];
+            }
+            return [NSString stringWithFormat:@"ESP: %u actors / ..", (unsigned)actors];
+        }
         return @"ESP: 0 actors / ..";
     }
     // World còn chưa ra — hiện số giây đang quét để biết có kẹt không
