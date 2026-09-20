@@ -134,7 +134,6 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
 static int g_espPasses = 0; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
-static int g_espSliceTurn = 0; // xoay vòng 1/3 actors/lượt như Kernel
 static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
 static std::atomic_int g_espProgressTotal{0};
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
@@ -154,7 +153,6 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdictWorld = world;
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPasses = 0;
-        g_espSliceTurn = 0;
     }
 }
 
@@ -214,13 +212,26 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         // 1) FName qua GNames (như Kernel GetFName -> IsASTExtraPlayerCharacter)
         if (g_espUName && f.hasName) {
             char nm[64] = {0};
-            if (ESPActorNameByID(vmMap, g_espUName, f.nameID, nm) && ESPIsPlayerCharacterName(nm)) {
-                if (f.hasVtable && f.vtable && !g_espPlayerVTable) {
-                    g_espPlayerVTable = f.vtable;
-                    ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
+            if (ESPActorNameByID(vmMap, g_espUName, f.nameID, nm)) {
+                if (ESPIsPlayerCharacterName(nm)) {
+                    if (f.hasVtable && f.vtable && !g_espPlayerVTable) {
+                        g_espPlayerVTable = f.vtable;
+                        ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
+                    }
+                    ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
+                    goto check_live;
                 }
-                ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
-                goto check_live;
+                // 1b) Hình nhân huấn luyện (ShootingPracticeTarget) nhận theo TÊN.
+                // Check cũ theo field (StaticMesh 0x4E8 + KHÔNG có 0x510) sai
+                // vì 0x510 nằm NGOÀI object ShootingPracticeTarget (~0x4F8) —
+                // đọc ra rác heap nên chỉ 1-3/4 con khớp. Tên thì luôn khớp.
+                if (ESPIsTrainingDummyName(nm)) {
+                    ESPVerdictSet(actor, 3, ESPTeam_Dummy);
+                    if (outTeam) *outTeam = ESPTeam_Dummy;
+                    if (outHp) *outHp = f.tCur;
+                    ESPLog("training dummy: %s", nm);
+                    return YES;
+                }
             }
         }
         // 2) heuristic Mesh/Health/Team (dự phòng khi GNames fail)
@@ -231,9 +242,13 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
             ESPVerdictSet(actor, 1, f.team);
             goto check_live;
         }
-        // Thử hình nhân huấn luyện (StaticMesh 0x4E8, không skeletal 0x510)
-        if (f.hasTarget && ESPIsUserPtr(f.tMesh) && !ESPIsUserPtr(f.mesh) && ESPIsUserPtr(f.root)) {
-            if (f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
+        // 3) Hình nhân theo field — dự phòng khi GNames hỏng: StaticMesh 0x4E8 +
+        // health hình nhân hợp lệ + KHÔNG đọc ra signature của character
+        // (thay cho check 0x510 vốn đọc rác ngoài object).
+        {
+            BOOL looksLikeCharacter = f.hasHp && f.hp > 0 && f.hp <= 2000 && f.hpMax > 0 && f.hpMax <= 2000;
+            if (f.hasTarget && !looksLikeCharacter && ESPIsUserPtr(f.tMesh) && ESPIsUserPtr(f.root) &&
+                f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
                 (f.tIsUp == 0 || f.tIsUp == 1)) {
                 ESPVerdictSet(actor, 3, ESPTeam_Dummy);
                 if (outTeam) *outTeam = ESPTeam_Dummy;
@@ -267,8 +282,8 @@ check_live:;
         auto tit = g_espTeamCache.find(actor);
         if (tit != g_espTeamCache.end()) team = tit->second;
     }
-    // hp: chỉ loại khi đọc được cả cửa sổ (fallback có thể miss field).
-    if (f.window && !(f.hp > 0 && f.hp <= 2000)) return NO;
+    // Không lọc theo hp: người/hình nhân bị bắn gục (hp 0) vẫn tính như Kernel
+    // (chỉ loại theo bHidden/bDead) — hp>0 trước đây làm mất con vừa bị gục.
     if (myTeam != INT_MIN && team != INT_MIN && team == myTeam && team != ESPTeam_Dummy) return NO;
     if (outTeam) *outTeam = team;
     if (outHp) *outHp = f.hasHp ? f.hp : 0;
@@ -554,6 +569,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espProgressTotal.store((int)scanN);
     g_espProgress.store(0);
     uint32_t enemies = 0;
+    uint32_t dummies = 0; // để dòng "scan ok" tách player thật vs hình nhân
     uint64_t sample = 0;
     ESPVector samplePos = {0,0,0};
     BOOL hasPos = NO;
@@ -568,13 +584,13 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             if (!ok2) continue;
         }
         if (!ESPIsUserPtr(actor)) continue;
-        // Actor chưa biết thì chỉ phân loại ở lượt của nó (xoay 1/3 như Kernel
-        // s_frame % 3) — đã biết rồi thì check sống luôn (rẻ: verdict 2 = 0 read).
-        if (g_espVerdict.find(actor) == g_espVerdict.end() && (int)(i % 3) != (g_espSliceTurn % 3)) continue;
+        // Phân loại hết trong 1 lượt: mỗi actor chỉ còn 1 lần đọc cửa sổ, nên
+        // không cần xoay 1/3 như trước (xoay làm số players nhảy 1 -> 3).
         r.scanned++;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
         enemies++;
+        if (team == ESPTeam_Dummy) dummies++;
         if (!sample) {
             sample = actor;
             uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
@@ -588,9 +604,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
     }
     g_espProgress.store((int)scanN);
-    g_espSliceTurn = (g_espSliceTurn + 1) % 3;
     g_espPasses++;
     r.playerLike = enemies;
+    r.dummyLike = dummies;
     r.sampleActor = sample;
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
@@ -608,6 +624,7 @@ static CFAbsoluteTime g_espScanStart = 0; // lúc bắt đầu lần quét hiệ
 static const double kESPScanStuckTimeout = 25.0; // quá từng này giây coi như kẹt, cho quét lại
 static double g_espLastScanSeconds = 0; // lần quét xong gần nhất mất bao lâu
 static int g_espLastScanEnemies = -1; // -1 = chưa xong lần nào
+static int g_espLastScanDummies = -1; // số hình nhân trong lần quét xong gần nhất
 static uint32_t g_espLightActors = 0; // actors của lần quét nhẹ gần nhất
 static uint64_t g_espLightWorld = 0;  // world tương ứng (0 = chưa quét được)
 
@@ -651,6 +668,7 @@ void ESPEngineRequestScan(uint64_t gameBase) {
             g_espCheckedAt = CFAbsoluteTimeGetCurrent();
             g_espLastScanSeconds = g_espCheckedAt - t0;
             g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
+            g_espLastScanDummies = r.world ? (int)r.dummyLike : -1;
             ESPLog("scan finished dt=%.1fs enemies=%d step=%d", g_espLastScanSeconds,
                    g_espLastScanEnemies, g_espStep);
         }
@@ -789,7 +807,10 @@ NSString *ESPEngineScanInfoText(void) {
     }
     if (g_espCheckedAt == 0) return @"scan idle";
     if (g_espLastScanEnemies >= 0) {
-        return [NSString stringWithFormat:@"scan ok %d %.1fs", g_espLastScanEnemies, g_espLastScanSeconds];
+        // "%d D" = trong đó có bao nhiêu là hình nhân huấn luyện — để biết
+        // ngay con hình nhân nào bị lọt khỏi bộ lọc.
+        return [NSString stringWithFormat:@"scan ok %d P %d D %.1fs",
+                g_espLastScanEnemies, g_espLastScanDummies, g_espLastScanSeconds];
     }
     return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
 #endif

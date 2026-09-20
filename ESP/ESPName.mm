@@ -190,6 +190,25 @@ BOOL ESPActorNameByID(uint64_t vmMap, uint64_t uname, uint32_t fid, char outName
     return YES;
 }
 
+// Hình nhân huấn luyện. Object ShootingPracticeTarget chỉ dài ~0x4F8 (field
+// cuối MoveComp 0x4F0), nên không thể nhận diện bằng field (ví dụ đọc 0x510
+// để check "không có skeletal Mesh" là đọc rác ngoài object). Tên thì đúng.
+BOOL ESPIsTrainingDummyName(const char *name) {
+    if (!name || !name[0]) return NO;
+    static const char *keys[] = {
+        "ShootingPracticeTarget", // Character/Target trong sân tập
+        "PracticeTarget",
+        "PracticeDummy",
+        "TargetDummy",
+        "TrainingDummy",
+        "ShootingTarget",
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (strstr(name, keys[i]) != NULL) return YES;
+    }
+    return NO;
+}
+
 BOOL ESPIsPlayerCharacterName(const char *name) {
     if (!name || !name[0]) return NO;
     static const char *keys[] = {

@@ -26,6 +26,9 @@ BOOL ESPActorNameByID(uint64_t vmMap, uint64_t uname, uint32_t fid, char outName
 // So tên với list class player của Kernel (STExtraPlayerCharacter...).
 BOOL ESPIsPlayerCharacterName(const char *name);
 
+// So tên với list hình nhân huấn luyện (ShootingPracticeTarget...).
+BOOL ESPIsTrainingDummyName(const char *name);
+
 // Xoá cache khi đổi base/world.
 void ESPNameReset(uint64_t gameBase);
 

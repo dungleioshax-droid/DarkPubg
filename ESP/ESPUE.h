@@ -44,7 +44,8 @@ typedef struct {
     uint64_t actorCluster;   // ULevelActorContainer*
     uint32_t actorCount;     // TArray count
     uint32_t scanned;        // số actor đã đọc pointer
-    uint32_t playerLike;     // actor có RootComponent != 0 (lọc thô)
+    uint32_t playerLike;     // tổng số địch + hình nhân đếm được
+    uint32_t dummyLike;      // trong đó bao nhiêu là hình nhân huấn luyện
     uint64_t sampleActor;    // 1 actor mẫu để debug
     ESPVector samplePos;     // vị trí mẫu (nếu đọc được)
     BOOL hasSamplePos;
