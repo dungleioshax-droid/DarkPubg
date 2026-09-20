@@ -707,15 +707,17 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         enemies++;
         if (team == ESPTeam_Dummy) dummies++;
         // Lưu lại để refresh vị trí nhanh giữa các lượt quét (ESPTrackedActor).
+        // Dùng diag (field đọc trong ESPIsEnemy) — biến f ở nhánh phân loại
+        // không còn scope ở đây.
         if (g_espTracked.size() < 64) {
             ESPTrackedActor tr;
             tr.actor = actor;
-            tr.root = (ESPIsUserPtr(f.root)) ? f.root : 0;
+            tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
             tr.fallback = 0;
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
-                if (ESPIsUserPtr(f.stMove)) tr.fallback = f.stMove;
-                else if (ESPIsUserPtr(f.tMesh)) tr.fallback = f.tMesh;
+                if (ESPIsUserPtr(dg.stMove)) tr.fallback = dg.stMove;
+                else if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
                 if (!tr.root && tr.fallback) tr.root = tr.fallback;
             } else {
                 tr.kind = 1;
