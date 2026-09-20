@@ -21,6 +21,16 @@ NSString *ESPEngineStatusText(uint64_t gameBase);
 // Số players thô (để HUD khác dùng nếu cần).
 uint32_t ESPEnginePlayerCount(uint64_t gameBase);
 
+// Camera hiện tại (đọc từ PlayerCameraManager). NO nếu fail.
+BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam);
+
+// WorldToScreen: world (cm, UE) -> screen game landscape points.
+// screenW/H là size game landscape (vd 844x390). Trả NO nếu sau lưng / ngoài xa.
+BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float screenH, float *outX, float *outY, float *outDist);
+
+// Quét + project ra boxes 2D. Trả về số box (0..max). Lọc: distance<350m, trong màn hình.
+int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes);
+
 NS_ASSUME_NONNULL_END
 
 #endif /* ESPEngine_h */

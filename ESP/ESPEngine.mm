@@ -184,3 +184,199 @@ uint32_t ESPEnginePlayerCount(uint64_t gameBase) {
     return g_espCache.playerLike;
 #endif
 }
+
+// MARK: - Camera + W2S + Boxes (phase 2 box thật)
+
+#if USE_DARKSWORD
+static BOOL ESPReadVec(uint64_t vmMap, uint64_t addr, ESPVector *out) {
+    if (!addr || !out) return NO;
+    return ESPMemoryRead(vmMap, addr, out, sizeof(ESPVector));
+}
+static uint64_t ESPProcVMMap(uint64_t *outProc) {
+    uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
+    if (!proc) proc = procbyname("ShadowTrackerE");
+    if (!proc) return 0;
+    if (outProc) *outProc = proc;
+    uint64_t task = taskbyproc(proc);
+    return task ? task_get_vm_map(task) : 0;
+}
+#endif
+
+BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
+    if (!outCam) return NO;
+#if !USE_DARKSWORD
+    (void)gameBase;
+    return NO;
+#else
+    if (!gameBase || !ds_is_ready()) return NO;
+    uint64_t vmMap = ESPProcVMMap(NULL);
+    if (!vmMap) return NO;
+    // Reuse world từ cache nếu có để đỡ scan lại
+    uint64_t world = g_espCache.world;
+    if (!world) {
+        ESPScanResult r = ESPEngineScan(gameBase);
+        world = r.world;
+        if (!world) return NO;
+    }
+    BOOL ok = NO;
+    uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
+    if (!ok || !gameInst) return NO;
+    uint64_t localPlayersData = ESPReadU64(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x0, &ok);
+    uint32_t localN = ESPReadU32(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x8, &ok);
+    if (!ok || !localPlayersData || localN == 0) return NO;
+    uint64_t localPlayer = ESPReadU64(vmMap, localPlayersData + 0x0, &ok);
+    if (!ok || !localPlayer) return NO;
+    uint64_t pc = ESPReadU64(vmMap, localPlayer + ESPOff_Player_PlayerController, &ok);
+    if (!ok || !pc) return NO;
+    uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
+    if (!ok || !camMgr) return NO;
+    uint64_t pov = camMgr + ESPOff_CamMgr_CameraCache + ESPOff_Cache_POV;
+    ESPVector loc = {0,0,0};
+    if (!ESPReadVec(vmMap, pov + ESPOff_POV_Location, &loc)) return NO;
+    ESPRotator rot = {0,0,0};
+    if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Rotation, &rot, sizeof(rot))) return NO;
+    float fov = 0, aspect = 0;
+    {
+        float tmp = 0;
+        if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_FOV, &tmp, sizeof(tmp))) return NO;
+        fov = tmp;
+        if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Aspect, &tmp, sizeof(tmp))) return NO;
+        aspect = tmp;
+    }
+    if (fov < 10 || fov > 170) return NO;
+    if (!(aspect > 0.3 && aspect < 4.0)) aspect = 0; // để caller fill từ screen
+    outCam->location = loc;
+    outCam->rotation = rot;
+    outCam->fov = fov;
+    outCam->aspect = aspect;
+    return YES;
+#endif
+}
+
+BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float screenH, float *outX, float *outY, float *outDist) {
+    if (screenW <= 0 || screenH <= 0) return NO;
+    if (!(cam.fov >= 10 && cam.fov <= 170)) return NO;
+    float aspect = cam.aspect;
+    if (!(aspect > 0.3 && aspect < 4.0)) aspect = screenW / screenH;
+    // UE FRotator degrees -> radians
+    const float kPi = 3.141592653589793f;
+    float pitch = cam.rotation.pitch * kPi / 180.0f;
+    float yaw   = cam.rotation.yaw   * kPi / 180.0f;
+    float roll  = cam.rotation.roll  * kPi / 180.0f;
+    float cp = cosf(pitch), sp = sinf(pitch);
+    float cy = cosf(yaw),   sy = sinf(yaw);
+    float cr = cosf(roll),  sr = sinf(roll);
+    // UE axes (cm): X forward, Y right, Z up
+    // Forward = (cp*cy, cp*sy, sp)? UE pitch dương nhìn lên? Dùng chuẩn:
+    // forward=(cp*cy, cp*sy, sp), right=(-sy, cy, 0) bỏ roll, up tính đủ.
+    // Để gồm roll cho đúng:
+    ESPVector fwd = { cp*cy, cp*sy, sp };
+    // Right trước roll: (-sy, cy, 0), Up trước roll: (-sp*cy, -sp*sy, cp)
+    ESPVector r0 = { -sy, cy, 0 };
+    ESPVector u0 = { -sp*cy, -sp*sy, cp };
+    ESPVector right = { r0.x*cr + u0.x*sr, r0.y*cr + u0.y*sr, r0.z*cr + u0.z*sr };
+    ESPVector up    = { u0.x*cr - r0.x*sr, u0.y*cr - r0.y*sr, u0.z*cr - r0.z*sr };
+    ESPVector d = { world.x - cam.location.x, world.y - cam.location.y, world.z - cam.location.z };
+    float distM = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z) / 100.0f; // cm -> m
+    float x = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z; // depth (forward)
+    if (x < 100.0f) return NO; // sau lưng / quá gần (1m)
+    float y = d.x*right.x + d.y*right.y + d.z*right.z;
+    float z = d.x*up.x + d.y*up.y + d.z*up.z;
+    float tanHalf = tanf(cam.fov * kPi / 360.0f);
+    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return NO;
+    float cx = screenW * 0.5f, cyC = screenH * 0.5f;
+    float sx = cx + (y / (x * tanHalf * aspect)) * cx;
+    float syC = cyC - (z / (x * tanHalf)) * cyC;
+    if (outX) *outX = sx;
+    if (outY) *outY = syC;
+    if (outDist) *outDist = distM;
+    // ngoài màn hình vẫn trả YES để caller tự lọc margin? Ở đây lọc luôn:
+    if (sx < -100 || sx > screenW + 100 || syC < -100 || syC > screenH + 100) return NO;
+    if (distM > 350.0f) return NO;
+    return YES;
+}
+
+int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes) {
+    if (!outBoxes || maxBoxes <= 0) return 0;
+#if !USE_DARKSWORD
+    (void)gameBase; (void)screenW; (void)screenH;
+    return 0;
+#else
+    if (!gameBase || !ds_is_ready()) return 0;
+    if (screenW <= 0 || screenH <= 0) return 0;
+    uint64_t vmMap = ESPProcVMMap(NULL);
+    if (!vmMap) return 0;
+    ESPCamera cam;
+    if (!ESPEngineCamera(gameBase, &cam)) return 0;
+    if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
+    // Lấy actors từ cache/scan
+    uint64_t world = g_espCache.world;
+    uint64_t level = 0, cluster = 0, actorsData = 0;
+    uint32_t actorsCount = 0;
+    BOOL ok = NO;
+    if (!world) {
+        ESPScanResult r = ESPEngineScan(gameBase);
+        world = r.world;
+    }
+    if (!world) return 0;
+    // Đọc lại level/cluster để tươi (rẻ, không scan GUObject)
+    level = ESPReadU64(vmMap, world + ESPOff_UWorld_PersistentLevel, &ok);
+    if (!ok || !level) return 0;
+    cluster = ESPReadU64(vmMap, level + ESPOff_ULevel_ActorCluster, &ok);
+    if (!ok || !cluster) return 0;
+    actorsData = ESPReadU64(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x0, &ok);
+    if (!ok) return 0;
+    actorsCount = ESPReadU32(vmMap, cluster + ESPOff_ActorCluster_Actors + 0x8, &ok);
+    if (!ok || actorsCount == 0 || actorsCount > 20000) return 0;
+    uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
+    // Lấy vị trí mình để bỏ qua self (actor gần camera <2m)
+    int n = 0;
+    float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
+    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
+    for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
+        uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
+        if (!ok || !actor || actor < 0x100000000ULL) continue;
+        // Vị trí world: thử ReplicatedMovement Location trước
+        ESPVector pos = {0,0,0};
+        BOOL gotPos = NO;
+        {
+            ESPVector v = {0,0,0};
+            if (ESPMemoryRead(vmMap, actor + ESPOff_Actor_ReplicatedMovement + ESPOff_RepMovement_Location, &v, sizeof(v))) {
+                // lọc vector rác
+                if (fabsf(v.x) < 200000 && fabsf(v.y) < 200000 && fabsf(v.z) < 200000 && (v.x != 0 || v.y != 0 || v.z != 0)) {
+                    pos = v; gotPos = YES;
+                }
+            }
+        }
+        if (!gotPos) {
+            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+            if (!ok || !root) continue;
+            ESPVector v = {0,0,0};
+            if (!ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &v, sizeof(v))) continue;
+            if (fabsf(v.x) > 200000 || fabsf(v.y) > 200000 || fabsf(v.z) > 200000) continue;
+            if (v.x == 0 && v.y == 0 && v.z == 0) continue;
+            pos = v; gotPos = YES;
+        }
+        if (!gotPos) continue;
+        float sx = 0, sy = 0, dist = 0;
+        // Project chân (pos) và đầu (pos.z + 180cm) để ra chiều cao box
+        float hx = 0, hy = 0, hd = 0;
+        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) continue;
+        if (dist < 2.0f) continue; // self
+        ESPVector head = pos; head.z += 180.0f;
+        if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+            // đầu ngoài màn nhưng chân trong — vẫn vẽ box ước lượng
+            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
+            float wEst = hEst * 0.5f;
+            if (hEst < 8 || hEst > screenH) continue;
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1 };
+            continue;
+        }
+        float h = fabsf(sy - hy);
+        if (h < 8 || h > screenH * 1.2f) continue;
+        float w = h * 0.5f;
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1 };
+    }
+    return n;
+#endif
+}

@@ -11,7 +11,7 @@ int ESPOverlayBoxCount(void) {
     return 0;
 }
 
-int ESPOverlayGetBoxes(ESPBox *outBoxes, int maxCount) {
+int ESPOverlayGetBoxes(ESPBox2D *outBoxes, int maxCount) {
     (void)outBoxes; (void)maxCount;
     return 0;
 }

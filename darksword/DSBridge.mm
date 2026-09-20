@@ -110,6 +110,7 @@ static void ds_set_error(NSString *message) {
 #import <mach/mach.h>
 #import <mach-o/loader.h>
 #import "ESPEngine.h"
+#import "ESPOverlay.h"
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
 extern "C" {
@@ -156,6 +157,16 @@ static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
 static uint64_t g_remoteWindowScene = 0;
 static pid_t g_remoteWindowPid = 0;
+// ESP overlay (box thật): window full-screen + container xoay theo orientation
+// + pool ESPOverlayMaxBoxes*(4 viền + 1 label). Intentionally leak như HUD.
+static uint64_t g_espWindow = 0;
+static uint64_t g_espContainer = 0;
+static uint64_t g_espBorders[ESPOverlayMaxBoxes][4] = {{0}};
+static uint64_t g_espLabels[ESPOverlayMaxBoxes] = {0};
+static BOOL g_espHiddenCache[ESPOverlayMaxBoxes] = {0};
+static BOOL g_espWindowHiddenCache = YES;
+static int g_espLastOrientation = UIInterfaceOrientationUnknown;
+static CGRect g_espLastContainerBounds = CGRectZero;
 static dispatch_source_t g_rateTimer = nil;
 static AVAudioPlayer *g_keepAlivePlayer = nil;
 static uint64_t g_previousInput = 0;
@@ -1330,6 +1341,29 @@ static BOOL ds_remote_set_rect_on_main(RemoteCall *process, uint64_t target,
                                     &argument, 1);
 }
 
+static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
+                                        const char *selectorName, CGPoint value) {
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
+                                    &argument, 1);
+}
+
+static BOOL ds_remote_set_transform_on_main(RemoteCall *process, uint64_t target,
+                                            CGAffineTransform value) {
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, "setTransform:"),
+                                    &argument, 1);
+}
+
+static inline CGFloat ds_esp_angle_for_orientation(int orientation) {
+    switch (orientation) {
+        case UIInterfaceOrientationPortraitUpsideDown: return (CGFloat)M_PI;
+        case UIInterfaceOrientationLandscapeLeft: return (CGFloat)-M_PI_2;
+        case UIInterfaceOrientationLandscapeRight: return (CGFloat)M_PI_2;
+        default: return 0;
+    }
+}
+
 static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium) {
     uint64_t fontClass = ds_remote_class(process, "UIFont");
     if (!fontClass) return 0;
@@ -1533,6 +1567,163 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
 // Never release remote UIViews: dealloc on a hijacked thread crashes SpringBoard
 // (same CA main-thread assert). removeFromSuperview + hide, and intentionally
 // leak the tiny view hierarchy for the lifetime of the remote session.
+static const NSInteger kDSESPOverlayTag = 0x45535042; // "ESPB"
+static const double kDSESPWindowLevel = kDSHUDWindowLevel - 10.0;
+static const CGFloat kDSESPBorder = 2.0;
+
+static void ds_esp_overlay_hide(RemoteCall *process) {
+    if (!process || !g_espWindow) return;
+    if (!g_espWindowHiddenCache) {
+        ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", 1);
+        g_espWindowHiddenCache = YES;
+    }
+}
+
+static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
+    if (!process || !process.trojanMem) return NO;
+    if (g_espWindow && g_espContainer) {
+        BOOL ok = YES;
+        for (int i = 0; i < ESPOverlayMaxBoxes && ok; i++) {
+            for (int e = 0; e < 4 && ok; e++) ok = g_espBorders[i][e] != 0;
+            ok = ok && g_espLabels[i] != 0;
+        }
+        if (ok) return YES;
+    }
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t workspaceClass = ds_remote_class(process, "SBMainWorkspace");
+    uint64_t windowClass = ds_remote_class(process, "UIWindow");
+    uint64_t viewClass = ds_remote_class(process, "UIView");
+    uint64_t labelClass = ds_remote_class(process, "UILabel");
+    uint64_t colorClass = ds_remote_class(process, "UIColor");
+    if (!workspaceClass || !windowClass || !viewClass || !labelClass || !colorClass) return NO;
+
+    uint64_t workspace = ds_remote_get_object_on_main(process, workspaceClass, "sharedInstance");
+    uint64_t scene = workspace ? ds_remote_get_object_on_main(process, workspace, "mainWindowScene") : g_remoteWindowScene;
+    if (!scene) return NO;
+
+    uint64_t window = remote_msg(process, windowClass, alloc, 0, 0, 0, 0);
+    uint64_t container = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+    if (!window || !container) return NO;
+    if (!ds_remote_invoke_noarg_on_main(process, window, "init") ||
+        !ds_remote_invoke_noarg_on_main(process, container, "init")) return NO;
+
+    ds_remote_set_rect_on_main(process, window, "setFrame:", portraitBounds);
+    ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setWindowScene:"), scene, YES);
+    ds_remote_set_double_on_main(process, window, "setWindowLevel:", kDSESPWindowLevel);
+    ds_remote_set_u64_on_main(process, window, "setUserInteractionEnabled:", 0);
+    ds_remote_set_u64_on_main(process, window, "setOpaque:", 0);
+    uint64_t clear = ds_remote_get_object_on_main(process, colorClass, "clearColor");
+    uint64_t red = ds_remote_get_object_on_main(process, colorClass, "redColor");
+    uint64_t white = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
+    if (!clear || !red || !white) return NO;
+    ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+    ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+    ds_remote_set_u64_on_main(process, container, "setTag:", (uint64_t)kDSESPOverlayTag);
+    ds_remote_set_u64_on_main(process, container, "setUserInteractionEnabled:", 0);
+    ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
+    ds_remote_set_rect_on_main(process, container, "setFrame:", portraitBounds);
+
+    uint64_t font = ds_remote_font(process, 9.0, NO);
+    if (!font) return NO;
+
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        for (int e = 0; e < 4; e++) {
+            uint64_t v = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+            if (!v || !ds_remote_invoke_noarg_on_main(process, v, "init")) return NO;
+            ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "setBackgroundColor:"), red, YES);
+            ds_remote_set_u64_on_main(process, v, "setHidden:", 1);
+            ds_remote_set_u64_on_main(process, v, "setUserInteractionEnabled:", 0);
+            ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), v, YES);
+            g_espBorders[i][e] = v;
+        }
+        uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
+        if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) return NO;
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"), white, YES);
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), font, YES);
+        ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
+        ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 1);
+        ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), lb, YES);
+        g_espLabels[i] = lb;
+        g_espHiddenCache[i] = YES;
+    }
+
+    ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "addSubview:"), container, YES);
+    ds_remote_set_u64_on_main(process, window, "setHidden:", 0);
+    g_espWindow = window;
+    g_espContainer = container;
+    g_espWindowHiddenCache = NO;
+    g_espLastOrientation = UIInterfaceOrientationUnknown;
+    g_espLastContainerBounds = CGRectZero;
+    return YES;
+}
+
+static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
+                                  CGRect portraitBounds, int orientation) {
+    if (!process || !process.trojanMem) return;
+    if (!g_espWindow || !g_espContainer) {
+        if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
+    }
+    // Show/hide window
+    BOOL wantHidden = (count <= 0);
+    if (wantHidden != g_espWindowHiddenCache) {
+        ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", wantHidden ? 1 : 0);
+        g_espWindowHiddenCache = wantHidden;
+    }
+    if (wantHidden) {
+        // Hide stale boxes once
+        for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+            if (!g_espHiddenCache[i]) {
+                for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", 1);
+                ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
+                g_espHiddenCache[i] = YES;
+            }
+        }
+        return;
+    }
+    BOOL landscape = UIInterfaceOrientationIsLandscape((UIInterfaceOrientation)orientation);
+    CGFloat landW = landscape ? portraitBounds.size.height : portraitBounds.size.width;
+    CGFloat landH = landscape ? portraitBounds.size.width : portraitBounds.size.height;
+    // Container: landscape bounds, centered, rotated
+    CGRect wantBounds = CGRectMake(0, 0, landW, landH);
+    if (!CGRectEqualToRect(g_espLastContainerBounds, wantBounds) || g_espLastOrientation != orientation) {
+        CGPoint center = CGPointMake(CGRectGetMidX(portraitBounds), CGRectGetMidY(portraitBounds));
+        ds_remote_set_rect_on_main(process, g_espContainer, "setBounds:", wantBounds);
+        ds_remote_set_point_on_main(process, g_espContainer, "setCenter:", center);
+        CGAffineTransform t = CGAffineTransformMakeRotation(ds_esp_angle_for_orientation(orientation));
+        ds_remote_set_transform_on_main(process, g_espContainer, t);
+        g_espLastContainerBounds = wantBounds;
+        g_espLastOrientation = orientation;
+    }
+    int n = MIN(count, ESPOverlayMaxBoxes);
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        BOOL hide = (i >= n);
+        if (hide != g_espHiddenCache[i]) {
+            for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", hide ? 1 : 0);
+            ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
+            g_espHiddenCache[i] = hide;
+        }
+        if (hide) continue;
+        ESPBox2D b = boxes[i];
+        // Clamp nhẹ để không vẽ rác ngoài container
+        if (b.w < 4 || b.h < 8) continue;
+        CGRect top = CGRectMake(b.x, b.y, b.w, kDSESPBorder);
+        CGRect bottom = CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder);
+        CGRect left = CGRectMake(b.x, b.y, kDSESPBorder, b.h);
+        CGRect right = CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h);
+        ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", top);
+        ds_remote_set_rect_on_main(process, g_espBorders[i][1], "setFrame:", bottom);
+        ds_remote_set_rect_on_main(process, g_espBorders[i][2], "setFrame:", left);
+        ds_remote_set_rect_on_main(process, g_espBorders[i][3], "setFrame:", right);
+        NSString *dist = [NSString stringWithFormat:@"%.0fm", b.distance];
+        ds_remote_set_text_on_main(process, g_espLabels[i], dist);
+        CGRect lf = CGRectMake(b.x - 20, b.y - 16, b.w + 40, 14);
+        ds_remote_set_rect_on_main(process, g_espLabels[i], "setFrame:", lf);
+    }
+}
+
 static void ds_remove_springboard_hud(RemoteCall *process) {
     if (!g_remoteWindow || g_remoteWindowPid != process.pid) return;
     if (g_remoteContainer) {
@@ -1678,6 +1869,32 @@ static void ds_update_rate(void) {
     } @catch (NSException *exception) {
         ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
         g_hudActive.store(false);
+    }
+
+    // ESP Box thật: tính boxes trong app (có KRW) rồi đẩy rects sang SpringBoard.
+    @try {
+        BOOL wantESP = ds_show_esp_from_prefs(preferences);
+        if (!wantESP || !g_gameBase) {
+            if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        } else {
+            CGRect screenBounds; UIEdgeInsets insets;
+            ds_screen_geometry(&screenBounds, &insets);
+            CGRect portrait = screenBounds;
+            // UIScreen bounds luôn portrait — landscape thì swap để ra size game.
+            int orient = (int)ds_interface_orientation();
+            BOOL land = UIInterfaceOrientationIsLandscape((UIInterfaceOrientation)orient);
+            float gw = land ? portrait.size.height : portrait.size.width;
+            float gh = land ? portrait.size.width : portrait.size.height;
+            if (gw < 100 || gh < 100) {
+                ds_esp_overlay_hide(g_springBoard);
+            } else {
+                ESPBox2D boxes[ESPOverlayMaxBoxes];
+                int n = ESPEngineBoxes(g_gameBase, gw, gh, boxes, ESPOverlayMaxBoxes);
+                ds_esp_overlay_update(g_springBoard, boxes, n, portrait, orient);
+            }
+        }
+    } @catch (NSException *exception) {
+        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
     }
 }
 
@@ -1855,6 +2072,12 @@ static void ds_finish_disable(void) {
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] HUD remove exception: %{public}@", exception.reason);
         }
         @try {
+            // Ẩn ESP overlay trước khi huỷ session (views leak có chủ ý như HUD).
+            if (g_espWindow) ds_esp_overlay_hide(process);
+        } @catch (NSException *exception) {
+            os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP hide exception: %{public}@", exception.reason);
+        }
+        @try {
             [process destroyRemoteCall];
         } @catch (NSException *exception) {
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] destroyRemoteCall exception: %{public}@", exception.reason);
@@ -1869,6 +2092,16 @@ static void ds_finish_disable(void) {
     g_remoteWindow = 0;
     g_remoteWindowScene = 0;
     g_remoteWindowPid = 0;
+    g_espWindow = 0;
+    g_espContainer = 0;
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        for (int e = 0; e < 4; e++) g_espBorders[i][e] = 0;
+        g_espLabels[i] = 0;
+        g_espHiddenCache[i] = YES;
+    }
+    g_espWindowHiddenCache = YES;
+    g_espLastOrientation = UIInterfaceOrientationUnknown;
+    g_espLastContainerBounds = CGRectZero;
     g_remoteOrientation.store(UIInterfaceOrientationUnknown);
     g_lastPresentationSignature = 0;
     g_lastWindowFrame = CGRectNull;

@@ -18,6 +18,25 @@ typedef struct {
     uint32_t max;
 } ESPUArray;
 
+typedef struct {
+    float pitch, yaw, roll; // degrees, UE FRotator
+} ESPRotator;
+
+typedef struct {
+    ESPVector location; // camera world
+    ESPRotator rotation;
+    float fov;    // degrees, horizontal-ish
+    float aspect; // W/H, fallback tính từ screen
+} ESPCamera;
+
+// Box 2D đã project ra màn hình game (landscape points).
+// (x,y) là góc trên-trái, w/h là size. distance mét.
+typedef struct {
+    float x, y, w, h;
+    float distance;
+    int health; // -1 chưa đọc
+} ESPBox2D;
+
 // Kết quả scan phase 1
 typedef struct {
     uint64_t world;          // UWorld*

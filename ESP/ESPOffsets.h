@@ -43,9 +43,27 @@ static const uint32_t ESPOff_ActorCluster_Actors = 0x28; // TArray<AActor*>
 
 // AActor
 static const uint32_t ESPOff_Actor_RootComponent = 0x208;
+static const uint32_t ESPOff_Actor_ReplicatedMovement = 0x110; // FRepMovement
+static const uint32_t ESPOff_RepMovement_Location = 0x18;      // +0x110 = Actor+0x128 FVector world
 
 // USceneComponent
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
+
+// Camera chain (PUBG UE4, từ SDK/Engine.hpp)
+// UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
+// -> ULocalPlayer (UPlayer) 0x30 PlayerController
+// -> APlayerController 0x548 PlayerCameraManager
+// -> APlayerCameraManager 0x520 CameraCache -> +0x10 POV (FMinimalViewInfo)
+//    POV: Location 0x0 (FVector), Rotation 0x18 (FRotator), FOV 0x24 (float), Aspect 0x34 (float)
+static const uint32_t ESPOff_GameInstance_LocalPlayers = 0x48;
+static const uint32_t ESPOff_Player_PlayerController   = 0x30;
+static const uint32_t ESPOff_PC_CameraManager          = 0x548;
+static const uint32_t ESPOff_CamMgr_CameraCache        = 0x520;
+static const uint32_t ESPOff_Cache_POV                 = 0x10;
+static const uint32_t ESPOff_POV_Location              = 0x0;
+static const uint32_t ESPOff_POV_Rotation              = 0x18;
+static const uint32_t ESPOff_POV_FOV                   = 0x24;
+static const uint32_t ESPOff_POV_Aspect                = 0x34;
 
 // TArray layout (UE4)
 typedef struct {
