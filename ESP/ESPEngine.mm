@@ -716,8 +716,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             tr.fallback = 0;
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
-                if (ESPIsUserPtr(dg.stMove)) tr.fallback = dg.stMove;
-                else if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
+                if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
                 if (!tr.root && tr.fallback) tr.root = tr.fallback;
             } else {
                 tr.kind = 1;
