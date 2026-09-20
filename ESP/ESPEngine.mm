@@ -658,7 +658,9 @@ void ESPEngineRequestScan(uint64_t gameBase) {
 #else
     if (!gameBase || !ds_is_ready()) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - g_espCheckedAt < ESP_CACHE_TTL && g_espCheckedAt > 0) return;
+    // Vài lượt đầu quét dày hơn để số players chóng đúng, sau đó về TTL thường.
+    double ttl = (g_espPasses < 3) ? 2.0 : ESP_CACHE_TTL;
+    if (now - g_espCheckedAt < ttl && g_espCheckedAt > 0) return;
     bool expected = false;
     if (!g_espScanning.compare_exchange_strong(expected, true)) {
         // Đang quét — nếu kẹt quá lâu thì nhả cờ cho quét lại
@@ -698,8 +700,9 @@ static NSString *ESPCacheText(void) {
         if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
         return @"ESP: --";
     }
-    // Chưa đủ 3 lượt xoay thì số players còn thiếu — đánh dấu ~ đang warmup
-    if (g_espCachePasses < 3) {
+    // Một lượt quét giờ đã phân loại hết actor, nên chỉ lượt đầu tiên mới cần
+    // đánh dấu ~ (đang warmup) — lượt sau là số chính thức.
+    if (g_espCachePasses < 2) {
         return [NSString stringWithFormat:@"ESP: %u actors / %u~ players",
                 (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
     }
@@ -744,11 +747,10 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!ds_is_ready()) return @"ESP: wait…";
     ESPEngineRequestScan(gameBase); // lọc players chạy nền, không block
     if (g_espCheckedAt != 0) return ESPCacheText();
-    // Chưa lọc xong lần nào: quét nhẹ lấy số actors hiện ngay — nhưng KHÔNG
-    // đọc kernel song song với scan nền (vmmapremotepage không re-entrant,
-    // 2 thread cùng đọc là hỏng vm entry -> respring). Trong lúc scan thì
-    // dùng lại số actors của lần quét nhẹ trước.
-    if (!g_espScanning.load()) {
+    // Quét nhẹ (~20 lần đọc) để có số actors hiện ngay từ tick đầu. Chạy được
+    // cả khi scan nền đang chạy: mọi lần đọc đều xếp hàng qua mutex trong
+    // ESPMemoryRead nên 2 luồng không đụng nhau trong kernel.
+    {
         uint64_t w = 0;
         uint32_t fresh = ESPFastActors(gameBase, &w);
         if (w && fresh <= 20000) {
