@@ -42,7 +42,7 @@ typedef struct {
     float hp, hpMax, tCur, tMax;
     uint8_t bHidden, bDead, tIsUp;
     int team;
-    BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget;
+    BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget, hasTeam;
     BOOL window; // đọc được cả cửa sổ 1 lần => mọi field đều đáng tin
 } ESPActorFields;
 
