@@ -9,6 +9,7 @@
 #import "ESPMemory.h"
 #import "ESPConfig.h"
 
+#if USE_DARKSWORD
 extern "C" {
 #import "darksword.h"
 #import "offsets.h"
@@ -23,9 +24,6 @@ static const uint32_t kFUObjectItemSize = 0x18;
 // Để giữ phase 1 ổn định, ta đi đường tắt: GEngine -> ... -> World?
 // Đơn giản + robust nhất hiện tại: enumerate GUObjectArray tìm Class Engine.World.
 
-static uint64_t ESPGUObjectArrayRuntime(uint64_t gameBase) {
-    return ESPRuntime(gameBase, ESPDump_GUObjectArray);
-}
 static uint64_t ESPObjObjectsRuntime(uint64_t gameBase) {
     return ESPRuntime(gameBase, ESPDump_ObjObjects);
 }
@@ -85,6 +83,10 @@ static uint64_t ESPFindWorld(uint64_t vmMap, uint64_t gameBase, uint32_t *outNum
 
 ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPScanResult r = {0};
+#if !USE_DARKSWORD
+    (void)gameBase;
+    return r;
+#else
     if (!gameBase || !ds_is_ready()) return r;
     // Lấy proc game hiện tại qua Base? DSBridge đã cache proc, nhưng ở đây tự tìm lại nhẹ:
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
@@ -143,6 +145,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
     return r;
+#endif
 }
 
 static CFAbsoluteTime g_espCheckedAt = 0;
@@ -150,6 +153,10 @@ static ESPScanResult g_espCache = {0};
 
 NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!gameBase) return @"ESP: --";
+#if !USE_DARKSWORD
+    (void)gameBase;
+    return @"ESP: --";
+#else
     if (!ds_is_ready()) return @"ESP: wait…";
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - g_espCheckedAt < ESP_CACHE_TTL && g_espCheckedAt > 0) {
@@ -161,14 +168,20 @@ NSString *ESPEngineStatusText(uint64_t gameBase) {
     if (!g_espCache.world) return @"ESP: --";
     return [NSString stringWithFormat:@"ESP: %u actors / %u players",
             (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
+#endif
 }
 
 uint32_t ESPEnginePlayerCount(uint64_t gameBase) {
     if (!gameBase) return 0;
+#if !USE_DARKSWORD
+    (void)gameBase;
+    return 0;
+#else
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - g_espCheckedAt >= ESP_CACHE_TTL || g_espCheckedAt == 0) {
         g_espCache = ESPEngineScan(gameBase);
         g_espCheckedAt = now;
     }
     return g_espCache.playerLike;
+#endif
 }

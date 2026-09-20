@@ -7,6 +7,7 @@
 #import "ESPConfig.h"
 #import <mach/mach.h>
 
+#if USE_DARKSWORD
 extern "C" {
 #import "darksword.h"
 #import "offsets.h"
@@ -52,3 +53,14 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     }
     return YES;
 }
+#else
+// Simulator / non-DarkSword: không có kernel RW — stub để link được.
+uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
+    (void)proc;
+    return 0;
+}
+BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
+    return NO;
+}
+#endif
