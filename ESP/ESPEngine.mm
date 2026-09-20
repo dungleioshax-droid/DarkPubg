@@ -88,9 +88,9 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, int *outTeam,
         // Thử character trước (Mesh skeletal 0x510)
         uint64_t mesh = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &ok);
         if (ok && ESPIsUserPtr(mesh)) {
-            float hp = 0, mx = 0;
-            if (ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, &hp, 4) &&
-                ESPMemoryRead(vmMap, actor + ESPOff_Char_HealthMax, &mx, 4)) {
+            float hpmx[2] = {0, 0}; // hp+max kề nhau: 1 lần đọc 8B thay vì 2
+            if (ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hpmx, 8)) {
+                float hp = hpmx[0], mx = hpmx[1];
                 int team = (int)ESPReadU32(vmMap, actor + ESPOff_Char_Team, &ok);
                 if (ok && hp >= 0 && hp <= 2000 && mx > 0 && mx <= 2000 && team >= 0 && team <= 200000000) {
                     ESPVerdictSet(actor, 1, team);
@@ -404,13 +404,25 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
     { int t = INT_MIN; uint64_t lp = 0; if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) myTeam = t; }
+    // Đọc gộp toàn bộ mảng pointers 1 lần (như Kernel ReadBuf):
+    // 452 actors lẻ = 452 mappings, gộp = 1-2 mappings.
+    uint32_t bulkN = scanN > 2048 ? 2048 : scanN;
+    static uint64_t s_actorBuf[2048];
+    BOOL haveBulk = ESPMemoryRead(vmMap, actorsData, s_actorBuf, (uint64_t)bulkN * 8);
     uint32_t enemies = 0;
     uint64_t sample = 0;
     ESPVector samplePos = {0,0,0};
     BOOL hasPos = NO;
     for (uint32_t i = 0; i < scanN; i++) {
-        uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
-        if (!ok || !actor || actor < 0x100000000ULL) continue;
+        uint64_t actor = 0;
+        if (haveBulk && i < bulkN) {
+            actor = s_actorBuf[i];
+        } else {
+            BOOL ok2 = NO;
+            actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok2);
+            if (!ok2) continue;
+        }
+        if (!actor || actor < 0x100000000ULL) continue;
         r.scanned++;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
@@ -474,6 +486,21 @@ uint32_t ESPEnginePlayerCount(uint64_t gameBase) {
         g_espCheckedAt = now;
     }
     return g_espCache.playerLike;
+#endif
+}
+
+NSString *ESPEngineCachedStatusText(void) {
+#if !USE_DARKSWORD
+    return @"ESP: --";
+#else
+    if (g_espCheckedAt == 0) return @"ESP: --";
+    if (!g_espCache.world) {
+        int step = g_espStep;
+        if (step > 0) return [NSString stringWithFormat:@"ESP: -- E%d", step];
+        return @"ESP: --";
+    }
+    return [NSString stringWithFormat:@"ESP: %u actors / %u players",
+            (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
 #endif
 }
 
@@ -620,12 +647,22 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
     { int t = INT_MIN; if (ESPMyTeamAndPawn(vmMap, world, NULL, &t)) myTeam = t; }
+    uint32_t bulkN2 = scanN > 2048 ? 2048 : scanN;
+    static uint64_t s_boxBuf[2048];
+    BOOL haveBulk2 = ESPMemoryRead(vmMap, actorsData, s_boxBuf, (uint64_t)bulkN2 * 8);
     int n = 0;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
-        uint64_t actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok);
-        if (!ok || !actor || actor < 0x100000000ULL) continue;
+        uint64_t actor = 0;
+        if (haveBulk2 && i < bulkN2) {
+            actor = s_boxBuf[i];
+        } else {
+            BOOL ok2 = NO;
+            actor = ESPReadU64(vmMap, actorsData + (uint64_t)i * 8, &ok2);
+            if (!ok2) continue;
+        }
+        if (!actor || actor < 0x100000000ULL) continue;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, &team, &hp)) continue;
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative

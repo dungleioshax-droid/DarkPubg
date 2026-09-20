@@ -18,6 +18,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase);
 // Text ngắn cho HUD SpringBoard, vd: @"ESP: 123 actors / 8 players" hoặc @"ESP: --".
 NSString *ESPEngineStatusText(uint64_t gameBase);
 
+// Text cache KHÔNG quét (dùng cho UI main thread — không bao giờ block).
+// Trả @"ESP: --" nếu chưa có cache.
+NSString *ESPEngineCachedStatusText(void);
+
 // Số players thô (để HUD khác dùng nếu cần).
 uint32_t ESPEnginePlayerCount(uint64_t gameBase);
 

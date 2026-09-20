@@ -703,6 +703,24 @@ NSString *DSBridgeGameStatus(void) {
 #endif
 }
 
+NSString *DSBridgeGameCachedStatus(void) {
+#if USE_DARKSWORD
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    if (prefs && !ds_show_base_game_from_prefs(prefs)) return @"";
+    if (!ds_is_ready()) return @"Base: wait…";
+    if (g_gameBase) {
+        if (g_gamePid > 0) {
+            return [NSString stringWithFormat:@"Base: 0x%llX", (unsigned long long)g_gameBase];
+        }
+        return [NSString stringWithFormat:@"Base: 0x%llX (stale)", (unsigned long long)g_gameBase];
+    }
+    return @"Base: --";
+#else
+    return @"";
+#endif
+}
+
 void DSBridgeRefreshGameBase(void) {
 #if USE_DARKSWORD
     g_gameBaseCheckedAt = 0;
@@ -753,6 +771,23 @@ uint32_t DSBridgeESPCount(void) {
     }
 #else
     return 0;
+#endif
+}
+
+NSString *DSBridgeESPCachedStatus(void) {
+#if USE_DARKSWORD
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    if (prefs && !ds_show_esp_from_prefs(prefs)) return @"";
+    @try {
+        NSString *s = ESPEngineCachedStatusText();
+        if (s.length == 0) return @"ESP: --";
+        return s;
+    } @catch (__unused NSException *e) {
+        return @"ESP: --";
+    }
+#else
+    return @"";
 #endif
 }
 
@@ -2236,9 +2271,11 @@ double DSBridgeProgress(void) { return 0.0; }
 BOOL DSBridgeIsRunning(void) { return NO; }
 uint64_t DSBridgeGameBase(void) { return 0; }
 NSString *DSBridgeGameStatus(void) { return @""; }
+NSString *DSBridgeGameCachedStatus(void) { return @""; }
 NSString *DSBridgeGameProcessName(void) { return @"ShadowTrackerExtra"; }
 void DSBridgeRefreshGameBase(void) {}
 NSString *DSBridgeESPStatus(void) { return @""; }
+NSString *DSBridgeESPCachedStatus(void) { return @""; }
 uint32_t DSBridgeESPCount(void) { return 0; }
 
 #endif

@@ -612,7 +612,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         NSString *espStatus = nil;
         if (showBase && DSBridgeCompiledIn()) {
             @try {
-                baseStatus = DSBridgeGameStatus();
+                // Dùng cached (không quét trên main thread để tránh treo).
+                baseStatus = DSBridgeGameCachedStatus();
                 baseProc = DSBridgeGameProcessName();
             } @catch (__unused NSException *e) {
                 baseStatus = nil;
@@ -622,7 +623,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         }
         if (showESP && DSBridgeCompiledIn()) {
             @try {
-                espStatus = DSBridgeESPStatus();
+                // Dùng cached (không quét trên main thread để tránh treo).
+                espStatus = DSBridgeESPCachedStatus();
             } @catch (__unused NSException *e) {
                 espStatus = nil;
             }

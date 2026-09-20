@@ -58,6 +58,9 @@ OBJC_EXTERN uint64_t DSBridgeGameBase(void);
 /// or @"Base: --". Empty string when Base Game display is disabled.
 OBJC_EXTERN NSString *DSBridgeGameStatus(void);
 
+/// Cached base status WITHOUT scanning (safe for main thread UI).
+OBJC_EXTERN NSString *DSBridgeGameCachedStatus(void);
+
 /// Resolved game process name (custom or default ShadowTrackerExtra).
 OBJC_EXTERN NSString *DSBridgeGameProcessName(void);
 
@@ -67,6 +70,9 @@ OBJC_EXTERN void DSBridgeRefreshGameBase(void);
 /// ESP Box status line for the HUD, e.g. @"ESP: 120 actors / 6 players"
 /// or @"ESP: --". Empty string when ESP display is disabled.
 OBJC_EXTERN NSString *DSBridgeESPStatus(void);
+
+/// Cached ESP status WITHOUT scanning (safe for main thread UI).
+OBJC_EXTERN NSString *DSBridgeESPCachedStatus(void);
 
 /// Raw player-like actor count (0 when disabled / not ready).
 OBJC_EXTERN uint32_t DSBridgeESPCount(void);
