@@ -1193,14 +1193,22 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
         0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
         0xC8, 0xD0, 0xD8, 0xE0,
     };
-    // Giữ stage "hay" nhất: dataFail ở hầu hết slot là bình thường — ưu tiên
-    // slot đọc được data (n=/lpFail/pcFail/cmFail/fovFail) để biết đi xa tới đâu.
-    char best[128] = "none";
+    // Giữ MỌI stage "hay" (không phải dataFail — dataFail ở hầu hết slot là
+    // bình thường): cho biết chính xác slot 0x38 rớt ở lp/pc/cm/fov mốc nào.
+    char best[256] = {0};
+    int nStages = 0;
     for (size_t i = 0; i < sizeof(kCand) / sizeof(kCand[0]); i++) {
         char st[96] = {0};
         uint64_t pc = ESPTryLPOff(vmMap, gameInst, kCand[i], st, sizeof(st));
-        if (strstr(st, "dataFail") == NULL) snprintf(best, sizeof(best), "%s", st);
-        else if (best[0] == 'n') snprintf(best, sizeof(best), "%s", st); // best=="none"
+        if (strstr(st, "dataFail") == NULL) {
+            if (nStages < 8) {
+                size_t bl = strlen(best);
+                snprintf(best + bl, sizeof(best) - bl, " %s", st);
+                nStages++;
+            }
+        } else if (best[0] == '\0') {
+            snprintf(best, sizeof(best), "%s", st); // toàn dataFail: giữ cái đầu (có ok/raw)
+        }
         if (pc) {
             g_espLPInstFound = gameInst;
             g_espLPOffFound = kCand[i];
