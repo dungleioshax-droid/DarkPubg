@@ -18,6 +18,7 @@
 #include <atomic>
 #include <mutex>
 #include <stdarg.h>
+#include <unistd.h> // usleep: scan nhường mutex cho box refresh
 #include <string.h>
 #include <stdio.h>
 #include <vector>
@@ -170,6 +171,9 @@ static std::atomic_int g_espProgressTotal{0};
 // scan vừa clear/push tracked + set verdict, box path vừa iterate/read —
 // kết quả là box path ra 0 (hoặc crash ngầm) dù scan đếm đúng players.
 static std::mutex g_espClassifyMutex;
+static uint64_t g_espVMProc = 0; // cache proc/vmMap cho box refresh 8Hz
+static uint64_t g_espVMMap = 0;
+static CFAbsoluteTime g_espVMAt = 0;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
@@ -215,6 +219,9 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
+        g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
+        g_espVMMap = 0;
+        g_espVMAt = 0;
     }
 }
 
@@ -764,6 +771,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     int logged = 0;
     for (uint32_t i = 0; i < scanN; i++) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
+        // Nhường mutex read cho box refresh 8Hz chen vào: scan giữ từng read
+        // hàng chục ms, không nhường thì refresh đói tới vài giây (max 4.8s
+        // đo thực tế). 3ms/64 actors ~ không đáng kể với scan.
+        if ((i & 63) == 0) usleep(3000);
         uint64_t actor = s_actors[i];
         if (!ESPIsUserPtr(actor)) continue;
         r.scanned++;
@@ -1124,12 +1135,26 @@ static BOOL ESPReadVec(uint64_t vmMap, uint64_t addr, ESPVector *out) {
     return ESPMemoryRead(vmMap, addr, out, sizeof(ESPVector));
 }
 static uint64_t ESPProcVMMap(uint64_t *outProc) {
+    // procbyname duyệt proclist qua kernel (đắt) — box refresh gọi 8Hz nên
+    // cache proc/vmMap 30s (globals g_espVM* khai báo ở trên, flush khi đổi
+    // world). u64/double đọc-ghi benign cross-thread; stale thì fail-safe.
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_espVMMap && now - g_espVMAt < 30.0) {
+        if (outProc) *outProc = g_espVMProc;
+        return g_espVMMap;
+    }
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) proc = procbyname("ShadowTrackerE");
-    if (!proc) return 0;
+    if (!proc) return g_espVMMap; // giữ stale còn hơn 0 (reads fail-safe)
     if (outProc) *outProc = proc;
     uint64_t task = taskbyproc(proc);
-    return task ? task_get_vm_map(task) : 0;
+    uint64_t vmMap = task ? task_get_vm_map(task) : 0;
+    if (vmMap) {
+        g_espVMProc = proc;
+        g_espVMMap = vmMap;
+        g_espVMAt = now;
+    }
+    return vmMap ? vmMap : g_espVMMap;
 }
 #endif
 
@@ -1296,25 +1321,33 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
     ESPLog("giDump gi=0x%llx tarray(%d)%s", (unsigned long long)gi, found, buf);
 }
 
-// Perf refresh box: đo ms mỗi lần RefreshBoxes/Boxes chạy xong (chỉ chạm từ
-// bridge queue nên không cần lock). Text đọc + reset mỗi 10s từ DSBridge.
-static double g_perfSumMs = 0;
+// Perf refresh box: đo ms mỗi lần RefreshBoxes/Boxes chạy xong, TÁCH 3 khâu
+// (proc=proc/task lookup, cam=camera, act=vòng actors) để biết khâu nào nặng.
+// Chỉ chạm từ bridge queue nên không cần lock. Text đọc + reset mỗi 10s.
+static double g_perfSumProc = 0, g_perfSumCam = 0, g_perfSumAct = 0;
 static int g_perfN = 0;
 static double g_perfMaxMs = 0;
-static char g_perfBuf[96] = "n/a";
-static void ESPPerfSample(double ms) {
-    g_perfSumMs += ms;
+static char g_perfBuf[128] = "n/a";
+static void ESPPerfSample(double procMs, double camMs, double actMs) {
+    g_perfSumProc += procMs;
+    g_perfSumCam += camMs;
+    g_perfSumAct += actMs;
     g_perfN++;
-    if (ms > g_perfMaxMs) g_perfMaxMs = ms;
+    double tot = procMs + camMs + actMs;
+    if (tot > g_perfMaxMs) g_perfMaxMs = tot;
 }
 const char *ESPEngineBoxPerfText(void) {
     if (g_perfN > 0) {
-        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=%d avg=%.1fms max=%.1fms",
-                 g_perfN, g_perfSumMs / (double)g_perfN, g_perfMaxMs);
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f",
+                 g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
+                 g_perfSumAct / (double)g_perfN,
+                 (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs);
     } else {
         snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0");
     }
-    g_perfSumMs = 0;
+    g_perfSumProc = 0;
+    g_perfSumCam = 0;
+    g_perfSumAct = 0;
     g_perfN = 0;
     g_perfMaxMs = 0;
     return g_perfBuf;
@@ -1472,9 +1505,10 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
 #else
     if (!gameBase || !ds_is_ready()) return 0;
     if (screenW <= 0 || screenH <= 0) return 0;
+    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) { ESPBoxDiagSet("F noVmMap"); return 0; }
-    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
+    CFAbsoluteTime tProc = CFAbsoluteTimeGetCurrent();
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("F camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
@@ -1502,6 +1536,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     uint32_t cEne = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("F badFov %.1f", cam.fov); return 0; }
+    CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
         uint64_t actor = 0;
         if (haveBulk2 && i < bulkN2) {
@@ -1581,7 +1616,8 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
-    ESPPerfSample((CFAbsoluteTimeGetCurrent() - tBox0) * 1000.0);
+    ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
+                  (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
     return n;
 #endif
 }
@@ -1639,14 +1675,16 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         tracked = g_espTracked;
     }
     if (tracked.empty()) { ESPBoxDiagSet("R empty"); return 0; }
+    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) { ESPBoxDiagSet("R noVmMap"); return 0; }
-    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
+    CFAbsoluteTime tProc = CFAbsoluteTimeGetCurrent();
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
+    CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
     // Check sống (hidden/dead) thưa 2Hz thay vì mỗi refresh: trạng thái chết
@@ -1688,7 +1726,8 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
-    ESPPerfSample((CFAbsoluteTimeGetCurrent() - tBox0) * 1000.0);
+    ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
+                  (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
     return n;
 #endif
 }
