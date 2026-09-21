@@ -2028,19 +2028,77 @@ static void ds_update_rate(void) {
 // lượt quét đầy đủ vẫn theo TTL riêng của engine. Remote call được cache:
 // setHidden chỉ khi đổi trạng thái, setFrame/setText chỉ khi rect/text đổi
 // (xem ds_esp_overlay_update) nên tick đứng yên tốn ~0 call.
+//
+// Kernel read mỗi refresh ~125ms (đo thực tế) nên refresh chạy trên WORKER
+// QUEUE RIÊNG — trước đây chạy chung bridge queue serial làm nghẽn cả HUD
+// text. Worker chỉ đọc memory rồi async sang bridge để IPC (nhanh).
+static dispatch_queue_t ds_esp_work_queue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.huami.darkspeed.esp-tick", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+typedef struct {
+    ESPBox2D boxes[ESPOverlayMaxBoxes];
+    int count;
+    CGRect bounds;
+    int orient;
+} DSESPFrame;
+
+static std::atomic_bool s_espBusy{false}; // refresh trước chưa xong thì skip tick
+static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam async), chỉ chạm từ worker
+
+// Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
+static void ds_esp_present(DSESPFrame *frame) {
+    if (!frame) return;
+    @try {
+        if (frame->count < 0) {
+            // Lệnh hide từ worker.
+            if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        } else {
+            if ((!g_espWindow || !g_espContainer) &&
+                !ds_esp_overlay_ensure(g_springBoard, frame->bounds)) {
+                // Ensure fail đã log bên worker, bỏ tick này.
+            } else {
+                ds_esp_overlay_update(g_springBoard, frame->boxes, frame->count,
+                                      frame->bounds, frame->orient);
+            }
+        }
+    } @catch (NSException *exception) {
+        os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP present failed: %{public}@", exception.reason);
+    }
+    free(frame);
+}
+
 static void ds_esp_tick(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard) return;
     NSDictionary *preferences = nil;
     @try { preferences = ds_hud_preferences(); } @catch (__unused NSException *e) {}
     if (!preferences) preferences = @{};
-    @try {
-        if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
-            if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
-            return;
+    if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
+        if (!s_espHideSent) {
+            s_espHideSent = YES;
+            dispatch_async(ds_bridge_queue(), ^{
+                if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+            });
         }
+        return;
+    }
+    s_espHideSent = NO;
+    // Chống overlap: refresh trước chậm hơn interval thì bỏ tick này (không
+    // dồn queue, không present sai thứ tự).
+    bool expected = false;
+    if (!s_espBusy.compare_exchange_strong(expected, true)) return;
+    @try {
         CGRect sbBounds = CGRectZero;
         ds_screen_geometry(&sbBounds, NULL);
-        if (CGRectIsNull(sbBounds) || sbBounds.size.width <= 0) return;
+        if (CGRectIsNull(sbBounds) || sbBounds.size.width <= 0) {
+            s_espBusy.store(false);
+            return;
+        }
         static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
         static CFAbsoluteTime s_lastRefresh = 0;
         // GIỮ count qua các tick bị throttle để overlay không hide oan.
@@ -2094,30 +2152,42 @@ static void ds_esp_tick(void) {
                         ESPLog("box perf: %s count=%d", ESPEngineBoxPerfText(), count);
                     }
         }
-        // Ensure window trước để log được khi tạo overlay fail (trước
-        // đây fail im lặng trong update -> B>0 vẫn không thấy gì).
-        if (!g_espWindow || !g_espContainer) {
-            if (!ds_esp_overlay_ensure(g_springBoard, sbBounds)) {
-                if (now2 - s_lastEnsureFailLog > 10.0) {
-                    s_lastEnsureFailLog = now2;
-                    ESPLog("box overlay ensure FAIL orient=%d sb=%.0fx%.0f",
-                           orient, (double)CGRectGetWidth(sbBounds),
-                           (double)CGRectGetHeight(sbBounds));
-                }
-            }
+        // Ensure thử trước trên worker để log fail (ensure là RemoteCall —
+        // RemoteCall dùng được từ worker vì mỗi process 1 trojanMem? KHÔNG:
+        // RemoteCall IPC serialize qua mach, gọi từ thread nào cũng được miễn
+        // không đồng thời 2 threads. Worker là thread duy nhất gọi ensure ở
+        // đây; update gọi trên bridge — 2 threads khác nhau! Để an toàn, chỉ
+        // LOG ở đây, ensure thật để ds_esp_present lo trên bridge.
+        if ((!g_espWindow || !g_espContainer) && now2 - s_lastEnsureFailLog > 10.0) {
+            // Chưa có window — present sẽ ensure; log nhắc nếu kéo dài.
+            // (Không gọi ensure từ worker để tránh race trojanMem với bridge.)
+            s_lastEnsureFailLog = now2;
+            ESPLog("box overlay ensure pending orient=%d sb=%.0fx%.0f",
+                   orient, (double)CGRectGetWidth(sbBounds),
+                   (double)CGRectGetHeight(sbBounds));
         }
-        ds_esp_overlay_update(g_springBoard, s_boxes, s_lastCount, sbBounds,
-                              orient);
+        DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+        if (frame) {
+            memcpy(frame->boxes, s_boxes, sizeof(s_boxes));
+            frame->count = s_lastCount;
+            frame->bounds = sbBounds;
+            frame->orient = orient;
+            dispatch_async(ds_bridge_queue(), ^{
+                ds_esp_present(frame);
+            });
+        }
     } @catch (NSException *exception) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
     }
+    s_espBusy.store(false);
 }
 
 static void ds_start_esp_timer(void) {
     if (g_espTimer) return;
-    // 8Hz cho box mượt (khớp ESP_REFRESH_HZ). IPC được cache frame nên rẻ.
+    // 8Hz cho box mượt (khớp ESP_REFRESH_HZ). Refresh kernel chạy trên worker
+    // queue riêng để không nghẽn bridge queue; IPC present vẫn trên bridge.
     const uint64_t interval = NSEC_PER_SEC / 8;
-    g_espTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_bridge_queue());
+    g_espTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
     dispatch_source_set_timer(g_espTimer,
                               dispatch_time(DISPATCH_TIME_NOW, interval),
                               interval, 20 * NSEC_PER_MSEC);

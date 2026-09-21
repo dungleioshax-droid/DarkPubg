@@ -42,6 +42,10 @@ static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 // -> app bị Jetsam kill giữa lúc quét (scan đứng ~50%). Đọc 1 cửa sổ 0xF00
 // byte chỉ còn 1-2 vòng cho mỗi actor.
 #define ESP_ACTOR_WINDOW 0xF00
+// Bound sanity cho tọa độ world (cm): map PUBG origin ở góc nên tọa độ tới
+// ~800.000cm (log thực tế cam x=835.589). Bound cũ 300.000 loại nhầm vị trí
+// hợp lệ -> box mất cả trận. 2.000.000 vẫn chặn được rác/NaN (thường rất lớn).
+#define ESP_POS_BOUND 2000000.0f
 
 typedef struct {
     uint64_t vtable, root, mesh, tMesh;
@@ -1512,13 +1516,13 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             if (ok && ESPIsUserPtr(root)) {
                 ESPVector loc = {0,0,0};
                 if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
-                    fabsf(loc.x) < 300000 && fabsf(loc.y) < 300000 && fabsf(loc.z) < 300000 &&
+                    fabsf(loc.x) < ESP_POS_BOUND && fabsf(loc.y) < ESP_POS_BOUND && fabsf(loc.z) < ESP_POS_BOUND &&
                     (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
                     uint64_t parent = ESPReadU64(vmMap, root + ESPOff_Scene_AttachedParent, &ok);
                     if (ok && ESPIsUserPtr(parent)) {
                         ESPVector pl = {0,0,0};
                         if (ESPMemoryRead(vmMap, parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
-                            fabsf(pl.x) < 300000 && fabsf(pl.y) < 300000 && fabsf(pl.z) < 300000) {
+                            fabsf(pl.x) < ESP_POS_BOUND && fabsf(pl.y) < ESP_POS_BOUND && fabsf(pl.z) < ESP_POS_BOUND) {
                             loc.x += pl.x; loc.y += pl.y; loc.z += pl.z;
                         }
                     }
@@ -1532,7 +1536,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             if (ok && ESPIsUserPtr(comp)) {
                 ESPVector v = {0,0,0};
                 if (ESPMemoryRead(vmMap, comp + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
-                    fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 &&
+                    fabsf(v.x) < ESP_POS_BOUND && fabsf(v.y) < ESP_POS_BOUND && fabsf(v.z) < ESP_POS_BOUND &&
                     (v.x != 0 || v.y != 0 || v.z != 0)) {
                     pos = v; gotPos = YES;
                 }
@@ -1541,7 +1545,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         if (!gotPos) {
             ESPVector v = {0,0,0};
             if (ESPMemoryRead(vmMap, actor + ESPOff_Actor_ReplicatedMovement + ESPOff_RepMovement_Location, &v, sizeof(v))) {
-                if (fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 && (v.x != 0 || v.y != 0 || v.z != 0)) {
+                if (fabsf(v.x) < ESP_POS_BOUND && fabsf(v.y) < ESP_POS_BOUND && fabsf(v.z) < ESP_POS_BOUND && (v.x != 0 || v.y != 0 || v.z != 0)) {
                     pos = v; gotPos = YES;
                 }
             }
@@ -1584,13 +1588,13 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
     if (tr->root && ESPIsUserPtr(tr->root)) {
         ESPVector loc = {0,0,0};
         if (ESPMemoryRead(vmMap, tr->root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
-            fabsf(loc.x) < 300000 && fabsf(loc.y) < 300000 && fabsf(loc.z) < 300000 &&
+            fabsf(loc.x) < ESP_POS_BOUND && fabsf(loc.y) < ESP_POS_BOUND && fabsf(loc.z) < ESP_POS_BOUND &&
             (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
             uint64_t parent = ESPReadU64(vmMap, tr->root + ESPOff_Scene_AttachedParent, &ok0);
             if (ok0 && ESPIsUserPtr(parent)) {
                 ESPVector pl = {0,0,0};
                 if (ESPMemoryRead(vmMap, parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
-                    fabsf(pl.x) < 300000 && fabsf(pl.y) < 300000 && fabsf(pl.z) < 300000) {
+                    fabsf(pl.x) < ESP_POS_BOUND && fabsf(pl.y) < ESP_POS_BOUND && fabsf(pl.z) < ESP_POS_BOUND) {
                     loc.x += pl.x; loc.y += pl.y; loc.z += pl.z;
                 }
             }
@@ -1601,7 +1605,7 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
     if (tr->fallback && ESPIsUserPtr(tr->fallback)) {
         ESPVector v = {0,0,0};
         if (ESPMemoryRead(vmMap, tr->fallback + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
-            fabsf(v.x) < 300000 && fabsf(v.y) < 300000 && fabsf(v.z) < 300000 &&
+            fabsf(v.x) < ESP_POS_BOUND && fabsf(v.y) < ESP_POS_BOUND && fabsf(v.z) < ESP_POS_BOUND &&
             (v.x != 0 || v.y != 0 || v.z != 0)) {
             *out = v;
             return YES;
