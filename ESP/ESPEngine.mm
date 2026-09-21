@@ -1722,20 +1722,13 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
-    // Stable slot mapping: sắp xếp tracked theo actor pointer để thứ tự slot luôn ổn định tuyệt đối,
-    // không bị nhảy slot và đảo index khi có actor khác xuất hiện/biến mất.
-    std::sort(tracked.begin(), tracked.end(), [](const ESPTrackedActor &a, const ESPTrackedActor &b) {
-        return a.actor < b.actor;
-    });
-
     for (int i = 0; i < maxBoxes; i++) {
         outBoxes[i] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0};
     }
 
-    int visibleCount = 0;
+    int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    size_t limit = std::min((size_t)maxBoxes, tracked.size());
-    for (size_t i = 0; i < limit; i++) {
+    for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
         uint8_t flags[2] = {0, 0};
@@ -1758,21 +1751,20 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
             float wEst = hEst * 0.5f;
             if (hEst < 2.0f || hEst > screenH * 1.5f) { cH++; continue; }
-            outBoxes[i] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1 };
-            visibleCount++;
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1 };
             continue;
         }
         float h = fabsf(sy - hy);
         if (h < 2.0f || h > screenH * 1.5f) { cH++; continue; }
         float w = h * 0.5f;
-        outBoxes[i] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1 };
-        visibleCount++;
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1 };
+        n++;
     }
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
-                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, visibleCount);
+                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
-    return visibleCount;
+    return n;
 #endif
 }

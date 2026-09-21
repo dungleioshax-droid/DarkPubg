@@ -2033,9 +2033,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
     }
 
+    int n = MIN(count, ESPOverlayMaxBoxes);
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        ESPBox2D b = boxes[i];
-        BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
+        BOOL hide = (i >= n);
         if (hide != g_espHiddenCache[i]) {
             for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
@@ -2043,6 +2043,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             if (hide) g_espRectValid[i] = NO;
         }
         if (hide) continue;
+        ESPBox2D b = boxes[i];
+        if (b.w < 1.0f || b.h < 2.0f) { g_espRectValid[i] = NO; continue; }
         CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
@@ -2378,9 +2380,13 @@ static void ds_esp_tick(void) {
             count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
                                           s_boxes, ESPOverlayMaxBoxes, &gen);
             if (count == 0 && (now2 - s_lastFullScan >= 1.0)) {
-                // Đặt lịch quét nền khi chưa có actor, không block tick thread
+                // Throttle full scan: chỉ quét lại đầy đủ tối đa 1s/lần khi chưa có tracked actor
                 s_lastFullScan = now2;
-                ESPEngineRequestScan(g_gameBase);
+                count = ESPEngineBoxes(g_gameBase, landW, landH,
+                                       s_boxes, ESPOverlayMaxBoxes);
+                if (count > 0) {
+                    gen = ESPEngineTrackedGen();
+                }
             }
             ESPBoxCounterSet(count);
 
