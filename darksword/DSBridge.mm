@@ -18,6 +18,7 @@
 #import <os/lock.h>
 #import <os/log.h>
 
+#include <algorithm>
 #include <atomic>
 #include <errno.h>
 #include <fcntl.h>
@@ -1904,7 +1905,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
     ds_remote_set_rect_on_main(process, container, "setFrame:", fullPortrait);
 
-    uint64_t font = ds_remote_font(process, 9.0, NO);
+    uint64_t font = ds_remote_font(process, 10.0, YES);
     if (!font) { ESPLog("esp ensure fail: font"); return NO; }
 
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
@@ -2033,9 +2034,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
     }
 
-    int n = MIN(count, ESPOverlayMaxBoxes);
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        BOOL hide = (i >= n);
+        ESPBox2D b = boxes[i];
+        BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
             for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
@@ -2043,22 +2044,16 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             if (hide) g_espRectValid[i] = NO;
         }
         if (hide) continue;
-        ESPBox2D b = boxes[i];
-        if (b.w < 1.0f || b.h < 2.0f) { g_espRectValid[i] = NO; continue; }
+
         CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
         CGRect right = ds_esp_map_rect(CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
 
-        // Vị trí label khoảng cách: đặt phía trên đầu nhân vật theo hướng nhìn của người dùng
-        CGPoint anchor = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5, b.y),
-                                          landW, landH, winCenter, mapOrient);
-        CGPoint labelCenter;
-        if (mapOrient == UIInterfaceOrientationLandscapeLeft) {
-            labelCenter = CGPointMake(anchor.x - 12.0, anchor.y);
-        } else {
-            labelCenter = CGPointMake(anchor.x + 12.0, anchor.y);
-        }
+        // Vị trí label khoảng cách: đặt phía trên đầu nhân vật (hoặc bên trong nếu sát mép trên)
+        float labelY = (b.y >= 14.0f) ? (b.y - 10.0f) : (b.y + 12.0f);
+        CGPoint labelCenter = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelY),
+                                              landW, landH, winCenter, mapOrient);
 
         char distTxt[16] = {0};
         snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
@@ -2264,7 +2259,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "60fps"
+#define DS_ESP_BUILD_TAG "stable-v2"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2364,6 +2359,15 @@ static void ds_esp_tick(void) {
         static CFAbsoluteTime s_lastPerfLog = 0;
         static BOOL s_espBoxLogged = NO;
 
+        // Persistent slot tracking state
+        typedef struct {
+            uint64_t actor;
+            ESPBox2D box;
+            CFAbsoluteTime lastSeen;
+            BOOL active;
+        } DSESPSlot;
+        static DSESPSlot s_slots[ESPOverlayMaxBoxes] = {{0}};
+
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
         double minInterval = 0.85 / (double)ESP_REFRESH_HZ;
@@ -2377,17 +2381,89 @@ static void ds_esp_tick(void) {
             float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             gen = 0;
-            count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
-                                          s_boxes, ESPOverlayMaxBoxes, &gen);
-            if (count == 0 && (now2 - s_lastFullScan >= 1.0)) {
-                // Throttle full scan: chỉ quét lại đầy đủ tối đa 1s/lần khi chưa có tracked actor
+            static ESPBox2D rawBoxes[32];
+            int rawCount = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
+                                                 rawBoxes, 32, &gen);
+            if (rawCount == 0 && (now2 - s_lastFullScan >= 1.0)) {
                 s_lastFullScan = now2;
-                count = ESPEngineBoxes(g_gameBase, landW, landH,
-                                       s_boxes, ESPOverlayMaxBoxes);
-                if (count > 0) {
+                rawCount = ESPEngineBoxes(g_gameBase, landW, landH,
+                                          rawBoxes, 32);
+                if (rawCount > 0) {
                     gen = ESPEngineTrackedGen();
                 }
             }
+
+            if (rawCount > 1) {
+                std::sort(rawBoxes, rawBoxes + rawCount, [](const ESPBox2D &a, const ESPBox2D &b) {
+                    return a.distance < b.distance;
+                });
+            }
+
+            bool rawMatched[32] = {false};
+
+            // Phase 1: Giữ nguyên slot cho các actor đã được gán trước đó (chống nhảy slot)
+            for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                if (!s_slots[s].active || s_slots[s].actor == 0) continue;
+                for (int r = 0; r < rawCount; r++) {
+                    if (rawMatched[r]) continue;
+                    if (rawBoxes[r].actor == s_slots[s].actor) {
+                        rawMatched[r] = true;
+                        ESPBox2D prev = s_slots[s].box;
+                        ESPBox2D cur = rawBoxes[r];
+                        float dx = fabsf(cur.x - prev.x);
+                        float dy = fabsf(cur.y - prev.y);
+                        if (dx > 40.0f || dy > 40.0f) {
+                            s_slots[s].box = cur;
+                        } else if (dx < 0.5f && dy < 0.5f) {
+                            s_slots[s].box.distance = cur.distance;
+                            s_slots[s].box.visible = cur.visible;
+                        } else {
+                            s_slots[s].box.x = prev.x + (cur.x - prev.x) * 0.75f;
+                            s_slots[s].box.y = prev.y + (cur.y - prev.y) * 0.75f;
+                            s_slots[s].box.w = prev.w + (cur.w - prev.w) * 0.75f;
+                            s_slots[s].box.h = prev.h + (cur.h - prev.h) * 0.75f;
+                            s_slots[s].box.distance = cur.distance;
+                            s_slots[s].box.visible = cur.visible;
+                        }
+                        s_slots[s].lastSeen = now2;
+                        break;
+                    }
+                }
+            }
+
+            // Phase 2: Gán actor mới vào slot trống
+            for (int r = 0; r < rawCount; r++) {
+                if (rawMatched[r]) continue;
+                int bestSlot = -1;
+                for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                    if (!s_slots[s].active || (now2 - s_slots[s].lastSeen > 0.25)) {
+                        bestSlot = s;
+                        break;
+                    }
+                }
+                if (bestSlot >= 0) {
+                    s_slots[bestSlot].actor = rawBoxes[r].actor;
+                    s_slots[bestSlot].box = rawBoxes[r];
+                    s_slots[bestSlot].lastSeen = now2;
+                    s_slots[bestSlot].active = YES;
+                    rawMatched[r] = true;
+                }
+            }
+
+            // Phase 3: Thu thập các box đang active (hysteresis 150ms để chống chớp tắt)
+            count = 0;
+            for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                if (s_slots[s].active && (now2 - s_slots[s].lastSeen <= 0.15)) {
+                    s_boxes[s] = s_slots[s].box;
+                    s_boxes[s].visible = 1;
+                    count++;
+                } else {
+                    s_slots[s].active = NO;
+                    s_slots[s].actor = 0;
+                    s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
+                }
+            }
+
             ESPBoxCounterSet(count);
 
             if (!s_espBoxLogged) {

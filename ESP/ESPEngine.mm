@@ -1567,6 +1567,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     static uint64_t s_boxBuf[2048];
     BOOL haveBulk2 = ESPReadWindow(vmMap, actorsData, s_boxBuf, (uint64_t)bulkN2 * 8);
     int n = 0;
+    std::vector<ESPTrackedActor> foundTracked;
     // Đếm rớt từng khâu để chẩn đoán B=0 mà P>0 (xem ESPEngineLastBoxDiag).
     uint32_t cEne = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
@@ -1585,6 +1586,15 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, NULL)) continue;
         cEne++;
+        if (foundTracked.size() < 64) {
+            ESPTrackedActor tr;
+            tr.actor = actor;
+            tr.root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
+            tr.fallback = (team == ESPTeam_Dummy) ? ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok) : 0;
+            tr.parent = 0;
+            tr.kind = (team == ESPTeam_Dummy) ? 3 : 1;
+            foundTracked.push_back(tr);
+        }
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative
         // ( ComponentToWorld 0x1D0 để dự phòng nếu Relative fail — xem offset.h )
         ESPVector pos = {0,0,0};
@@ -1637,22 +1647,31 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         ESPVector head = pos; head.z += 180.0f;
         if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
             // đầu ngoài màn nhưng chân trong — vẫn vẽ box ước lượng
-            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
+            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenW * 0.5f);
+            if (hEst < 10.0f) hEst = 10.0f;
+            if (hEst > screenH * 1.5f) { cH++; continue; }
             float wEst = hEst * 0.5f;
-            if (hEst < 8 || hEst > screenH) { cH++; continue; }
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp, 1 };
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp, 1, actor };
             continue;
         }
         float h = fabsf(sy - hy);
-        if (h < 8 || h > screenH * 1.2f) { cH++; continue; }
+        if (h < 10.0f) h = 10.0f;
+        if (h > screenH * 1.5f) { cH++; continue; }
         float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp, 1 };
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp, 1, actor };
     }
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
+    if (!foundTracked.empty()) {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        if (g_espTracked.empty()) {
+            g_espTracked = foundTracked;
+            g_espTrackGen++;
+        }
+    }
     return n;
 #endif
 }
@@ -1723,7 +1742,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     for (int i = 0; i < maxBoxes; i++) {
-        outBoxes[i] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0};
+        outBoxes[i] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
     }
 
     int n = 0;
@@ -1748,17 +1767,18 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         ESPVector head = pos; head.z += 180.0f;
         float hx = 0, hy = 0, hd = 0;
         if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
-            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
+            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenW * 0.5f);
+            if (hEst < 10.0f) hEst = 10.0f;
+            if (hEst > screenH * 1.5f) { cH++; continue; }
             float wEst = hEst * 0.5f;
-            if (hEst < 2.0f || hEst > screenH * 1.5f) { cH++; continue; }
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1 };
+            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1, tr->actor };
             continue;
         }
         float h = fabsf(sy - hy);
-        if (h < 2.0f || h > screenH * 1.5f) { cH++; continue; }
+        if (h < 10.0f) h = 10.0f;
+        if (h > screenH * 1.5f) { cH++; continue; }
         float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1 };
-        n++;
+        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1, tr->actor };
     }
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,

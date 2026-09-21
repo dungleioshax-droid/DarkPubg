@@ -15,10 +15,10 @@
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
 // Overlay tick qua timer riêng (ds_esp_tick) + cache frame nên mượt mà
 // không quá tải IPC sang SpringBoard.
-#define ESP_REFRESH_HZ 60
+#define ESP_REFRESH_HZ 30
 
 // Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
 // NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất.
-#define ESP_PRESENT_HZ 60
+#define ESP_PRESENT_HZ 30
 
 #endif /* ESPConfig_h */

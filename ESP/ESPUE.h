@@ -36,6 +36,7 @@ typedef struct {
     float distance;
     int health; // -1 chưa đọc
     uint8_t visible; // 1 = đang trong tầm nhìn camera (mesh bRecentlyRendered)
+    uint64_t actor; // AActor* pointer for stable slot tracking
 } ESPBox2D;
 
 // Actor đã phân loại để refresh vị trí nhanh giữa 2 lượt quét đầy đủ.
