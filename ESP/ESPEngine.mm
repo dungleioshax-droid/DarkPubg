@@ -714,24 +714,12 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                    camProbe.location.z, camProbe.rotation.pitch,
                    camProbe.rotation.yaw, camProbe.rotation.roll);
         } else {
-            // Lần lượt từng mốc của chain để biết gãy chỗ nào.
+            // Resolver đã thử mọi candidate offset + log chi tiết stage gãy
+            // (dataFail/pcFail/cmFail/fovFail) — đọc diag của nó, không đoán.
             BOOL okc = NO;
             uint64_t gameInst2 = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &okc);
-            uint64_t lpData2 = okc ? ESPReadU64(vmMap, gameInst2 + ESPOff_GameInstance_LocalPlayers, &okc) : 0;
-            uint32_t lpN2 = okc ? ESPReadU32(vmMap, gameInst2 + ESPOff_GameInstance_LocalPlayers + 8, &okc) : 0;
-            uint64_t lp2 = okc && lpData2 ? ESPReadU64(vmMap, lpData2, &okc) : 0;
-            uint64_t pc2 = okc && lp2 ? ESPReadU64(vmMap, lp2 + ESPOff_Player_PlayerController, &okc) : 0;
-            uint64_t cm2 = okc && pc2 ? ESPReadU64(vmMap, pc2 + ESPOff_PC_CameraManager, &okc) : 0;
-            uint64_t pov2 = cm2 ? (cm2 + ESPOff_CamMgr_ViewTarget + ESPOff_ViewTarget_POV) : 0;
-            float fov2 = -2;
-            if (pov2) {
-                ESPReadF32(vmMap, pov2 + ESPOff_POV_FOV, &fov2);
-                if (fov2 == 0) fov2 = -1;
-            }
-            ESPLog("diag cam FAIL gInst=%llx lpData=%llx n=%u lp=%llx pc=%llx cm=%llx pov=%llx fov=%.1f",
-                   (unsigned long long)gameInst2, (unsigned long long)lpData2,
-                   lpN2, (unsigned long long)lp2, (unsigned long long)pc2,
-                   (unsigned long long)cm2, (unsigned long long)pov2, fov2);
+            ESPLog("diag cam FAIL gInst=%llx %s",
+                   (unsigned long long)gameInst2, ESPCameraResolveDiag());
         }
     }
     g_espProgressTotal.store((int)scanN);
@@ -844,7 +832,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                                              const std::pair<uint64_t,uint32_t> &b) {
             return a.second > b.second;
         });
-        char buf[512];
+        char buf[512] = {0};
         int bl = 0;
         for (size_t i = 0; i < vts.size() && i < 8; i++) {
             bl += snprintf(buf + bl, sizeof(buf) - (size_t)bl, " 0x%llx:%u",
@@ -1114,6 +1102,106 @@ static uint64_t ESPProcVMMap(uint64_t *outProc) {
 }
 #endif
 
+// --- Camera PC resolver: field LocalPlayers trong UGameInstance trôi theo
+// bản game (0x48 ở dump cũ đã gãy: gameInst đọc OK nhưng +0x48 fail).
+// Resolver thử các candidate offset, validate BẰNG CẢ CHAIN xuống tới FOV
+// (data/count -> LP -> PC -> CamMgr -> FOV 10..170), rồi cache offset theo
+// GameInstance. Lần sau chỉ tốn ~5 reads để re-validate.
+static uint32_t g_espLPOffFound = 0;   // field offset đã validate
+static uint64_t g_espLPInstFound = 0;  // gameInstance tương ứng
+static uint64_t g_espLPNegInst = 0;    // gameInstance resolve fail gần nhất
+static CFAbsoluteTime g_espLPNegAt = 0; // lúc fail (cache âm 5s chống spam)
+static char g_espLPDiag[160] = "n/a";  // diag lần resolve gần nhất
+
+static BOOL ESPFovSaneAt(uint64_t vmMap, uint64_t camMgr) {
+    float fov = 0;
+    if (!ESPMemoryRead(vmMap, camMgr + ESPOff_CamMgr_ViewTarget + ESPOff_ViewTarget_POV + ESPOff_POV_FOV,
+                       &fov, sizeof(fov))) return NO;
+    return (fov >= 10.0f && fov <= 170.0f);
+}
+
+// Validate 1 candidate offset. Trả PC nếu cả chain OK, 0 nếu gãy (ghi stage).
+static uint64_t ESPTryLPOff(uint64_t vmMap, uint64_t gameInst, uint32_t off,
+                            char *stageBuf, size_t stageN) {
+    BOOL ok = NO;
+    uint64_t data = ESPReadU64(vmMap, gameInst + off, &ok);
+    if (!ok || !ESPIsUserPtr(data)) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x dataFail", off);
+        return 0;
+    }
+    uint32_t n = ESPReadU32(vmMap, gameInst + off + 8, &ok);
+    if (!ok || n == 0 || n > 8) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x n=%u", off, (unsigned)n);
+        return 0;
+    }
+    uint64_t lp = ESPReadU64(vmMap, data, &ok);
+    if (!ok || !ESPIsUserPtr(lp)) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x lpFail", off);
+        return 0;
+    }
+    uint64_t pc = ESPReadU64(vmMap, lp + ESPOff_Player_PlayerController, &ok);
+    if (!ok || !ESPIsUserPtr(pc)) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x pcFail", off);
+        return 0;
+    }
+    uint64_t cm = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
+    if (!ok || !ESPIsUserPtr(cm)) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x cmFail", off);
+        return 0;
+    }
+    if (!ESPFovSaneAt(vmMap, cm)) {
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x fovFail", off);
+        return 0;
+    }
+    if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x OK", off);
+    return pc;
+}
+
+static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
+    if (!ESPIsUserPtr(gameInst)) return 0;
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    // 1) Cache dương: re-validate nhanh (gameInst đổi/world mới thì tự rớt).
+    if (g_espLPInstFound == gameInst && g_espLPOffFound) {
+        char st[64] = {0};
+        uint64_t pc = ESPTryLPOff(vmMap, gameInst, g_espLPOffFound, st, sizeof(st));
+        if (pc) return pc;
+        g_espLPInstFound = 0;
+        g_espLPOffFound = 0;
+    }
+    // 2) Cache âm 5s (box tick 1Hz + scan probe gọi liên tục).
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_espLPNegInst == gameInst && now - g_espLPNegAt < 5.0) return 0;
+    // 3) Quét candidates (offset dump cũ trước, rồi chuẩn UE4 0x38, rồi lân cận).
+    static const uint32_t kCand[] = {
+        ESPOff_GameInstance_LocalPlayers, 0x38, 0x40, 0x30, 0x50,
+        0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0,
+    };
+    char best[96] = "none";
+    for (size_t i = 0; i < sizeof(kCand) / sizeof(kCand[0]); i++) {
+        char st[64] = {0};
+        uint64_t pc = ESPTryLPOff(vmMap, gameInst, kCand[i], st, sizeof(st));
+        snprintf(best, sizeof(best), "%s", st);
+        if (pc) {
+            g_espLPInstFound = gameInst;
+            g_espLPOffFound = kCand[i];
+            snprintf(g_espLPDiag, sizeof(g_espLPDiag), "inst=0x%llx %s",
+                     (unsigned long long)gameInst, st);
+            ESPLog("camLP resolved %s", g_espLPDiag);
+            return pc;
+        }
+    }
+    g_espLPNegInst = gameInst;
+    g_espLPNegAt = now;
+    snprintf(g_espLPDiag, sizeof(g_espLPDiag), "inst=0x%llx FAIL last=%s",
+             (unsigned long long)gameInst, best);
+    ESPLog("camLP FAIL %s", g_espLPDiag);
+    return 0;
+}
+
+static const char *ESPCameraResolveDiag(void) {
+    return g_espLPDiag;
+}
+
 BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     if (!outCam) return NO;
 #if !USE_DARKSWORD
@@ -1136,13 +1224,10 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     BOOL ok = NO;
     uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
     if (!ok || !gameInst) return NO;
-    uint64_t localPlayersData = ESPReadU64(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x0, &ok);
-    uint32_t localN = ESPReadU32(vmMap, gameInst + ESPOff_GameInstance_LocalPlayers + 0x8, &ok);
-    if (!ok || !localPlayersData || localN == 0) return NO;
-    uint64_t localPlayer = ESPReadU64(vmMap, localPlayersData + 0x0, &ok);
-    if (!ok || !localPlayer) return NO;
-    uint64_t pc = ESPReadU64(vmMap, localPlayer + ESPOff_Player_PlayerController, &ok);
-    if (!ok || !pc) return NO;
+    // PC qua resolver (field LocalPlayers trôi theo bản game — hardcode 0x48
+    // đã gãy). Resolver validate cả chain tới FOV rồi cache theo GameInstance.
+    uint64_t pc = ESPResolvePC(vmMap, gameInst);
+    if (!pc) return NO;
     uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
     if (!ok || !camMgr) return NO;
     // POV qua ViewTarget (FTViewTarget @ 0x10A0 + 0x10) — đúng như source
