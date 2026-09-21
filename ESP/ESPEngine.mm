@@ -196,6 +196,7 @@ static void ESPBoxDiagSet(const char *fmt, ...) {
 const char *ESPEngineLastBoxDiag(void) {
     return g_espBoxDiag;
 }
+static const char *ESPCameraResolveDiag(void); // định nghĩa ở cụm camera bên dưới
 
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
     std::lock_guard<std::mutex> lk(g_espClassifyMutex);
