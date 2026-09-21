@@ -351,6 +351,7 @@ BOOL ESPIsPlayerCharacterName(const char *name) {
     static const char *keys[] = {
         "PlayerPawn", "PlayerCharacter", "PlayerControllertSl",
         "_PlayerPawn_TPlanAI_C", "CharacterModelTaget", "FakePlayer_AIPawn",
+        "AIPawn", // như aovcheat: bot/AI pawn thuần (strstr bao cả FakePlayer_AIPawn)
         "STExtraPlayerCharacter", "STExtraBaseCharacter", "BP_PlayerPawn", "PlanAI",
     };
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
