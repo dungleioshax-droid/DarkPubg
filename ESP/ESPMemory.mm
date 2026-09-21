@@ -7,8 +7,6 @@
 #import "ESPConfig.h"
 #import "ESPLog.h"
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
-#import <mach/mach_traps.h>
 #include <mutex>
 
 #if USE_DARKSWORD
@@ -31,6 +29,10 @@ static int s_gameTaskMode = 0; // 0 = none, 1 = task_for_pid, 2 = processor_set_
 // Bắt buộc extern "C": file này là Objective-C++ nên không có thì linker sẽ
 // đi tìm symbol C++ (undefined).
 extern "C" {
+// <mach/mach_vm.h> báo "unsupported" trên SDK iOS -> tự khai báo prototype.
+kern_return_t mach_vm_read_overwrite(mach_port_t target_task, mach_vm_address_t address,
+                                     mach_vm_size_t size, mach_vm_address_t data,
+                                     mach_vm_size_t *outsize);
 kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
 kern_return_t pid_for_task(task_t task, int *pid);
 kern_return_t processor_set_default(host_t host, processor_set_name_t *default_set);
