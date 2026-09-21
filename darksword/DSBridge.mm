@@ -2259,7 +2259,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "stable-v2"
+#define DS_ESP_BUILD_TAG "stable-v3"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2410,20 +2410,17 @@ static void ds_esp_tick(void) {
                         rawMatched[r] = true;
                         ESPBox2D prev = s_slots[s].box;
                         ESPBox2D cur = rawBoxes[r];
+                        // Không làm mượt giả gây giật giật (lag rồi snap): cập nhật trực tiếp toạ độ 3D.
+                        // Chỉ bỏ qua nếu sai số dưới 0.5px để giảm tải IPC sang SpringBoard.
                         float dx = fabsf(cur.x - prev.x);
                         float dy = fabsf(cur.y - prev.y);
-                        if (dx > 40.0f || dy > 40.0f) {
-                            s_slots[s].box = cur;
-                        } else if (dx < 0.5f && dy < 0.5f) {
+                        float dw = fabsf(cur.w - prev.w);
+                        float dh = fabsf(cur.h - prev.h);
+                        if (dx < 0.5f && dy < 0.5f && dw < 0.5f && dh < 0.5f) {
                             s_slots[s].box.distance = cur.distance;
                             s_slots[s].box.visible = cur.visible;
                         } else {
-                            s_slots[s].box.x = prev.x + (cur.x - prev.x) * 0.75f;
-                            s_slots[s].box.y = prev.y + (cur.y - prev.y) * 0.75f;
-                            s_slots[s].box.w = prev.w + (cur.w - prev.w) * 0.75f;
-                            s_slots[s].box.h = prev.h + (cur.h - prev.h) * 0.75f;
-                            s_slots[s].box.distance = cur.distance;
-                            s_slots[s].box.visible = cur.visible;
+                            s_slots[s].box = cur;
                         }
                         s_slots[s].lastSeen = now2;
                         break;
@@ -2435,10 +2432,21 @@ static void ds_esp_tick(void) {
             for (int r = 0; r < rawCount; r++) {
                 if (rawMatched[r]) continue;
                 int bestSlot = -1;
+                // Ưu tiên 1: Tìm slot chưa active hoặc actor == 0
                 for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
-                    if (!s_slots[s].active || (now2 - s_slots[s].lastSeen > 0.25)) {
+                    if (!s_slots[s].active || s_slots[s].actor == 0) {
                         bestSlot = s;
                         break;
+                    }
+                }
+                // Ưu tiên 2: Nếu đầy slot, tìm slot cũ nhất đã quá hạn 0.8s
+                if (bestSlot < 0) {
+                    CFAbsoluteTime oldest = now2;
+                    for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                        if (now2 - s_slots[s].lastSeen > 0.8 && s_slots[s].lastSeen < oldest) {
+                            oldest = s_slots[s].lastSeen;
+                            bestSlot = s;
+                        }
                     }
                 }
                 if (bestSlot >= 0) {
@@ -2450,16 +2458,20 @@ static void ds_esp_tick(void) {
                 }
             }
 
-            // Phase 3: Thu thập các box đang active (hysteresis 150ms để chống chớp tắt)
+            // Phase 3: Thu thập các box đang active (hysteresis 0.8s để chống chớp tắt)
             count = 0;
             for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
-                if (s_slots[s].active && (now2 - s_slots[s].lastSeen <= 0.15)) {
-                    s_boxes[s] = s_slots[s].box;
-                    s_boxes[s].visible = 1;
-                    count++;
+                if (s_slots[s].active) {
+                    if (now2 - s_slots[s].lastSeen <= 0.8) {
+                        s_boxes[s] = s_slots[s].box;
+                        s_boxes[s].visible = 1;
+                        count++;
+                    } else {
+                        s_slots[s].active = NO;
+                        s_slots[s].actor = 0;
+                        s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
+                    }
                 } else {
-                    s_slots[s].active = NO;
-                    s_slots[s].actor = 0;
                     s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
                 }
             }
@@ -2507,10 +2519,10 @@ static void ds_esp_tick(void) {
                 });
             }
         } else if (didRefresh && !s_zeroHidden && count == 0) {
-            // Hết box: chỉ hide sau ít nhất 6 frames liên tiếp không có box (~100ms)
+            // Hết box: chỉ hide sau ít nhất 20 frames liên tiếp không có box (~0.7s)
             // để tránh chớp tắt khi 1 frame bị hụt camera hoặc lag đọc bộ nhớ.
             s_zeroCountFrames++;
-            if (s_zeroCountFrames >= 6) {
+            if (s_zeroCountFrames >= 20) {
                 s_zeroHidden = YES;
                 DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
                 if (frame) {

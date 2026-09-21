@@ -62,6 +62,7 @@ jobs:
 
       - name: Upload symbols
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: DarkSpeed_${{ env.PKG_VERSION }}_symbols
           path: |

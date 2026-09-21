@@ -1514,8 +1514,9 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
     float tx = d.x*m10 + d.y*m11 + d.z*m12;
     float ty = d.x*m20 + d.y*m21 + d.z*m22;
     float tz = d.x*m00 + d.y*m01 + d.z*m02;
-    if (tz < 1.0f) tz = 1.0f;
+    if (tz < 10.0f) return NO; // Sau lưng hoặc quá sát camera (< 10cm)
     float distM = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z) / 100.0f;
+    if (distM > 400.0f) return NO;
     float cx = screenW * 0.5f, cyC = screenH * 0.5f;
     float tanHalf = tanf(cam.fov * kPi / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return NO;
@@ -1524,11 +1525,6 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
     if (outX) *outX = sx;
     if (outY) *outY = syC;
     if (outDist) *outDist = distM;
-    if (sx < -100 || sx > screenW + 100 || syC < -100 || syC > screenH + 100) return NO;
-    if (distM > 350.0f) return NO;
-    // sau lưng thật: depth chưa rotate < 0 (dự phòng, vì tz đã clamp)
-    float depth = d.x*(CP*CY) + d.y*(CP*SY) + d.z*SP;
-    if (depth < 100.0f) return NO;
     return YES;
 }
 
@@ -1592,6 +1588,11 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             tr.root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
             tr.fallback = (team == ESPTeam_Dummy) ? ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok) : 0;
             tr.parent = 0;
+            if (tr.root) {
+                BOOL okp = NO;
+                uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
+                if (okp && ESPIsUserPtr(par)) tr.parent = par;
+            }
             tr.kind = (team == ESPTeam_Dummy) ? 3 : 1;
             foundTracked.push_back(tr);
         }
@@ -1640,25 +1641,31 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         }
         if (!gotPos) { cPos++; continue; }
         float sx = 0, sy = 0, dist = 0;
-        // Project chân (pos) và đầu (pos.z + 180cm) để ra chiều cao box
-        float hx = 0, hy = 0, hd = 0;
         if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; } // self
-        ESPVector head = pos; head.z += 180.0f;
-        if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
-            // đầu ngoài màn nhưng chân trong — vẫn vẽ box ước lượng
-            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenW * 0.5f);
-            if (hEst < 10.0f) hEst = 10.0f;
-            if (hEst > screenH * 1.5f) { cH++; continue; }
-            float wEst = hEst * 0.5f;
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp, 1, actor };
-            continue;
+        ESPVector head = pos; head.z += 175.0f;
+        float hx = 0, hy = 0, hd = 0;
+        float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
+        if (ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+            topY = fminf(sy, hy);
+            bottomY = fmaxf(sy, hy);
+            boxH = bottomY - topY;
+            centerX = (sx + hx) * 0.5f;
+        } else {
+            float tz = dist * 100.0f;
+            if (tz < 10.0f) tz = 10.0f;
+            boxH = (175.0f / tz) * (screenW * 0.5f / tanHalf);
+            topY = sy - boxH;
+            centerX = sx;
         }
-        float h = fabsf(sy - hy);
-        if (h < 10.0f) h = 10.0f;
-        if (h > screenH * 1.5f) { cH++; continue; }
-        float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp, 1, actor };
+        if (boxH < 8.0f) boxH = 8.0f;
+        if (boxH > screenH * 2.0f) { cH++; continue; }
+        boxW = boxH * 0.5f;
+        if (centerX + boxW * 0.5f < -50.0f || centerX - boxW * 0.5f > screenW + 50.0f ||
+            topY > screenH + 50.0f || topY + boxH < -50.0f) {
+            cW2s++; continue;
+        }
+        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, (int)hp, 1, actor };
     }
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
@@ -1764,21 +1771,29 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         float sx = 0, sy = 0, dist = 0;
         if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }
-        ESPVector head = pos; head.z += 180.0f;
+        ESPVector head = pos; head.z += 175.0f;
         float hx = 0, hy = 0, hd = 0;
-        if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
-            float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenW * 0.5f);
-            if (hEst < 10.0f) hEst = 10.0f;
-            if (hEst > screenH * 1.5f) { cH++; continue; }
-            float wEst = hEst * 0.5f;
-            outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1, tr->actor };
-            continue;
+        float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
+        if (ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+            topY = fminf(sy, hy);
+            bottomY = fmaxf(sy, hy);
+            boxH = bottomY - topY;
+            centerX = (sx + hx) * 0.5f;
+        } else {
+            float tz = dist * 100.0f;
+            if (tz < 10.0f) tz = 10.0f;
+            boxH = (175.0f / tz) * (screenW * 0.5f / tanHalf);
+            topY = sy - boxH;
+            centerX = sx;
         }
-        float h = fabsf(sy - hy);
-        if (h < 10.0f) h = 10.0f;
-        if (h > screenH * 1.5f) { cH++; continue; }
-        float w = h * 0.5f;
-        outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1, tr->actor };
+        if (boxH < 8.0f) boxH = 8.0f;
+        if (boxH > screenH * 2.0f) { cH++; continue; }
+        boxW = boxH * 0.5f;
+        if (centerX + boxW * 0.5f < -50.0f || centerX - boxW * 0.5f > screenW + 50.0f ||
+            topY > screenH + 50.0f || topY + boxH < -50.0f) {
+            cW2s++; continue;
+        }
+        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, -1, 1, tr->actor };
     }
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
