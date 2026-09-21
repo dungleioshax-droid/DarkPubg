@@ -1718,6 +1718,51 @@ static void ds_esp_overlay_hide(RemoteCall *process) {
     }
 }
 
+// Dọn ESP container MA của session/process cũ còn sót trong SpringBoard.
+// Views leak có chủ ý + kill app khi chưa disable (cài đè IPA, crash) =>
+// window cũ vẫn HIỆN, boxes/labels ĐÔNG CỨNG — kể cả container từng bị xoay
+// ở bản transform-remote (chữ mét dựng đứng ma). Chạy 1 lần trước khi tạo
+// overlay mới của session này (sau disable/enable lại cho quét tiếp).
+static BOOL s_espStaleCleaned = NO;
+static void ds_esp_cleanup_stale(RemoteCall *process) {
+    if (!process || !process.trojanMem) return;
+    if (s_espStaleCleaned) return;
+    s_espStaleCleaned = YES;
+    @try {
+        uint64_t appClass = ds_remote_class(process, "UIApplication");
+        if (!appClass) return;
+        uint64_t app = ds_remote_get_object_on_main(process, appClass, "sharedApplication");
+        if (!app) return;
+        uint64_t windows = ds_remote_get_retained_object_on_main(process, app, "windows", NULL, 0);
+        if (!windows) return;
+        uint64_t count = ds_remote_get_u64_on_main(process, windows, "count");
+        count = MIN(count, 64);
+        uint64_t tagSel = ds_remote_sel(process, "viewWithTag:");
+        uint64_t idxSel = ds_remote_sel(process, "objectAtIndex:");
+        uint64_t rmSel = ds_remote_sel(process, "removeFromSuperview");
+        for (uint64_t i = 0; i < count; i++) {
+            DSRemoteArgument arg = { &i, sizeof(i) };
+            uint64_t window = 0;
+            if (!ds_remote_invoke_on_main_result(
+                    process, windows, idxSel, &arg, 1, &window, sizeof(window)) || !window) {
+                continue;
+            }
+            uint64_t tag = (uint64_t)kDSESPOverlayTag;
+            DSRemoteArgument targ = { &tag, sizeof(tag) };
+            uint64_t found = 0;
+            if (!ds_remote_invoke_on_main_result(
+                    process, window, tagSel, &targ, 1, &found, sizeof(found)) || !found) {
+                continue;
+            }
+            if (found == g_espContainer) continue; // của session này, giữ lại
+            ds_remote_set_u64_on_main(process, found, "setHidden:", 1);
+            ds_remote_invoke_on_main(process, found, rmSel, NULL, 0);
+            ESPLog("esp stale container removed");
+        }
+    } @catch (__unused NSException *e) {
+    }
+}
+
 static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
     if (g_espWindow && g_espContainer) {
@@ -1728,6 +1773,9 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
         }
         if (ok) return YES;
     }
+    // Session cũ có thể để lại container ma trong SpringBoard (kill app khi
+    // chưa disable) — dọn trước khi tạo mới để không hiện boxes đông cứng.
+    ds_esp_cleanup_stale(process);
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t workspaceClass = ds_remote_class(process, "SBMainWorkspace");
     uint64_t windowClass = ds_remote_class(process, "UIWindow");
@@ -2044,7 +2092,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "smooth2"
+#define DS_ESP_BUILD_TAG "stale1"
 
 // Mẫu refresh để nội suy (chỉ chạm từ worker queue).
 typedef struct {
@@ -2582,6 +2630,7 @@ static void ds_finish_disable(void) {
         g_espHiddenCache[i] = YES;
         g_espRectValid[i] = NO;
     }
+    s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_remoteOrientation.store(UIInterfaceOrientationUnknown);
