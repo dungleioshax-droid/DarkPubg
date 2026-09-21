@@ -637,6 +637,16 @@ static uint64_t ds_scan_process_base(uint64_t vmMap) {
     return found;
 }
 
+// Đảm bảo task port của game khớp pid hiện tại (đường đọc siêu nhanh).
+// Không lấy được thì ESPMemory tự rớt về kernel — không hỏng gì.
+static pid_t g_taskPortPid = 0;
+static void ds_ensure_game_taskport(pid_t pid) {
+    if (pid <= 0) return;
+    if (pid == g_taskPortPid && ESPMemoryTaskPortMode() != 0) return;
+    g_taskPortPid = pid;
+    ESPMemoryOpenTaskPort(pid);
+}
+
 static void ds_refresh_game_base_locked(NSString *wantedName) {
     if (g_gameBaseChecking) return;
     g_gameBaseChecking = YES;
@@ -657,6 +667,7 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
             g_gameBaseCheckedAt = CFAbsoluteTimeGetCurrent();
             return;
         }
+        ds_ensure_game_taskport(pid);
         uint64_t task = taskbyproc(proc);
         uint64_t vmMap = task ? task_get_vm_map(task) : 0;
         uint64_t base = ds_scan_process_base(vmMap);
@@ -2379,7 +2390,7 @@ static void ds_start_esp_timer(void) {
     if (g_espTimer) return;
     // 8Hz cho box mượt (khớp ESP_REFRESH_HZ). Refresh kernel chạy trên worker
     // queue riêng để không nghẽn bridge queue; IPC present vẫn trên bridge.
-    const uint64_t interval = NSEC_PER_SEC / 8;
+    const uint64_t interval = NSEC_PER_SEC / ESP_REFRESH_HZ;
     g_espTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
     dispatch_source_set_timer(g_espTimer,
                               dispatch_time(DISPATCH_TIME_NOW, interval),
@@ -2391,9 +2402,10 @@ static void ds_start_esp_timer(void) {
     });
     dispatch_resume(g_espTimer);
     if (!g_espPresentTimer) {
-        // 20Hz nội suy (lerp mịn). Frame cache dedup IPC khi đứng yên nên
-        // không quá tải SpringBoard.
-        const uint64_t pinterval = NSEC_PER_SEC / 20;
+        // Nhịp PRESENT nội suy (lerp mịn) — tương đương vsync gần nhất vì app
+        // chạy nền không dùng được CADisplayLink. Frame cache dedup IPC khi
+        // đứng yên nên không quá tải SpringBoard.
+        const uint64_t pinterval = NSEC_PER_SEC / ESP_PRESENT_HZ;
         g_espPresentTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
         dispatch_source_set_timer(g_espPresentTimer,
                                   dispatch_time(DISPATCH_TIME_NOW, pinterval),
@@ -2593,6 +2605,8 @@ static void ds_finish_disable(void) {
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
+    ESPMemoryCloseTaskPort();
+    g_taskPortPid = 0;
     ESPMemoryFlushPageCache(); // nhả mapping + port của world cũ
     g_hudActive.store(false);
     if (process) {

@@ -17,6 +17,16 @@ NS_ASSUME_NONNULL_BEGIN
 // Gọi từ ds_bridge_queue, sau khi ds_is_ready().
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc);
 
+// ---- Task port (đường đọc siêu nhanh: mach_vm_read_overwrite) ----
+// Thử lấy task port của game (task_for_pid, rồi processor_set_tasks). Lấy
+// được thì mọi lần ESPMemoryRead/ESPReadWindow đọc bulk trực tiếp (µs, không
+// lock, không mapping). Không lấy được (sideload/không root) thì tự rớt về
+// đường kernel page cache — không hỏng gì. An toàn gọi lại nhiều lần.
+BOOL ESPMemoryOpenTaskPort(pid_t pid);
+// 0 = chưa có port, 1 = task_for_pid, 2 = processor_set_tasks.
+int ESPMemoryTaskPortMode(void);
+void ESPMemoryCloseTaskPort(void);
+
 // Đọc len bytes từ địa chỉ ảo của game vào buf. Trả về YES nếu đọc đủ.
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
 
