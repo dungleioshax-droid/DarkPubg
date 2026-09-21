@@ -46,7 +46,13 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
 // NHANH: không phân loại lại actor — chỉ đọc lại camera + vị trí của các actor
 // đã biết (ESPTrackedActor từ lượt quét gần nhất) rồi project ra màn hình.
 // ESP_REFRESH_HZ lần/giây, chỉ tốn ~2 lần đọc kernel/actor. Trả về số box.
-int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes);
+// outGen (nullable): thế hệ tracked của mẫu này — bridge nội suy theo index
+// chỉ khi cùng gen + cùng count, khác thì snap.
+int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes,
+                         uint64_t *outGen);
+
+// Thế hệ tracked hiện tại (tăng mỗi khi scan publish/xả).
+uint64_t ESPEngineTrackedGen(void);
 
 // Bridge báo số box đang vẽ (để hiển thị B<nn> trên dòng scan của app).
 void ESPBoxCounterSet(int n);

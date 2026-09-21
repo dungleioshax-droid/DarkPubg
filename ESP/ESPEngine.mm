@@ -189,6 +189,14 @@ static std::atomic_int g_espVerboseLeft{2};
 // quét đầy đủ — ESP_REFRESH_HZ lần/giây, mỗi actor chỉ 1 lần đọc root + 1 lần
 // đọc camera thay vì phân loại lại từ đầu.
 static std::vector<ESPTrackedActor> g_espTracked;
+// Tăng mỗi khi tracked publish/swap/xả: bridge dùng để biết mẫu refresh mới
+// có cùng "thế hệ" actor với mẫu cũ không (cùng gen + cùng count mới nội suy
+// được theo index, khác thì snap).
+static uint64_t g_espTrackGen = 0;
+uint64_t ESPEngineTrackedGen(void) {
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    return g_espTrackGen;
+}
 
 // Diag box pipeline cho lần gọi Boxes/RefreshBoxes gần nhất (xem ESP.log khi
 // B=0 mà P>0): "R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2",
@@ -219,6 +227,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
+        g_espTrackGen++; // mẫu refresh cũ hết hiệu lực nội suy
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;
@@ -854,6 +863,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         // Scan fail sớm (return trước đó) thì giữ tracked cũ — tốt hơn rỗng.
         std::lock_guard<std::mutex> lk(g_espClassifyMutex);
         g_espTracked.swap(localTracked);
+        g_espTrackGen++;
         g_espPasses++;
     }
     r.playerLike = enemies;
@@ -1357,6 +1367,7 @@ const char *ESPEngineBoxPerfText(void) {
 // world hoặc khi CamMgr read fail. Tiết kiệm 3 kernel reads mỗi refresh.
 static uint64_t s_camPC = 0;
 static uint64_t s_camWorld = 0;
+static uint64_t s_camMgr = 0; // PC ổn định cả trận -> cammgr cũng ổn định, cache luôn
 
 static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
     // Không giữ lock ngoài suốt quá trình (ESPResolvePC tự lock trong —
@@ -1393,6 +1404,24 @@ static void ESPCamPCClear(void) {
     std::lock_guard<std::mutex> lk(g_espClassifyMutex);
     s_camPC = 0;
     s_camWorld = 0;
+    s_camMgr = 0;
+}
+
+// CamMgr cache theo (world, pc): đọc 1 lần rồi dùng lại, xả khi read fail.
+static uint64_t ESPCamMgrCached(uint64_t vmMap, uint64_t world, uint64_t pc) {
+    {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        if (s_camWorld == world && s_camPC == pc && s_camMgr) return s_camMgr;
+    }
+    BOOL ok = NO;
+    uint64_t cm = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
+    if (!ok || !ESPIsUserPtr(cm)) {
+        ESPCamPCClear();
+        return 0;
+    }
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    if (s_camWorld == world && s_camPC == pc) s_camMgr = cm;
+    return cm;
 }
 
 BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
@@ -1414,15 +1443,10 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
         world = ESPWorldViaViewport(vmMap, gameBase);
         if (!world) return NO;
     }
-    BOOL ok = NO;
     uint64_t pc = ESPResolvePCCached(vmMap, world);
     if (!pc) return NO;
-    uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
-    if (!ok || !ESPIsUserPtr(camMgr)) {
-        // PC cache héo (đổi pawn/match): xả để lần sau resolve lại.
-        ESPCamPCClear();
-        return NO;
-    }
+    uint64_t camMgr = ESPCamMgrCached(vmMap, world, pc);
+    if (!camMgr) return NO;
     // POV qua ViewTarget (FTViewTarget @ 0x10A0 + 0x10) — đúng như source
     // Kernel đang chạy được (CameraCache 0x520 không có camera thật ở bản này).
     // Đọc GỘP 56B 1 lần (loc 0x0 + rot 0x18 + fov 0x24 + aspect 0x34) như
@@ -1659,7 +1683,9 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
     return NO;
 }
 
-int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes) {
+int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes,
+                         uint64_t *outGen) {
+    if (outGen) *outGen = 0;
     if (!outBoxes || maxBoxes <= 0) return 0;
 #if !USE_DARKSWORD
     (void)gameBase; (void)screenW; (void)screenH;
@@ -1667,12 +1693,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 #else
     if (!gameBase || !ds_is_ready()) return 0;
     if (screenW <= 0 || screenH <= 0) return 0;
-    // Copy tracked dưới lock rồi iterate trên bản copy: scan queue có thể swap
-    // vector bất cứ lúc nào (world mới / lượt quét xong).
+    // Copy tracked + gen DƯỚI CÙNG 1 lock để bridge biết mẫu này thuộc thế hệ nào.
     std::vector<ESPTrackedActor> tracked;
     {
         std::lock_guard<std::mutex> lk(g_espClassifyMutex);
         tracked = g_espTracked;
+        if (outGen) *outGen = g_espTrackGen;
     }
     if (tracked.empty()) { ESPBoxDiagSet("R empty"); return 0; }
     CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh

@@ -178,6 +178,8 @@ static dispatch_source_t g_rateTimer = nil;
 // Timer riêng cho ESP overlay 8Hz (box mượt) — tách khỏi timer HUD text 1Hz.
 // Trước đây overlay ăn theo tick 1Hz nên box giật từng giây.
 static dispatch_source_t g_espTimer = nil;
+// Timer present nội suy 12Hz (lerp prev->tgt), rẻ (toán thuần + IPC cached).
+static dispatch_source_t g_espPresentTimer = nil;
 static AVAudioPlayer *g_keepAlivePlayer = nil;
 static uint64_t g_previousInput = 0;
 static uint64_t g_previousOutput = 0;
@@ -2031,7 +2033,20 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "maplocal1"
+#define DS_ESP_BUILD_TAG "lerp1"
+
+// Mẫu refresh để nội suy (chỉ chạm từ worker queue).
+typedef struct {
+    ESPBox2D boxes[ESPOverlayMaxBoxes];
+    int count;
+    uint64_t gen;      // thế hệ tracked (đổi -> snap, không lerp)
+    CFAbsoluteTime t;
+    CGRect bounds;
+    int orient;
+} DSESPSample;
+static DSESPSample s_prev = {0}; // mẫu cũ (valid khi count > 0)
+static DSESPSample s_tgt = {0};  // mẫu mới (đích nội suy)
+static CFAbsoluteTime s_lastPresentedT = 0; // tgt.t đã present tới đích
 
 // ESP Box thật trên SpringBoard (RemoteCall) 8Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ),
@@ -2091,6 +2106,8 @@ static void ds_esp_tick(void) {
     if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
         if (!s_espHideSent) {
             s_espHideSent = YES;
+            s_prev.count = 0;
+            s_tgt.count = 0;
             dispatch_async(ds_bridge_queue(), ^{
                 if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
             });
@@ -2113,6 +2130,7 @@ static void ds_esp_tick(void) {
         static CFAbsoluteTime s_lastRefresh = 0;
         // GIỮ count qua các tick bị throttle để overlay không hide oan.
         static int s_lastCount = 0;
+        static BOOL s_zeroHidden = NO; // đã gửi hide cho đợt count=0 hiện tại
         static CFAbsoluteTime s_lastZeroLog = 0;
         static CFAbsoluteTime s_lastEnsureFailLog = 0;
         static CFAbsoluteTime s_lastPerfLog = 0;
@@ -2125,13 +2143,19 @@ static void ds_esp_tick(void) {
             // Game landscape: W = cạnh dài (khớp với overlay update).
             float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
+            uint64_t gen = 0;
             int count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
-                                              s_boxes, ESPOverlayMaxBoxes);
+                                              s_boxes, ESPOverlayMaxBoxes, &gen);
+            int fromFull = 0;
             if (count == 0) {
                 // Chưa có tracked actor (mới vào trận / lượt quét đầu):
                 // dùng đường đầy đủ để khởi tạo danh sách theo dõi.
                 count = ESPEngineBoxes(g_gameBase, landW, landH,
                                        s_boxes, ESPOverlayMaxBoxes);
+                if (count > 0) {
+                    fromFull = 1;
+                    gen = ESPEngineTrackedGen();
+                }
             }
             s_lastCount = count;
             ESPBoxCounterSet(count);
@@ -2163,6 +2187,54 @@ static void ds_esp_tick(void) {
                         ESPLog("box perf: %s count=%d", ESPEngineBoxPerfText(), count);
                     }
         }
+        // Snap hay nội suy: cùng gen + cùng count + cùng orient mới lerp theo
+        // index được (tracked order ổn định); còn lại snap present ngay.
+        if (count > 0) {
+            s_zeroHidden = NO;
+            if (s_prev.count == count && s_prev.gen == gen && gen != 0 &&
+                s_prev.orient == orient) {
+                // Đích nội suy cho present timer 12Hz (không present ở đây).
+                memcpy(s_tgt.boxes, s_boxes, sizeof(s_boxes));
+                s_tgt.count = count;
+                s_tgt.gen = gen;
+                s_tgt.t = now2;
+                s_tgt.bounds = sbBounds;
+                s_tgt.orient = orient;
+            } else {
+                DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+                if (frame) {
+                    memcpy(frame->boxes, s_boxes, sizeof(s_boxes));
+                    frame->count = count;
+                    frame->bounds = sbBounds;
+                    frame->orient = orient;
+                    dispatch_async(ds_bridge_queue(), ^{
+                        ds_esp_present(frame);
+                    });
+                }
+                s_lastPresentedT = now2;
+                memcpy(s_prev.boxes, s_boxes, sizeof(s_boxes));
+                s_prev.count = count;
+                s_prev.gen = gen;
+                s_prev.t = now2;
+                s_prev.bounds = sbBounds;
+                s_prev.orient = orient;
+                s_tgt = s_prev;
+            }
+        } else if (!s_zeroHidden) {
+            // Hết box: hide 1 lần (không spam mỗi tick).
+            s_zeroHidden = YES;
+            s_prev.count = 0;
+            s_tgt.count = 0;
+            DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+            if (frame) {
+                frame->count = 0;
+                frame->bounds = sbBounds;
+                frame->orient = orient;
+                dispatch_async(ds_bridge_queue(), ^{
+                    ds_esp_present(frame);
+                });
+            }
+        }
         // Ensure thử trước trên worker để log fail (ensure là RemoteCall —
         // RemoteCall dùng được từ worker vì mỗi process 1 trojanMem? KHÔNG:
         // RemoteCall IPC serialize qua mach, gọi từ thread nào cũng được miễn
@@ -2177,20 +2249,48 @@ static void ds_esp_tick(void) {
                    orient, (double)CGRectGetWidth(sbBounds),
                    (double)CGRectGetHeight(sbBounds));
         }
-        DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
-        if (frame) {
-            memcpy(frame->boxes, s_boxes, sizeof(s_boxes));
-            frame->count = s_lastCount;
-            frame->bounds = sbBounds;
-            frame->orient = orient;
-            dispatch_async(ds_bridge_queue(), ^{
-                ds_esp_present(frame);
-            });
-        }
     } @catch (NSException *exception) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
     }
     s_espBusy.store(false);
+}
+
+// Present nội suy 12Hz trên worker: lerp từng box từ s_prev tới s_tgt theo
+// thời gian rồi async sang bridge. Mắt thấy chuyển động liên tục thay vì nhảy
+// nấc theo nhịp refresh (~150ms). Frame cache bên update vẫn dedup IPC khi
+// đứng yên. KHÔNG present khi: hết mẫu, khác gen/count/orient (đợi snap),
+// hoặc đích đã present xong.
+static void ds_esp_present_tick(void) {
+    if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard) return;
+    if (s_tgt.count <= 0 || s_prev.count <= 0) return;
+    if (s_tgt.count != s_prev.count || s_tgt.gen != s_prev.gen) return;
+    if (s_tgt.orient != s_prev.orient) return;
+    if (s_tgt.t <= s_lastPresentedT) return; // đích đã present xong
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    double span = s_tgt.t - s_prev.t;
+    if (span < 0.01) span = 0.01;
+    double a = (now - s_prev.t) / span;
+    if (a <= 0) return;
+    if (a > 1) a = 1;
+    DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+    if (!frame) return;
+    for (int i = 0; i < s_tgt.count && i < ESPOverlayMaxBoxes; i++) {
+        ESPBox2D p = s_prev.boxes[i], t = s_tgt.boxes[i];
+        frame->boxes[i].x = (float)(p.x + (t.x - p.x) * a);
+        frame->boxes[i].y = (float)(p.y + (t.y - p.y) * a);
+        frame->boxes[i].w = (float)(p.w + (t.w - p.w) * a);
+        frame->boxes[i].h = (float)(p.h + (t.h - p.h) * a);
+        frame->boxes[i].distance = t.distance;
+        frame->boxes[i].health = t.health;
+        frame->boxes[i].visible = t.visible;
+    }
+    frame->count = s_tgt.count;
+    frame->bounds = s_tgt.bounds;
+    frame->orient = s_tgt.orient;
+    if (a >= 1) s_lastPresentedT = s_tgt.t;
+    dispatch_async(ds_bridge_queue(), ^{
+        ds_esp_present(frame);
+    });
 }
 
 static void ds_start_esp_timer(void) {
@@ -2208,9 +2308,26 @@ static void ds_start_esp_timer(void) {
         }
     });
     dispatch_resume(g_espTimer);
+    if (!g_espPresentTimer) {
+        const uint64_t pinterval = NSEC_PER_SEC / 12;
+        g_espPresentTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
+        dispatch_source_set_timer(g_espPresentTimer,
+                                  dispatch_time(DISPATCH_TIME_NOW, pinterval),
+                                  pinterval, 20 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(g_espPresentTimer, ^{
+            @autoreleasepool {
+                ds_esp_present_tick();
+            }
+        });
+        dispatch_resume(g_espPresentTimer);
+    }
 }
 
 static void ds_stop_esp_timer(void) {
+    if (g_espPresentTimer) {
+        dispatch_source_cancel(g_espPresentTimer);
+        g_espPresentTimer = nil;
+    }
     if (!g_espTimer) return;
     dispatch_source_cancel(g_espTimer);
     g_espTimer = nil;
