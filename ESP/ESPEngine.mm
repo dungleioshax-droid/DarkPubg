@@ -726,12 +726,19 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                    camProbe.location.z, camProbe.rotation.pitch,
                    camProbe.rotation.yaw, camProbe.rotation.roll);
         } else {
-            // Resolver đã thử mọi candidate offset + log chi tiết stage gãy
-            // (dataFail/pcFail/cmFail/fovFail) — đọc diag của nó, không đoán.
+            // Soi cả 2 nguồn PC: NetDriver chain (Kernel) + GameInstance resolver.
+            BOOL okn = NO;
+            uint64_t net2 = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &okn);
+            uint64_t conn2 = (okn && ESPIsUserPtr(net2))
+                ? ESPReadU64(vmMap, net2 + ESPOff_NetDriver_ServerConn, &okn) : 0;
+            uint64_t pc2 = (okn && ESPIsUserPtr(conn2))
+                ? ESPReadU64(vmMap, conn2 + ESPOff_Conn_LocalPC, &okn) : 0;
             BOOL okc = NO;
             uint64_t gameInst2 = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &okc);
-            ESPLog("diag cam FAIL gInst=%llx %s",
-                   (unsigned long long)gameInst2, ESPCameraResolveDiag());
+            ESPLog("diag cam FAIL net=0x%llx conn=0x%llx pc=0x%llx gInst=%llx %s",
+                   (unsigned long long)net2, (unsigned long long)conn2,
+                   (unsigned long long)pc2, (unsigned long long)gameInst2,
+                   ESPCameraResolveDiag());
         }
     }
     g_espProgressTotal.store((int)scanN);
@@ -1297,12 +1304,33 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
         if (!world) return NO;
     }
     BOOL ok = NO;
-    uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
-    if (!ok || !gameInst) return NO;
-    // PC qua resolver (field LocalPlayers trôi theo bản game — hardcode 0x48
-    // đã gãy). Resolver validate cả chain tới FOV rồi cache theo GameInstance.
-    uint64_t pc = ESPResolvePC(vmMap, gameInst);
-    if (!pc) return NO;
+    // PC theo source Kernel ĐANG CHẠY ĐƯỢC (esp/drawing_view/esp.mm):
+    // World+0x38 NetDriver -> +0x78 ServerConnection -> +0x30 LocalPC.
+    // Chain này đã chứng minh sống (diag pawn đọc được team/hp) nên đi trước;
+    // GameInstance/LocalPlayers chỉ là fallback (offset 0x48 đã trôi).
+    // Đọc tươi mỗi lần gọi như Kernel (camera cũ -> box bơi/giật).
+    uint64_t pc = 0;
+    {
+        uint64_t net = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &ok);
+        if (ok && ESPIsUserPtr(net)) {
+            uint64_t conn = ESPReadU64(vmMap, net + ESPOff_NetDriver_ServerConn, &ok);
+            if (ok && ESPIsUserPtr(conn)) {
+                uint64_t p = ESPReadU64(vmMap, conn + ESPOff_Conn_LocalPC, &ok);
+                if (ok && ESPIsUserPtr(p)) pc = p;
+            }
+        }
+    }
+    if (pc) {
+        static uint64_t s_pcSrcWorldLogged = 0;
+        if (s_pcSrcWorldLogged != world) {
+            s_pcSrcWorldLogged = world;
+            ESPLog("camPC src=net pc=0x%llx", (unsigned long long)pc);
+        }
+    } else {
+        uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
+        if (ok && ESPIsUserPtr(gameInst)) pc = ESPResolvePC(vmMap, gameInst);
+        if (!pc) return NO;
+    }
     uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
     if (!ok || !camMgr) return NO;
     // POV qua ViewTarget (FTViewTarget @ 0x10A0 + 0x10) — đúng như source
