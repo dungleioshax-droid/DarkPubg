@@ -1337,7 +1337,8 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
 static double g_perfSumProc = 0, g_perfSumCam = 0, g_perfSumAct = 0;
 static int g_perfN = 0;
 static double g_perfMaxMs = 0;
-static char g_perfBuf[128] = "n/a";
+static char g_perfBuf[192] = "n/a";
+static uint64_t g_perfLastHit = 0, g_perfLastMiss = 0;
 static void ESPPerfSample(double procMs, double camMs, double actMs) {
     g_perfSumProc += procMs;
     g_perfSumCam += camMs;
@@ -1347,13 +1348,21 @@ static void ESPPerfSample(double procMs, double camMs, double actMs) {
     if (tot > g_perfMaxMs) g_perfMaxMs = tot;
 }
 const char *ESPEngineBoxPerfText(void) {
+    uint64_t hit = 0, miss = 0;
+    ESPMemoryCacheStats(&hit, &miss);
+    uint64_t dHit = hit - g_perfLastHit, dMiss = miss - g_perfLastMiss;
+    g_perfLastHit = hit;
+    g_perfLastMiss = miss;
     if (g_perfN > 0) {
-        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f",
+        snprintf(g_perfBuf, sizeof(g_perfBuf),
+                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu)",
                  g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
                  g_perfSumAct / (double)g_perfN,
-                 (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs);
+                 (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs,
+                 (unsigned long long)dHit, (unsigned long long)dMiss);
     } else {
-        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0");
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0 cache(h=%llu m=%llu)",
+                 (unsigned long long)dHit, (unsigned long long)dMiss);
     }
     g_perfSumProc = 0;
     g_perfSumCam = 0;
@@ -1457,7 +1466,9 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     float fov = 0, aspect = 0;
     {
         uint8_t raw[0x38] = {0};
-        if (ESPReadWindow(vmMap, pov, raw, sizeof(raw))) {
+        // ESPMemoryRead (0x38 < 1 page) đi đường page cache — sau lần đầu là
+        // memcpy thuần; ESPReadWindow luôn map page mới (~20ms). cam rẻ hơn ~10x.
+        if (ESPMemoryRead(vmMap, pov, raw, sizeof(raw))) {
             memcpy(&loc, raw + ESPOff_POV_Location, sizeof(loc));
             memcpy(&rot, raw + ESPOff_POV_Rotation, sizeof(rot));
             memcpy(&fov, raw + ESPOff_POV_FOV, sizeof(fov));

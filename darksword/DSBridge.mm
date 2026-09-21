@@ -174,6 +174,10 @@ static CGRect g_espLastRect[ESPOverlayMaxBoxes][5]; // 0-3 viền, 4 label
 static char g_espLastDist[ESPOverlayMaxBoxes][16];
 static BOOL g_espRectValid[ESPOverlayMaxBoxes] = {NO};
 static CGRect g_espLastContainerBounds = CGRectZero;
+// Bounds coordinate-space THẬT của scene SpringBoard mà overlay nằm trong.
+// Dùng cái này để quyết định có xoay box hay không — không đoán theo
+// orientation của app/game (app chạy nền nên số đo rất dễ sai/ngược).
+static CGRect g_espSceneBounds = CGRectZero;
 static dispatch_source_t g_rateTimer = nil;
 // Timer riêng cho ESP overlay 8Hz (box mượt) — tách khỏi timer HUD text 1Hz.
 // Trước đây overlay ăn theo tick 1Hz nên box giật từng giây.
@@ -1796,6 +1800,20 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     // destroy, trojanMem=0, HUD chết).
     uint64_t scene = g_remoteWindowScene;
     if (!scene) { ESPLog("esp ensure fail: no scene"); return NO; }
+    // Lấy bounds của scene (portrait 375x812 hay landscape 812x375?). Từ đây
+    // suy ra có phải xoay box hay không, thay vì tin orientation đọc được.
+    CGRect sceneBounds = portraitBounds;
+    {
+        uint64_t cs = ds_remote_get_object_on_main(process, scene, "coordinateSpace");
+        if (cs) {
+            CGRect b = remote_getCGRect(process, cs, ds_remote_sel(process, "bounds"));
+            if (b.size.width >= 1 && b.size.height >= 1) sceneBounds = b;
+        }
+    }
+    g_espSceneBounds = sceneBounds;
+    ESPLog("esp scene bounds=%.0fx%.0f (passed %.0fx%.0f)",
+           (double)sceneBounds.size.width, (double)sceneBounds.size.height,
+           (double)portraitBounds.size.width, (double)portraitBounds.size.height);
 
     uint64_t window = remote_msg(process, windowClass, alloc, 0, 0, 0, 0);
     uint64_t container = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
@@ -1811,7 +1829,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         return NO;
     }
 
-    ds_remote_set_rect_on_main(process, window, "setFrame:", portraitBounds);
+    ds_remote_set_rect_on_main(process, window, "setFrame:", sceneBounds);
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setWindowScene:"), scene, YES);
     ds_remote_set_double_on_main(process, window, "setWindowLevel:", kDSESPWindowLevel);
     ds_remote_set_u64_on_main(process, window, "setUserInteractionEnabled:", 0);
@@ -1825,7 +1843,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_remote_set_u64_on_main(process, container, "setTag:", (uint64_t)kDSESPOverlayTag);
     ds_remote_set_u64_on_main(process, container, "setUserInteractionEnabled:", 0);
     ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
-    ds_remote_set_rect_on_main(process, container, "setFrame:", portraitBounds);
+    ds_remote_set_rect_on_main(process, container, "setFrame:", sceneBounds);
 
     uint64_t font = ds_remote_font(process, 9.0, NO);
     if (!font) { ESPLog("esp ensure fail: font"); return NO; }
@@ -1922,16 +1940,25 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     // Game PUBG luôn render landscape: W = cạnh dài, H = cạnh ngắn — KHÔNG suy
     // từ orientation (SpringBoard scene kẹt portrait). Phải khớp EXACT với
     // landW/H dùng trong W2S ở ds_esp_tick, không thì box lệch/hụt.
-    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
-    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
-    CGPoint winCenter = CGPointMake(CGRectGetMidX(portraitBounds), CGRectGetMidY(portraitBounds));
+    // Container/window frame = bounds THẬT của scene (xem ensure). landW/H vẫn
+    // là cạnh dài/ngắn (khớp hệ game 812x375 mà W2S dùng).
+    CGRect bounds = (g_espSceneBounds.size.width >= 1 && g_espSceneBounds.size.height >= 1)
+        ? g_espSceneBounds : portraitBounds;
+    CGFloat landW = MAX(bounds.size.width, bounds.size.height);
+    CGFloat landH = MIN(bounds.size.width, bounds.size.height);
+    CGPoint winCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+    // Scene CAO > RỘNG (portrait) mà game render landscape => phải xoay toạ độ.
+    // Scene landscape (rộng > cao) => box đã đúng hệ sẵn, KHÔNG xoay. Trước đây
+    // luôn xoay theo orientation nên khi scene vốn landscape box bị dựng dọc.
+    int mapOrient = (bounds.size.height > bounds.size.width)
+        ? orientation : (int)UIInterfaceOrientationPortrait;
     // Container: full portrait, KHÔNG xoay — remote setTransform: không có tác
     // dụng trên SpringBoard (log orient=3 nhưng box vẫn ra dải dọc). Thay vào
     // đó xoay TỌA ĐỘ từng box sang hệ portrait-window ngay tại đây
     // (ds_esp_map_rect, công thức đã verify bằng vector).
-    if (!CGRectEqualToRect(g_espLastContainerBounds, portraitBounds)) {
-        ds_remote_set_rect_on_main(process, g_espContainer, "setFrame:", portraitBounds);
-        g_espLastContainerBounds = portraitBounds;
+    if (!CGRectEqualToRect(g_espLastContainerBounds, bounds)) {
+        ds_remote_set_rect_on_main(process, g_espContainer, "setFrame:", bounds);
+        g_espLastContainerBounds = bounds;
     }
     int n = MIN(count, ESPOverlayMaxBoxes);
     // Cache frame/text từng box: ở 8Hz, cảnh đứng yên thì skip hết remote
@@ -1948,15 +1975,15 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         ESPBox2D b = boxes[i];
         // Clamp nhẹ để không vẽ rác ngoài container
         if (b.w < 4 || b.h < 8) { g_espRectValid[i] = NO; continue; }
-        CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, orientation);
-        CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, orientation);
-        CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, orientation);
-        CGRect right = ds_esp_map_rect(CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h), landW, landH, winCenter, orientation);
+        CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
+        CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
+        CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
+        CGRect right = ds_esp_map_rect(CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
         // Label mét LUÔN vẽ ngang theo mép trên của box ĐÃ MAP: nếu xoay cả
         // rect label (dẹt ngang) theo ±90° nó thành dải dọc 14pt, chữ bị cắt
         // mất. Tính anchor top-center ở hệ game rồi map điểm, dựng rect ngang.
         CGPoint anchor = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5, b.y),
-                                          landW, landH, winCenter, orientation);
+                                          landW, landH, winCenter, mapOrient);
         CGFloat mappedW = fabs(CGRectGetMaxX(right) - CGRectGetMinX(left));
         if (!(mappedW >= 4)) mappedW = b.w; // fallback portrait/edge
         CGRect lf = CGRectMake(anchor.x - (mappedW + 40.0) * 0.5, anchor.y - 16.0,

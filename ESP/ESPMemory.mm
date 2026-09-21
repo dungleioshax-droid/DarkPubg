@@ -45,7 +45,7 @@ static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
 // dữ liệu nóng (statics, mảng actors, camera, root địch) sau lần chạm đầu chỉ
 // còn memcpy thuần. Đọc cửa sổ lớn (0xF00/actor lúc phân loại) đi đường trực
 // tiếp không cache để không đuổi dữ liệu nóng khỏi cache.
-#define ESP_PAGE_CACHE_SIZE 96
+#define ESP_PAGE_CACHE_SIZE 256
 
 struct ESPPageCacheEntry {
     uint64_t pageStart;    // địa chỉ page đã map (0 = slot trống)
@@ -55,6 +55,14 @@ struct ESPPageCacheEntry {
 };
 static ESPPageCacheEntry s_pageCache[ESP_PAGE_CACHE_SIZE];
 static uint64_t s_pageCacheClock = 1; // tăng dần, trị lastUse
+// Đếm hit/miss để chẩn đoán vì sao refresh chậm (log box perf).
+static uint64_t s_cacheHit = 0;
+static uint64_t s_cacheMiss = 0;
+
+void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
+    if (hit) *hit = s_cacheHit;
+    if (miss) *miss = s_cacheMiss;
+}
 
 // Tìm trong cache theo page CHÍNH XÁC. KHÔNG lock — caller giữ mutex.
 static ESPPageCacheEntry *ESPPageCacheFind(uint64_t pageStart) {
@@ -74,9 +82,11 @@ static BOOL ESPPageCacheGet(uint64_t vmMap, uint64_t pageStart,
                             uint64_t *outLocal) {
     ESPPageCacheEntry *e = ESPPageCacheFind(pageStart);
     if (e) {
+        s_cacheHit++;
         *outLocal = e->localAddress;
         return YES;
     }
+    s_cacheMiss++;
     // Miss: map page mới bằng vmmapremotepage (đường đang chạy được).
     struct ESPShmem sh = vmmapremotepage(vmMap, pageStart);
     if (!sh.used || !sh.localAddress) return NO;
@@ -221,5 +231,9 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     return NO;
 }
 void ESPMemoryFlushPageCache(void) {
+}
+void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
+    if (hit) *hit = 0;
+    if (miss) *miss = 0;
 }
 #endif
