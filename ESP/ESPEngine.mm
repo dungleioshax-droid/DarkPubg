@@ -197,6 +197,8 @@ const char *ESPEngineLastBoxDiag(void) {
     return g_espBoxDiag;
 }
 static const char *ESPCameraResolveDiag(void); // định nghĩa ở cụm camera bên dưới
+static BOOL ESPCameraIsResolved(void);
+static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBase);
 
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
     std::lock_guard<std::mutex> lk(g_espClassifyMutex);
@@ -670,6 +672,15 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
     BOOL verbose = (g_espVerboseLeft > 0) || (g_espVerdictWorld != world);
     ESPVerdictResetIfWorldChanged(world);
+    // Camera chưa resolve được PC: dump cấu trúc GameInstance 1 lần/world
+    // (không phụ thuộc verbose) để tìm offset đúng từ log giDump.
+    {
+        static uint64_t s_dumpWorld = 0;
+        if (world != s_dumpWorld && !ESPCameraIsResolved()) {
+            s_dumpWorld = world;
+            ESPGameInstanceDump(vmMap, world, gameBase);
+        }
+    }
     int myTeam = INT_MIN;
     uint64_t myPawn = 0;
     {
@@ -1127,7 +1138,8 @@ static uint64_t ESPTryLPOff(uint64_t vmMap, uint64_t gameInst, uint32_t off,
     BOOL ok = NO;
     uint64_t data = ESPReadU64(vmMap, gameInst + off, &ok);
     if (!ok || !ESPIsUserPtr(data)) {
-        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x dataFail", off);
+        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x dataFail ok=%d raw=0x%llx",
+                               off, ok ? 1 : 0, (unsigned long long)data);
         return 0;
     }
     uint32_t n = ESPReadU32(vmMap, gameInst + off + 8, &ok);
@@ -1172,16 +1184,23 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
     // 2) Cache âm 5s (box tick 1Hz + scan probe gọi liên tục).
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (g_espLPNegInst == gameInst && now - g_espLPNegAt < 5.0) return 0;
-    // 3) Quét candidates (offset dump cũ trước, rồi chuẩn UE4 0x38, rồi lân cận).
+    // 3) Quét candidates full-range 0x28..0xE0 (class UGameInstance rộng,
+    // LocalPlayers có thể nằm ngoài dải đoán ban đầu). ~23 slot x ~2 reads,
+    // chỉ chạy khi cache miss (cache âm 5s).
     static const uint32_t kCand[] = {
-        ESPOff_GameInstance_LocalPlayers, 0x38, 0x40, 0x30, 0x50,
-        0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA0,
+        ESPOff_GameInstance_LocalPlayers,
+        0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70,
+        0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8, 0xC0,
+        0xC8, 0xD0, 0xD8, 0xE0,
     };
-    char best[96] = "none";
+    // Giữ stage "hay" nhất: dataFail ở hầu hết slot là bình thường — ưu tiên
+    // slot đọc được data (n=/lpFail/pcFail/cmFail/fovFail) để biết đi xa tới đâu.
+    char best[128] = "none";
     for (size_t i = 0; i < sizeof(kCand) / sizeof(kCand[0]); i++) {
-        char st[64] = {0};
+        char st[96] = {0};
         uint64_t pc = ESPTryLPOff(vmMap, gameInst, kCand[i], st, sizeof(st));
-        snprintf(best, sizeof(best), "%s", st);
+        if (strstr(st, "dataFail") == NULL) snprintf(best, sizeof(best), "%s", st);
+        else if (best[0] == 'n') snprintf(best, sizeof(best), "%s", st); // best=="none"
         if (pc) {
             g_espLPInstFound = gameInst;
             g_espLPOffFound = kCand[i];
@@ -1201,6 +1220,53 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
 
 static const char *ESPCameraResolveDiag(void) {
     return g_espLPDiag;
+}
+
+static BOOL ESPCameraIsResolved(void) {
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    return g_espLPInstFound != 0;
+}
+
+// Dump 1 lần/world khi camera chưa resolve: đối chiếu GameInstance từ 3 nguồn
+// (world+0x470, viewport+0x80, engine+0xE20) + liệt kê mọi slot trông như
+// TArray {data,count 1..8} trong 0x20..0x180 của object đó. Đủ để hardcode
+// offset đúng mà không cần đoán thêm vòng nào.
+static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBase) {
+    BOOL ok = NO;
+    uint64_t gi1 = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
+    if (!ok) gi1 = 0;
+    uint64_t engine = ESPReadU64(vmMap, ESPGEngineRuntime(gameBase), &ok);
+    if (!ok) engine = 0;
+    uint64_t viewport = (engine && ESPIsUserPtr(engine))
+        ? ESPReadU64(vmMap, engine + ESPOff_Engine_GameViewport, &ok) : 0;
+    if (!ok) viewport = 0;
+    uint64_t gi2 = (viewport && ESPIsUserPtr(viewport))
+        ? ESPReadU64(vmMap, viewport + ESPOff_Viewport_GameInstance, &ok) : 0;
+    if (!ok) gi2 = 0;
+    uint64_t gi3 = (engine && ESPIsUserPtr(engine))
+        ? ESPReadU64(vmMap, engine + ESPOff_GameEngine_GameInstance, &ok) : 0;
+    if (!ok) gi3 = 0;
+    ESPLog("giDump w470=0x%llx vp80=0x%llx engE20=0x%llx",
+           (unsigned long long)gi1, (unsigned long long)gi2, (unsigned long long)gi3);
+    uint64_t gi = gi1 ? gi1 : (gi2 ? gi2 : gi3);
+    if (!ESPIsUserPtr(gi)) {
+        ESPLog("giDump no valid GameInstance");
+        return;
+    }
+    char buf[768] = {0};
+    int bl = 0, found = 0;
+    for (uint32_t off = 0x20; off <= 0x180 && found < 10; off += 8) {
+        BOOL okd = NO, okn = NO;
+        uint64_t data = ESPReadU64(vmMap, gi + off, &okd);
+        uint32_t n = ESPReadU32(vmMap, gi + off + 8, &okn);
+        if (okd && okn && ESPIsUserPtr(data) && n >= 1 && n <= 8) {
+            bl += snprintf(buf + bl, sizeof(buf) - (size_t)bl, " 0x%x:{0x%llx x%u}",
+                           off, (unsigned long long)data, (unsigned)n);
+            if (bl > (int)sizeof(buf) - 48) break;
+            found++;
+        }
+    }
+    ESPLog("giDump gi=0x%llx tarray(%d)%s", (unsigned long long)gi, found, buf);
 }
 
 BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
