@@ -2033,12 +2033,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
     }
 
-    int n = MIN(count, ESPOverlayMaxBoxes);
-    // Cache frame/text từng box: ở 20Hz, cảnh đứng yên thì skip hết remote
-    // call (mỗi setFrame là 1 vòng IPC sang SpringBoard main). Chỉ gửi khi
-    // rect lệch > 0.5pt hoặc text khoảng cách đổi.
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        BOOL hide = (i >= n);
+        ESPBox2D b = boxes[i];
+        BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
             for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
@@ -2046,9 +2043,6 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             if (hide) g_espRectValid[i] = NO;
         }
         if (hide) continue;
-        ESPBox2D b = boxes[i];
-        // Clamp nhẹ để không vẽ rác ngoài container
-        if (b.w < 4 || b.h < 8) { g_espRectValid[i] = NO; continue; }
         CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
         CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
@@ -2384,13 +2378,9 @@ static void ds_esp_tick(void) {
             count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
                                           s_boxes, ESPOverlayMaxBoxes, &gen);
             if (count == 0 && (now2 - s_lastFullScan >= 1.0)) {
-                // Throttle full scan: chỉ quét lại đầy đủ tối đa 1s/lần khi chưa có tracked actor
+                // Đặt lịch quét nền khi chưa có actor, không block tick thread
                 s_lastFullScan = now2;
-                count = ESPEngineBoxes(g_gameBase, landW, landH,
-                                       s_boxes, ESPOverlayMaxBoxes);
-                if (count > 0) {
-                    gen = ESPEngineTrackedGen();
-                }
+                ESPEngineRequestScan(g_gameBase);
             }
             ESPBoxCounterSet(count);
 
