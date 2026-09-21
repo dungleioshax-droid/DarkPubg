@@ -1909,18 +1909,27 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     if (!font) { ESPLog("esp ensure fail: font"); return NO; }
 
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        for (int e = 0; e < 4; e++) {
-            uint64_t v = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
-            if (!v || !ds_remote_invoke_noarg_on_main(process, v, "init")) {
-                ESPLog("esp ensure fail: border i=%d v=%llx", i, (unsigned long long)v);
-                return NO;
-            }
-            ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "setBackgroundColor:"), red, YES);
-            ds_remote_set_u64_on_main(process, v, "setHidden:", 1);
-            ds_remote_set_u64_on_main(process, v, "setUserInteractionEnabled:", 0);
-            ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), v, YES);
-            g_espBorders[i][e] = v;
+        uint64_t v = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+        if (!v || !ds_remote_invoke_noarg_on_main(process, v, "init")) {
+            ESPLog("esp ensure fail: border i=%d", i);
+            return NO;
         }
+        ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+        ds_remote_set_u64_on_main(process, v, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, v, "setUserInteractionEnabled:", 0);
+        
+        uint64_t layer = ds_remote_get_object_on_main(process, v, "layer");
+        ds_remote_set_double_on_main(process, layer, "setBorderWidth:", kDSESPBorder);
+        uint64_t cgColor = ds_remote_get_u64_on_main(process, red, "CGColor");
+        if (cgColor) ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setBorderColor:"), cgColor, YES);
+        // Tắt implicit animation bằng cách đặt speed rất cao (999.0) để animation kết thúc tức thì
+        ds_remote_set_double_on_main(process, layer, "setSpeed:", 999.0);
+        
+        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), v, YES);
+        
+        g_espBorders[i][0] = v; // Dùng 1 view duy nhất cho toàn bộ khung box
+        for (int e = 1; e < 4; e++) g_espBorders[i][e] = 0;
+
         uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
         if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) {
             ESPLog("esp ensure fail: label i=%d lb=%llx", i, (unsigned long long)lb);
@@ -1933,6 +1942,10 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 1);
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
         ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+        
+        uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
+        ds_remote_set_double_on_main(process, lbLayer, "setSpeed:", 999.0);
+        
         ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), lb, YES);
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
@@ -1990,7 +2003,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         // Hide stale boxes once
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
             if (!g_espHiddenCache[i]) {
-                for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", 1);
+                if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
                 ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
                 g_espHiddenCache[i] = YES;
             }
@@ -2038,17 +2051,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         ESPBox2D b = boxes[i];
         BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
-            for (int e = 0; e < 4; e++) ds_remote_set_u64_on_main(process, g_espBorders[i][e], "setHidden:", hide ? 1 : 0);
+            if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
             g_espHiddenCache[i] = hide;
             if (hide) g_espRectValid[i] = NO;
         }
         if (hide) continue;
-
-        CGRect top = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
-        CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, mapOrient);
-        CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
-        CGRect right = ds_esp_map_rect(CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h), landW, landH, winCenter, mapOrient);
 
         // Vị trí label khoảng cách: đặt phía trên đầu nhân vật (hoặc bên trong nếu sát mép trên)
         float labelY = (b.y >= 14.0f) ? (b.y - 10.0f) : (b.y + 12.0f);
@@ -2058,10 +2066,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         char distTxt[16] = {0};
         snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
 
+        // Với 1 border view, ta map toàn bộ diện tích box
+        CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h), landW, landH, winCenter, mapOrient);
+
         BOOL same = g_espRectValid[i] && !orientChanged && strcmp(g_espLastDist[i], distTxt) == 0;
-        CGRect want[4] = { top, bottom, left, right };
-        for (int e = 0; same && e < 4; e++) {
-            CGRect o = g_espLastRect[i][e], w = want[e];
+        if (same) {
+            CGRect o = g_espLastRect[i][0], w = fullBox;
             if (fabs(o.origin.x - w.origin.x) > 0.5 || fabs(o.origin.y - w.origin.y) > 0.5 ||
                 fabs(o.size.width - w.size.width) > 0.5 || fabs(o.size.height - w.size.height) > 0.5) {
                 same = NO;
@@ -2075,10 +2085,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
         if (same) continue; // đứng yên: 0 remote call
 
-        ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", top);
-        ds_remote_set_rect_on_main(process, g_espBorders[i][1], "setFrame:", bottom);
-        ds_remote_set_rect_on_main(process, g_espBorders[i][2], "setFrame:", left);
-        ds_remote_set_rect_on_main(process, g_espBorders[i][3], "setFrame:", right);
+        // Cập nhật 1 frame duy nhất cho view tổng
+        ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
         if (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0) {
@@ -2088,7 +2096,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
         ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
 
-        for (int e = 0; e < 4; e++) g_espLastRect[i][e] = want[e];
+        g_espLastRect[i][0] = fullBox;
+        for (int e = 1; e < 4; e++) g_espLastRect[i][e] = CGRectZero;
         g_espLastRect[i][4] = CGRectMake(labelCenter.x, labelCenter.y, 60.0, 14.0);
         g_espRectValid[i] = YES;
     }
