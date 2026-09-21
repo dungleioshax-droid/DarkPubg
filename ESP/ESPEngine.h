@@ -55,6 +55,10 @@ void ESPBoxCounterSet(int n);
 // @"R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2", @"F camFail". Dùng khi B=0 mà P>0.
 const char *ESPEngineLastBoxDiag(void);
 
+// Perf refresh box trong ~10s qua (đọc + reset): @"n=80 avg=12.3ms max=45.0ms".
+// Dùng để biết lag có phải do kernel read chậm không.
+const char *ESPEngineBoxPerfText(void);
+
 NS_ASSUME_NONNULL_END
 
 #endif /* ESPEngine_h */

@@ -1284,6 +1284,72 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
     ESPLog("giDump gi=0x%llx tarray(%d)%s", (unsigned long long)gi, found, buf);
 }
 
+// Perf refresh box: đo ms mỗi lần RefreshBoxes/Boxes chạy xong (chỉ chạm từ
+// bridge queue nên không cần lock). Text đọc + reset mỗi 10s từ DSBridge.
+static double g_perfSumMs = 0;
+static int g_perfN = 0;
+static double g_perfMaxMs = 0;
+static char g_perfBuf[96] = "n/a";
+static void ESPPerfSample(double ms) {
+    g_perfSumMs += ms;
+    g_perfN++;
+    if (ms > g_perfMaxMs) g_perfMaxMs = ms;
+}
+const char *ESPEngineBoxPerfText(void) {
+    if (g_perfN > 0) {
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=%d avg=%.1fms max=%.1fms",
+                 g_perfN, g_perfSumMs / (double)g_perfN, g_perfMaxMs);
+    } else {
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0");
+    }
+    g_perfSumMs = 0;
+    g_perfN = 0;
+    g_perfMaxMs = 0;
+    return g_perfBuf;
+}
+
+// PC cache theo world: PC (controller) ổn định cả trận, resolve lại khi đổi
+// world hoặc khi CamMgr read fail. Tiết kiệm 3 kernel reads mỗi refresh.
+static uint64_t s_camPC = 0;
+static uint64_t s_camWorld = 0;
+
+static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
+    // Không giữ lock ngoài suốt quá trình (ESPResolvePC tự lock trong —
+    // mutex non-recursive). 2 threads cùng resolve 1 lúc là benign.
+    {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        if (s_camWorld == world && s_camPC) return s_camPC;
+    }
+    BOOL ok = NO;
+    uint64_t pc = 0;
+    // Đường Kernel trước (đã chứng minh sống), GI resolver fallback.
+    uint64_t net = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &ok);
+    if (ok && ESPIsUserPtr(net)) {
+        uint64_t conn = ESPReadU64(vmMap, net + ESPOff_NetDriver_ServerConn, &ok);
+        if (ok && ESPIsUserPtr(conn)) {
+            uint64_t p = ESPReadU64(vmMap, conn + ESPOff_Conn_LocalPC, &ok);
+            if (ok && ESPIsUserPtr(p)) pc = p;
+        }
+    }
+    if (!pc) {
+        uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
+        if (ok && ESPIsUserPtr(gameInst)) pc = ESPResolvePC(vmMap, gameInst);
+    }
+    if (pc) {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        if (s_camWorld != world) ESPLog("camPC pc=0x%llx", (unsigned long long)pc);
+        s_camPC = pc;
+        s_camWorld = world;
+    }
+    return pc;
+}
+
+static void ESPCamPCClear(void) {
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    s_camPC = 0;
+    s_camWorld = 0;
+}
+
 BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     if (!outCam) return NO;
 #if !USE_DARKSWORD
@@ -1304,49 +1370,38 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
         if (!world) return NO;
     }
     BOOL ok = NO;
-    // PC theo source Kernel ĐANG CHẠY ĐƯỢC (esp/drawing_view/esp.mm):
-    // World+0x38 NetDriver -> +0x78 ServerConnection -> +0x30 LocalPC.
-    // Chain này đã chứng minh sống (diag pawn đọc được team/hp) nên đi trước;
-    // GameInstance/LocalPlayers chỉ là fallback (offset 0x48 đã trôi).
-    // Đọc tươi mỗi lần gọi như Kernel (camera cũ -> box bơi/giật).
-    uint64_t pc = 0;
-    {
-        uint64_t net = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &ok);
-        if (ok && ESPIsUserPtr(net)) {
-            uint64_t conn = ESPReadU64(vmMap, net + ESPOff_NetDriver_ServerConn, &ok);
-            if (ok && ESPIsUserPtr(conn)) {
-                uint64_t p = ESPReadU64(vmMap, conn + ESPOff_Conn_LocalPC, &ok);
-                if (ok && ESPIsUserPtr(p)) pc = p;
-            }
-        }
-    }
-    if (pc) {
-        static uint64_t s_pcSrcWorldLogged = 0;
-        if (s_pcSrcWorldLogged != world) {
-            s_pcSrcWorldLogged = world;
-            ESPLog("camPC src=net pc=0x%llx", (unsigned long long)pc);
-        }
-    } else {
-        uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
-        if (ok && ESPIsUserPtr(gameInst)) pc = ESPResolvePC(vmMap, gameInst);
-        if (!pc) return NO;
-    }
+    uint64_t pc = ESPResolvePCCached(vmMap, world);
+    if (!pc) return NO;
     uint64_t camMgr = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
-    if (!ok || !camMgr) return NO;
+    if (!ok || !ESPIsUserPtr(camMgr)) {
+        // PC cache héo (đổi pawn/match): xả để lần sau resolve lại.
+        ESPCamPCClear();
+        return NO;
+    }
     // POV qua ViewTarget (FTViewTarget @ 0x10A0 + 0x10) — đúng như source
     // Kernel đang chạy được (CameraCache 0x520 không có camera thật ở bản này).
+    // Đọc GỘP 56B 1 lần (loc 0x0 + rot 0x18 + fov 0x24 + aspect 0x34) như
+    // Kernel ReadBuf POV — 1 kernel read thay vì 4.
     uint64_t pov = camMgr + ESPOff_CamMgr_ViewTarget + ESPOff_ViewTarget_POV;
     ESPVector loc = {0,0,0};
-    if (!ESPReadVec(vmMap, pov + ESPOff_POV_Location, &loc)) return NO;
     ESPRotator rot = {0,0,0};
-    if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Rotation, &rot, sizeof(rot))) return NO;
     float fov = 0, aspect = 0;
     {
-        float tmp = 0;
-        if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_FOV, &tmp, sizeof(tmp))) return NO;
-        fov = tmp;
-        if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Aspect, &tmp, sizeof(tmp))) return NO;
-        aspect = tmp;
+        uint8_t raw[0x38] = {0};
+        if (ESPReadWindow(vmMap, pov, raw, sizeof(raw))) {
+            memcpy(&loc, raw + ESPOff_POV_Location, sizeof(loc));
+            memcpy(&rot, raw + ESPOff_POV_Rotation, sizeof(rot));
+            memcpy(&fov, raw + ESPOff_POV_FOV, sizeof(fov));
+            memcpy(&aspect, raw + ESPOff_POV_Aspect, sizeof(aspect));
+        } else {
+            if (!ESPReadVec(vmMap, pov + ESPOff_POV_Location, &loc)) return NO;
+            if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Rotation, &rot, sizeof(rot))) return NO;
+            float tmp = 0;
+            if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_FOV, &tmp, sizeof(tmp))) return NO;
+            fov = tmp;
+            if (!ESPMemoryRead(vmMap, pov + ESPOff_POV_Aspect, &tmp, sizeof(tmp))) return NO;
+            aspect = tmp;
+        }
     }
     if (fov < 10 || fov > 170) return NO;
     if (!(aspect > 0.3 && aspect < 4.0)) aspect = 0; // để caller fill từ screen
@@ -1407,6 +1462,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     if (screenW <= 0 || screenH <= 0) return 0;
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) { ESPBoxDiagSet("F noVmMap"); return 0; }
+    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("F camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
@@ -1513,6 +1569,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
+    ESPPerfSample((CFAbsoluteTimeGetCurrent() - tBox0) * 1000.0);
     return n;
 #endif
 }
@@ -1571,6 +1628,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     if (tracked.empty()) { ESPBoxDiagSet("R empty"); return 0; }
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) { ESPBoxDiagSet("R noVmMap"); return 0; }
+    CFAbsoluteTime tBox0 = CFAbsoluteTimeGetCurrent(); // perf refresh
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
@@ -1612,6 +1670,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
+    ESPPerfSample((CFAbsoluteTimeGetCurrent() - tBox0) * 1000.0);
     return n;
 #endif
 }

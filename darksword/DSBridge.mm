@@ -1473,8 +1473,15 @@ static void ds_poll_foreground_orientation(RemoteCall *process) {
     uint64_t sbClass = ds_remote_class(process, "SpringBoard");
     if (!sbClass) return;
     uint64_t sbApp = ds_remote_get_object_on_main(process, sbClass, "sharedApplication");
-    if (!sbApp) return;
-    uint64_t o = ds_remote_get_u64_on_main(process, sbApp, "activeInterfaceOrientation");
+    uint64_t o = sbApp ? ds_remote_get_u64_on_main(process, sbApp, "activeInterfaceOrientation") : 0;
+    // Diag 1 lần mỗi khi raw đổi (kể cả 0) để biết selector có tồn tại không.
+    static uint64_t s_fgDbgRaw = (uint64_t)-1;
+    static uint64_t s_fgDbgApp = (uint64_t)-1;
+    if (o != s_fgDbgRaw || (sbApp != 0) != (s_fgDbgApp != 0)) {
+        s_fgDbgRaw = o;
+        s_fgDbgApp = sbApp;
+        ESPLog("fgPoll raw=%llu sbApp=%s", (unsigned long long)o, sbApp ? "ok" : "nil");
+    }
     if (o >= (uint64_t)UIInterfaceOrientationPortrait &&
         o <= (uint64_t)UIInterfaceOrientationLandscapeRight) {
         g_foregroundOrientation.store((int)o);
@@ -2040,6 +2047,7 @@ static void ds_esp_tick(void) {
         static int s_lastCount = 0;
         static CFAbsoluteTime s_lastZeroLog = 0;
         static CFAbsoluteTime s_lastEnsureFailLog = 0;
+        static CFAbsoluteTime s_lastPerfLog = 0;
         static BOOL s_espBoxLogged = NO;
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
@@ -2070,15 +2078,21 @@ static void ds_esp_tick(void) {
                        (double)landW, (double)landH,
                        ESPEngineLastBoxDiag());
             }
-            // B=0 dai dẳng mà P>0: log diag pipeline 10s/lần để biết gãy
-            // ở camera (camFail) / vị trí (pos) / project (w2s) / size (h).
-            if (count == 0 && now2 - s_lastZeroLog > 10.0) {
-                s_lastZeroLog = now2;
-                ESPLog("box tick0: %s orient=%d fg=%d dev=%ld land=%.0fx%.0f",
-                       ESPEngineLastBoxDiag(), orient, g_foregroundOrientation.load(),
-                       (long)UIDevice.currentDevice.orientation,
-                       (double)landW, (double)landH);
-            }
+                    // B=0 dai dẳng mà P>0: log diag pipeline 10s/lần để biết gãy
+                    // ở camera (camFail) / vị trí (pos) / project (w2s) / size (h).
+                    if (count == 0 && now2 - s_lastZeroLog > 10.0) {
+                        s_lastZeroLog = now2;
+                        ESPLog("box tick0: %s orient=%d fg=%d dev=%ld land=%.0fx%.0f",
+                               ESPEngineLastBoxDiag(), orient, g_foregroundOrientation.load(),
+                               (long)UIDevice.currentDevice.orientation,
+                               (double)landW, (double)landH);
+                    }
+                    // Perf refresh 10s/lần (luôn): biết lag có phải do kernel
+                    // read chậm không (avg/max ms mỗi lần refresh).
+                    if (now2 - s_lastPerfLog > 10.0) {
+                        s_lastPerfLog = now2;
+                        ESPLog("box perf: %s count=%d", ESPEngineBoxPerfText(), count);
+                    }
         }
         // Ensure window trước để log được khi tạo overlay fail (trước
         // đây fail im lặng trong update -> B>0 vẫn không thấy gì).
