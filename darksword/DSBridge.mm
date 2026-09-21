@@ -1416,6 +1416,26 @@ static inline CGFloat ds_esp_angle_for_orientation(int orientation) {
     }
 }
 
+// Orientation THẬT của game cho ESP overlay. g_remoteOrientation đọc
+// interfaceOrientation của SpringBoard scene — scene này kẹt ở portrait kể cả
+// khi game landscape foreground — nên trước đây landW/H tính sai và container
+// không xoay (box sai vị trí/kích thước). UIDevice.orientation đo bằng gia tốc
+// nên đúng cả khi HUD app đang background (game foreground).
+// NOTE: UIDevice landscape <-> interface landscape NGƯỢC nhau.
+static int ds_esp_game_orientation(void) {
+    UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
+    switch (dev) {
+        case UIDeviceOrientationLandscapeLeft: return UIInterfaceOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight: return UIInterfaceOrientationLandscapeLeft;
+        case UIDeviceOrientationPortrait: return UIInterfaceOrientationPortrait;
+        case UIDeviceOrientationPortraitUpsideDown: return UIInterfaceOrientationPortraitUpsideDown;
+        default: break;
+    }
+    int remote = g_remoteOrientation.load();
+    if (remote != UIInterfaceOrientationUnknown) return remote;
+    return (int)ds_interface_orientation();
+}
+
 static uint64_t ds_remote_font(RemoteCall *process, CGFloat size, BOOL medium) {
     uint64_t fontClass = ds_remote_class(process, "UIFont");
     if (!fontClass) return 0;
@@ -1735,9 +1755,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
         return;
     }
-    BOOL landscape = UIInterfaceOrientationIsLandscape((UIInterfaceOrientation)orientation);
-    CGFloat landW = landscape ? portraitBounds.size.height : portraitBounds.size.width;
-    CGFloat landH = landscape ? portraitBounds.size.width : portraitBounds.size.height;
+    // Game PUBG luôn render landscape: W = cạnh dài, H = cạnh ngắn — KHÔNG suy
+    // từ orientation (SpringBoard scene kẹt portrait). Phải khớp EXACT với
+    // landW/H dùng trong W2S ở ds_update_rate, không thì box lệch/hụt.
+    // orientation chỉ còn dùng để XOAY container bên dưới.
+    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
+    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
     // Container: landscape bounds, centered, rotated
     CGRect wantBounds = CGRectMake(0, 0, landW, landH);
     if (!CGRectEqualToRect(g_espLastContainerBounds, wantBounds) || g_espLastOrientation != orientation) {
@@ -1943,39 +1966,66 @@ static void ds_update_rate(void) {
             if (!CGRectIsNull(sbBounds) && sbBounds.size.width > 0) {
                 static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
                 static CFAbsoluteTime s_lastRefresh = 0;
+                // GIỮ count qua các tick bị throttle: trước đây `int count = 0`
+                // reset mỗi tick, tick nào chưa tới lượt refresh (notify/lock
+                // gọi ds_update_rate dồn) thì overlay bị hide oan + unhide liên
+                // tục (nhấp nháy / mất box).
+                static int s_lastCount = 0;
+                static CFAbsoluteTime s_lastZeroLog = 0;
+                static CFAbsoluteTime s_lastEnsureFailLog = 0;
                 static BOOL s_espBoxLogged = NO;
                 CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
-                int count = 0;
+                int orient = ds_esp_game_orientation();
                 double minInterval = 1.0 / (double)ESP_REFRESH_HZ;
                 if (now2 - s_lastRefresh >= minInterval) {
                     s_lastRefresh = now2;
-                    float landW = (float)CGRectGetWidth(sbBounds);
-                    float landH = (float)CGRectGetHeight(sbBounds);
-                    BOOL landscape = UIInterfaceOrientationIsLandscape(
-                        (UIInterfaceOrientation)g_remoteOrientation.load());
-                    if (landscape) {
-                        float t = landW; landW = landH; landH = t;
-                    }
-                    count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
-                                                  s_boxes, ESPOverlayMaxBoxes);
+                    // Game landscape: W = cạnh dài (khớp với overlay update).
+                    float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
+                    float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
+                    int count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
+                                                      s_boxes, ESPOverlayMaxBoxes);
                     if (count == 0) {
                         // Chưa có tracked actor (mới vào trận / lượt quét đầu):
                         // dùng đường đầy đủ để khởi tạo danh sách theo dõi.
                         count = ESPEngineBoxes(g_gameBase, landW, landH,
                                                s_boxes, ESPOverlayMaxBoxes);
                     }
+                    s_lastCount = count;
                     ESPBoxCounterSet(count);
                     // Log 1 lần mỗi khi bật để biết kẹt ở đâu (xem ESP.log).
                     if (!s_espBoxLogged) {
                         s_espBoxLogged = YES;
-                        ESPLog("box tick: count=%d landscape=%d sb=%.0fx%.0f",
-                               count, landscape ? 1 : 0,
+                        ESPLog("box tick: count=%d orient=%d dev=%ld sb=%.0fx%.0f land=%.0fx%.0f %s",
+                               count, orient, (long)UIDevice.currentDevice.orientation,
                                (double)CGRectGetWidth(sbBounds),
-                               (double)CGRectGetHeight(sbBounds));
+                               (double)CGRectGetHeight(sbBounds),
+                               (double)landW, (double)landH,
+                               ESPEngineLastBoxDiag());
+                    }
+                    // B=0 dai dẳng mà P>0: log diag pipeline 10s/lần để biết gãy
+                    // ở camera (camFail) / vị trí (pos) / project (w2s) / size (h).
+                    if (count == 0 && now2 - s_lastZeroLog > 10.0) {
+                        s_lastZeroLog = now2;
+                        ESPLog("box tick0: %s orient=%d dev=%ld land=%.0fx%.0f",
+                               ESPEngineLastBoxDiag(), orient,
+                               (long)UIDevice.currentDevice.orientation,
+                               (double)landW, (double)landH);
                     }
                 }
-                ds_esp_overlay_update(g_springBoard, s_boxes, count, sbBounds,
-                                      g_remoteOrientation.load());
+                // Ensure window trước để log được khi tạo overlay fail (trước
+                // đây fail im lặng trong update -> B>0 vẫn không thấy gì).
+                if (!g_espWindow || !g_espContainer) {
+                    if (!ds_esp_overlay_ensure(g_springBoard, sbBounds)) {
+                        if (now2 - s_lastEnsureFailLog > 10.0) {
+                            s_lastEnsureFailLog = now2;
+                            ESPLog("box overlay ensure FAIL orient=%d sb=%.0fx%.0f",
+                                   orient, (double)CGRectGetWidth(sbBounds),
+                                   (double)CGRectGetHeight(sbBounds));
+                        }
+                    }
+                }
+                ds_esp_overlay_update(g_springBoard, s_boxes, s_lastCount, sbBounds,
+                                      orient);
             }
         }
     } @catch (NSException *exception) {
@@ -1985,6 +2035,11 @@ static void ds_update_rate(void) {
 
 static void ds_start_rate_timer(void) {
     if (g_rateTimer) return;
+    // Bật đo orientation phần cứng cho ESP overlay (ds_esp_game_orientation).
+    // Phải gọi trên main thread; async để không block bridge queue.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [UIDevice.currentDevice beginGeneratingDeviceOrientationNotifications];
+    });
     g_previousInput = 0;
     g_previousOutput = 0;
     g_previousSampleTime = 0;
@@ -2004,6 +2059,9 @@ static void ds_start_rate_timer(void) {
 
 static void ds_stop_rate_timer(void) {
     if (!g_rateTimer) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [UIDevice.currentDevice endGeneratingDeviceOrientationNotifications];
+    });
     dispatch_source_cancel(g_rateTimer);
     g_rateTimer = nil;
 }

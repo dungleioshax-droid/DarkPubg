@@ -51,6 +51,10 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 // Bridge báo số box đang vẽ (để hiển thị B<nn> trên dòng scan của app).
 void ESPBoxCounterSet(int n);
 
+// Diag pipeline của lần gọi Boxes/RefreshBoxes gần nhất, vd:
+// @"R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2", @"F camFail". Dùng khi B=0 mà P>0.
+const char *ESPEngineLastBoxDiag(void);
+
 NS_ASSUME_NONNULL_END
 
 #endif /* ESPEngine_h */

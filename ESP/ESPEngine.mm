@@ -16,6 +16,8 @@
 #include <algorithm>
 #include <limits.h>
 #include <atomic>
+#include <mutex>
+#include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
 #include <vector>
@@ -153,9 +155,17 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
 
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
-static int g_espPasses = 0; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
+// g_espPasses/g_espVerboseLeft đọc từ cả scan queue, bridge queue lẫn main
+// thread nên dùng atomic (ghi chính vẫn dưới g_espClassifyMutex).
+static std::atomic_int g_espPasses{0}; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
 static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
 static std::atomic_int g_espProgressTotal{0};
+// Mutex cho verdict maps + VTable + frame + tracked list: ESPEngineScan chạy
+// trên queue nền trong khi ESPEngineBoxes/RefreshBoxes chạy trên timer bridge
+// (1Hz). Trước đây 2 luồng đọc/ghi unordered_map + vector cùng lúc (UB):
+// scan vừa clear/push tracked + set verdict, box path vừa iterate/read —
+// kết quả là box path ra 0 (hoặc crash ngầm) dù scan đếm đúng players.
+static std::mutex g_espClassifyMutex;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
@@ -166,13 +176,29 @@ static const int kESPverdictExpiryFrames = 6; // verdict 2 quá 6 scans thì đ�
 static uint64_t g_espVerdictWorld = 0;
 // Số lượt quét còn ghi log chi tiết (field từng actor + histogram VTable).
 // Đặt lại mỗi khi đổi world => mỗi map/trận chỉ ghi vài lượt đầu.
-static int g_espVerboseLeft = 2;
+static std::atomic_int g_espVerboseLeft{2};
 // Actor địch/hình nhân đã biết (kind 1/3) để refresh vị trí NHANH giữa 2 lượt
 // quét đầy đủ — ESP_REFRESH_HZ lần/giây, mỗi actor chỉ 1 lần đọc root + 1 lần
 // đọc camera thay vì phân loại lại từ đầu.
 static std::vector<ESPTrackedActor> g_espTracked;
 
+// Diag box pipeline cho lần gọi Boxes/RefreshBoxes gần nhất (xem ESP.log khi
+// B=0 mà P>0): "R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2",
+// "F act=452 ene=6 pos=1 w2s=3 h=0 ok=2", "F camFail", "R camFail", "R empty".
+static char g_espBoxDiag[160] = "n/a";
+static void ESPBoxDiagSet(const char *fmt, ...) {
+    if (!fmt) return;
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(g_espBoxDiag, sizeof(g_espBoxDiag), fmt, args);
+    va_end(args);
+}
+const char *ESPEngineLastBoxDiag(void) {
+    return g_espBoxDiag;
+}
+
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
     if (g_espVerdictWorld != world) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
@@ -181,7 +207,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
-        g_espTracked.clear();
+        g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
     }
 }
 
@@ -203,7 +229,8 @@ static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, 
     return YES;
 }
 
-static void ESPVerdictSet(uint64_t actor, char v, int team) {
+static void ESPVerdictSetLocked(uint64_t actor, char v, int team) {
+    // Gọi khi ĐÃ giữ g_espClassifyMutex (ESPIsEnemy giữ suốt lần phân loại).
     if (g_espVerdict.size() > 3000) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
@@ -219,6 +246,10 @@ static void ESPVerdictSet(uint64_t actor, char v, int team) {
 // verdict 2 hết hạn sau kESPverdictExpiryFrames scans để đánh giá lại.
 static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPawn, int *outTeam, float *outHp,
                        ESPClassifyDiag *diag) {
+    // Giữ mutex suốt lần phân loại: map verdict/team/frame + VTable được đọc
+    // và ghi từ cả scan queue lẫn timer bridge. Mỗi lần giữ chỉ ~vài lần đọc
+    // kernel của 1 actor nên contention không đáng kể.
+    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
     if (diag) {
         memset(diag, 0, sizeof(*diag));
         diag->rule = -2;
@@ -264,7 +295,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
         if (f.hasVtable && g_espPlayerVTable && f.vtable == g_espPlayerVTable) {
             if (diag) diag->rule = 1;
-            ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
+            ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
             goto check_live;
         }
         // 1) FName qua GNames (như Kernel GetFName -> IsASTExtraPlayerCharacter)
@@ -277,13 +308,13 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
                         ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
                     }
                     if (diag) diag->rule = 2;
-                    ESPVerdictSet(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
+                    ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
                     goto check_live;
                 }
                 // 1b) Hình nhân huấn luyện (ShootingPracticeTarget) nhận theo TÊN.
                 if (ESPIsTrainingDummyName(nm)) {
                     if (diag) diag->rule = 3;
-                    ESPVerdictSet(actor, 3, ESPTeam_Dummy);
+                    ESPVerdictSetLocked(actor, 3, ESPTeam_Dummy);
                     if (outTeam) *outTeam = ESPTeam_Dummy;
                     if (outHp) *outHp = f.tCur;
                     ESPLog("training dummy: %s", nm);
@@ -307,7 +338,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
                     ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
                 }
                 if (diag) diag->rule = 4;
-                ESPVerdictSet(actor, 1, f.team);
+                ESPVerdictSetLocked(actor, 1, f.team);
                 goto check_live;
             }
         }
@@ -321,7 +352,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             f.tMax >= 50 && f.tMax <= 2000 && f.tCur >= 0 && f.tCur <= f.tMax &&
             (f.tIsUp == 0 || f.tIsUp == 1)) {
             if (diag) diag->rule = 5;
-            ESPVerdictSet(actor, 3, ESPTeam_Dummy);
+            ESPVerdictSetLocked(actor, 3, ESPTeam_Dummy);
             if (outTeam) *outTeam = ESPTeam_Dummy;
             if (outHp) *outHp = f.tCur;
             static int s_dummyLogs = 0;
@@ -339,7 +370,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             return YES;
         }
         if (diag && f.hasTarget && ESPIsUserPtr(f.tMesh)) diag->nearDummy = 1;
-        ESPVerdictSet(actor, 2, INT_MIN);
+        ESPVerdictSetLocked(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
         if (diag) diag->rule = 0;
         return NO;
@@ -583,7 +614,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPScanReentryGuard reentryGuard; (void)reentryGuard;
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
-    g_espFrame++; // frame để verdict 2 hết hạn rồi đánh giá lại
+    { std::lock_guard<std::mutex> lk(g_espClassifyMutex); g_espFrame++; } // frame để verdict 2 hết hạn rồi đánh giá lại
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) {
         proc = procbyname("ShadowTrackerE");
@@ -616,7 +647,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
     // Giải mã GNames 1 lần cho cả scan (để đọc tên class)
     g_espUName = ESPResolveUName(vmMap, gameBase);
-    ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
+    {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
+    }
 
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     static uint64_t s_actors[ESP_MAX_ACTORS_SCAN];
@@ -644,12 +678,15 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             myTeam = t;
             myPawn = lp;
             // Học VTable player ngay từ pawn của mình (như Kernel)
-            if (lp && !g_espPlayerVTable) {
-                BOOL okv = NO;
-                uint64_t vt = ESPReadU64(vmMap, lp, &okv);
-                if (okv && ESPIsUserPtr(vt)) {
-                    g_espPlayerVTable = vt;
-                    ESPLog("learned player VTable=0x%llx from local pawn", (unsigned long long)vt);
+            {
+                std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+                if (lp && !g_espPlayerVTable) {
+                    BOOL okv = NO;
+                    uint64_t vt = ESPReadU64(vmMap, lp, &okv);
+                    if (okv && ESPIsUserPtr(vt)) {
+                        g_espPlayerVTable = vt;
+                        ESPLog("learned player VTable=0x%llx from local pawn", (unsigned long long)vt);
+                    }
                 }
             }
         } else if (verbose) {
@@ -701,7 +738,11 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espProgress.store(0);
     uint32_t enemies = 0;
     uint32_t dummies = 0;
-    g_espTracked.clear();
+    // Build tracked trên vector LOCAL rồi swap 1 lần dưới lock ở cuối scan:
+    // box path (bridge queue) copy dưới lock nên không bao giờ thấy vector
+    // đang clear/push dở (trước đây là race -> tracked rỗng/rác -> box 0).
+    std::vector<ESPTrackedActor> localTracked;
+    localTracked.reserve(64);
     uint32_t nVt = 0, nName = 0, nDummyName = 0, nChar = 0, nDummySig = 0;
     uint32_t nNo = 0, nFiltered = 0, nCached = 0;
     uint32_t nearChar = 0, nearDummy = 0, winOK = 0, winFail = 0;
@@ -750,7 +791,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         // Lưu lại để refresh vị trí nhanh giữa các lượt quét (ESPTrackedActor).
         // Dùng diag (field đọc trong ESPIsEnemy) — biến f ở nhánh phân loại
         // không còn scope ở đây.
-        if (g_espTracked.size() < 64) {
+        if (localTracked.size() < 64) {
             ESPTrackedActor tr;
             tr.actor = actor;
             tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
@@ -762,7 +803,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             } else {
                 tr.kind = 1;
             }
-            g_espTracked.push_back(tr);
+            localTracked.push_back(tr);
         }
         if (!sample) {
             sample = actor;
@@ -778,7 +819,13 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
     }
     g_espProgress.store((int)scanN);
-    g_espPasses++;
+    {
+        // Publish tracked cho box path (swap dưới lock, giữ lock cực ngắn).
+        // Scan fail sớm (return trước đó) thì giữ tracked cũ — tốt hơn rỗng.
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        g_espTracked.swap(localTracked);
+        g_espPasses++;
+    }
     r.playerLike = enemies;
     r.dummyLike = dummies;
     r.sampleActor = sample;
@@ -804,9 +851,19 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                            (unsigned long long)vts[i].first, (unsigned)vts[i].second);
             if (bl > (int)sizeof(buf) - 32) break;
         }
+        uint64_t pawnVtCopy = 0;
+        int verboseLeftCopy = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            pawnVtCopy = g_espPlayerVTable;
+            verboseLeftCopy = g_espVerboseLeft;
+        }
         ESPLog("diag vtHist(%zu)%s pawnVt=0x%llx", vts.size(), buf,
-               (unsigned long long)g_espPlayerVTable);
-        if (g_espVerboseLeft > 0) g_espVerboseLeft--;
+               (unsigned long long)pawnVtCopy);
+        if (verboseLeftCopy > 0) {
+            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            if (g_espVerboseLeft > 0) g_espVerboseLeft--;
+        }
     }
     return r;
 #endif
@@ -1161,21 +1218,21 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     if (!gameBase || !ds_is_ready()) return 0;
     if (screenW <= 0 || screenH <= 0) return 0;
     uint64_t vmMap = ESPProcVMMap(NULL);
-    if (!vmMap) return 0;
+    if (!vmMap) { ESPBoxDiagSet("F noVmMap"); return 0; }
     ESPCamera cam;
-    if (!ESPEngineCamera(gameBase, &cam)) return 0;
+    if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("F camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
     // Chỉ dùng world từ cache — KHÔNG scan đồng bộ ở đây: hàm này chạy trên
     // timer 4Hz của bridge; scan đầy đủ là việc của ESPEngineRequestScan (queue
     // nền, TTL riêng). Trước đây scan ở đây làm HUD tick kẹt cả giây.
     uint64_t world = g_espCache.world;
-    if (!world) return 0;
+    if (!world) { ESPBoxDiagSet("F noWorld"); return 0; }
     BOOL ok = NO;
     uint64_t level = 0;
     uint64_t actorsData = 0;
     uint32_t actorsCount = 0;
-    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) return 0;
-    if (!actorsData || actorsCount == 0 || actorsCount > 20000) return 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount)) { ESPBoxDiagSet("F noActors"); return 0; }
+    if (!actorsData || actorsCount == 0 || actorsCount > 20000) { ESPBoxDiagSet("F badActors"); return 0; }
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     ESPVerdictResetIfWorldChanged(world);
     int myTeam = INT_MIN;
@@ -1185,8 +1242,10 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     static uint64_t s_boxBuf[2048];
     BOOL haveBulk2 = ESPReadWindow(vmMap, actorsData, s_boxBuf, (uint64_t)bulkN2 * 8);
     int n = 0;
+    // Đếm rớt từng khâu để chẩn đoán B=0 mà P>0 (xem ESPEngineLastBoxDiag).
+    uint32_t cEne = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
-    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
+    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("F badFov %.1f", cam.fov); return 0; }
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
         uint64_t actor = 0;
         if (haveBulk2 && i < bulkN2) {
@@ -1199,6 +1258,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         if (!ESPIsUserPtr(actor)) continue;
         int team = 0; float hp = 0;
         if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, NULL)) continue;
+        cEne++;
         // Vị trí world theo source Kernel: Root.Relative + Parent.Relative
         // ( ComponentToWorld 0x1D0 để dự phòng nếu Relative fail — xem offset.h )
         ESPVector pos = {0,0,0};
@@ -1242,26 +1302,29 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
                 }
             }
         }
-        if (!gotPos) continue;
+        if (!gotPos) { cPos++; continue; }
         float sx = 0, sy = 0, dist = 0;
         // Project chân (pos) và đầu (pos.z + 180cm) để ra chiều cao box
         float hx = 0, hy = 0, hd = 0;
-        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) continue;
-        if (dist < 2.0f) continue; // self
+        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
+        if (dist < 2.0f) { cSelf++; continue; } // self
         ESPVector head = pos; head.z += 180.0f;
         if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
             // đầu ngoài màn nhưng chân trong — vẫn vẽ box ước lượng
             float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
             float wEst = hEst * 0.5f;
-            if (hEst < 8 || hEst > screenH) continue;
+            if (hEst < 8 || hEst > screenH) { cH++; continue; }
             outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, (int)hp, 1 };
             continue;
         }
         float h = fabsf(sy - hy);
-        if (h < 8 || h > screenH * 1.2f) continue;
+        if (h < 8 || h > screenH * 1.2f) { cH++; continue; }
         float w = h * 0.5f;
         outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, (int)hp, 1 };
     }
+    ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
+                  (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
+                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     return n;
 #endif
 }
@@ -1310,46 +1373,57 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 #else
     if (!gameBase || !ds_is_ready()) return 0;
     if (screenW <= 0 || screenH <= 0) return 0;
-    if (g_espTracked.empty()) return 0;
+    // Copy tracked dưới lock rồi iterate trên bản copy: scan queue có thể swap
+    // vector bất cứ lúc nào (world mới / lượt quét xong).
+    std::vector<ESPTrackedActor> tracked;
+    {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        tracked = g_espTracked;
+    }
+    if (tracked.empty()) { ESPBoxDiagSet("R empty"); return 0; }
     uint64_t vmMap = ESPProcVMMap(NULL);
-    if (!vmMap) return 0;
+    if (!vmMap) { ESPBoxDiagSet("R noVmMap"); return 0; }
     ESPCamera cam;
-    if (!ESPEngineCamera(gameBase, &cam)) return 0;
+    if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
     float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
-    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return 0;
+    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
     int n = 0;
-    for (size_t i = 0; i < g_espTracked.size() && n < maxBoxes; i++) {
-        const ESPTrackedActor *tr = &g_espTracked[i];
+    uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
+    for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
+        const ESPTrackedActor *tr = &tracked[i];
         // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
         uint8_t flags[2] = {0, 0};
         // bHidden ở 0xE8, bDead ở 0xE7C — cách nhau quá xa nên không gộp được
         // 1 lần đọc; đọc bHidden trước, chết/ẩn thì khỏi đọc bDead.
         if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
-            if (flags[0] & 0x1) continue;
+            if (flags[0] & 0x1) { cHid++; continue; }
             if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
-                if (flags[1] & 0x1) continue;
+                if (flags[1] & 0x1) { cHid++; continue; }
             }
         }
         ESPVector pos = {0,0,0};
-        if (!ESPTrackedPos(vmMap, tr, &pos)) continue;
+        if (!ESPTrackedPos(vmMap, tr, &pos)) { cPos++; continue; }
         float sx = 0, sy = 0, dist = 0;
-        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) continue;
-        if (dist < 2.0f) continue;
+        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
+        if (dist < 2.0f) { cSelf++; continue; }
         ESPVector head = pos; head.z += 180.0f;
         float hx = 0, hy = 0, hd = 0;
         if (!ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
             float hEst = (180.0f / (dist * 100.0f * tanHalf)) * (screenH * 0.5f);
             float wEst = hEst * 0.5f;
-            if (hEst < 8 || hEst > screenH) continue;
+            if (hEst < 8 || hEst > screenH) { cH++; continue; }
             outBoxes[n++] = (ESPBox2D){ sx - wEst*0.5f, sy - hEst, wEst, hEst, dist, -1, 1 };
             continue;
         }
         float h = fabsf(sy - hy);
-        if (h < 8 || h > screenH * 1.2f) continue;
+        if (h < 8 || h > screenH * 1.2f) { cH++; continue; }
         float w = h * 0.5f;
         outBoxes[n++] = (ESPBox2D){ sx - w*0.5f, hy, w, h, dist, -1, 1 };
     }
+    ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
+                  tracked.size(), (unsigned)cHid, (unsigned)cPos,
+                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     return n;
 #endif
 }
