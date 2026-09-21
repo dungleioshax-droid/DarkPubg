@@ -18,8 +18,9 @@
 #define ESP_REFRESH_HZ 8
 
 // Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
-// NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất:
-// 30Hz đủ mượt mà không dội IPC vào SpringBoard. Muốn 60Hz thì tăng số này.
-#define ESP_PRESENT_HZ 30
+// NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất.
+// Giữ 20Hz: đủ mượt và không dội IPC/RemoteCall vào SpringBoard (30Hz từng
+// làm phiên RemoteCall chết sớm).
+#define ESP_PRESENT_HZ 20
 
 #endif /* ESPConfig_h */

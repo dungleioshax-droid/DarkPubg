@@ -1774,7 +1774,7 @@ static void ds_esp_cleanup_stale(RemoteCall *process) {
     }
 }
 
-static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
+static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
     if (g_espWindow && g_espContainer) {
         BOOL ok = YES;
@@ -1855,6 +1855,33 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
     g_espWindowHiddenCache = NO;
     g_espLastContainerBounds = CGRectZero;
     return YES;
+}
+
+// Bọc ensure bằng COOLDOWN. Trước đây mỗi present tick (20-30 lần/giây) gọi
+// thẳng ensure; khi ensure fail giữa chừng (chưa có scene / class) nó tạo
+// UIWindow/UIView rác trong SpringBoard rồi fail, lặp mãi -> SpringBoard và
+// RemoteCall kiệt sức, HUD text “remote presentation update failed” rồi đứng
+// hình. Giờ fail thì nghỉ 1s mới thử lại, và log lý do.
+static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
+    if (!process || !process.trojanMem) return NO;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    static CFAbsoluteTime s_ensureCooldownUntil = 0;
+    static CFAbsoluteTime s_lastEnsureFailLog = 0;
+    if (!(g_espWindow && g_espContainer) && now < s_ensureCooldownUntil) {
+        return NO; // đang cooldown sau lần fail trước
+    }
+    BOOL ok = ds_esp_overlay_ensure_impl(process, portraitBounds);
+    if (!ok) {
+        s_ensureCooldownUntil = now + 1.0;
+        if (now - s_lastEnsureFailLog > 5.0) {
+            s_lastEnsureFailLog = now;
+            ESPLog("esp ensure FAIL (cooldown 1s) pid=%d win=%llx cont=%llx",
+                   (int)process.pid,
+                   (unsigned long long)g_espWindow,
+                   (unsigned long long)g_espContainer);
+        }
+    }
+    return ok;
 }
 
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
@@ -2093,8 +2120,17 @@ static void ds_update_rate(void) {
         }
         g_lastPresentationSignature = presentationSignature;
     } @catch (NSException *exception) {
-        ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
-        g_hudActive.store(false);
+        ESPLog("HUD present FAIL: %s trojan=%d pid=%d label=%llx window=%llx",
+               exception.reason.UTF8String ?: "?",
+               g_springBoard.trojanMem ? 1 : 0, (int)g_springBoard.pid,
+               (unsigned long long)g_remoteLabel, (unsigned long long)g_remoteWindow);
+        // CHỈ báo chết khi phiên RemoteCall mất hẳn (trojanMem=0). Lỗi tạm
+        // thời (1 call fail) trước đây tắt HUD luôn -> HUD đứng hình vĩnh viễn
+        // dù chỉ hụt một nhịp. Giờ giữ HUD sống để tick sau tự thử lại.
+        if (!g_springBoard || !g_springBoard.trojanMem) {
+            ds_set_error([NSString stringWithFormat:@"SpringBoard HUD update failed: %@", exception.reason]);
+            g_hudActive.store(false);
+        }
     }
 
     // ESP overlay chạy timer RIÊNG 8Hz (ds_esp_tick) để box mượt — timer HUD
