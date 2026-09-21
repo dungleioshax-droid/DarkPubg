@@ -1413,29 +1413,32 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
                                     &argument, 1);
 }
 
-// Map 1 rect từ hệ game-landscape sang hệ portrait-window, quay quanh tâm màn
-// hình. LandscapeLeft = R(-90°), LandscapeRight = R(+90°) — đã verify bằng
-// vector: game top-left (0,0) ra đúng physical top edge cả 2 chiều.
-// Không landscape: identity (fallback dải giữa).
-static inline CGRect ds_esp_map_rect(CGRect r, CGFloat landW, CGFloat landH,
-                                     CGPoint winCenter, int orientation) {
+// Map 1 điểm từ hệ game-landscape sang hệ portrait-window, quay quanh tâm màn
+// hình. LandscapeLeft = R(-90°), LandscapeRight = R(+90°).
+static inline CGPoint ds_esp_map_point(CGPoint p, CGFloat landW, CGFloat landH,
+                                       CGPoint winCenter, int orientation) {
     BOOL left = (orientation == UIInterfaceOrientationLandscapeLeft);
     BOOL right = (orientation == UIInterfaceOrientationLandscapeRight);
-    if (!left && !right) return r;
-    CGFloat cx = landW * 0.5, cy = landH * 0.5;
+    if (!left && !right) return p;
+    CGFloat dx = p.x - landW * 0.5, dy = p.y - landH * 0.5;
+    if (left) return CGPointMake(winCenter.x + dy, winCenter.y - dx);
+    return CGPointMake(winCenter.x - dy, winCenter.y + dx);
+}
+static inline CGRect ds_esp_map_rect(CGRect r, CGFloat landW, CGFloat landH,
+                                     CGPoint winCenter, int orientation) {
+    // Bbox của 4 góc đã map — đúng cho hình học xoay ±90° (viền box).
+    // KHÔNG dùng cho label text (phải giữ ngang — xem chỗ gọi).
     CGFloat x0 = CGFLOAT_MAX, y0 = CGFLOAT_MAX;
     CGFloat x1 = -CGFLOAT_MAX, y1 = -CGFLOAT_MAX;
     for (int k = 0; k < 4; k++) {
-        CGFloat px = (k & 1) ? CGRectGetMaxX(r) : r.origin.x;
-        CGFloat py = (k & 2) ? CGRectGetMaxY(r) : r.origin.y;
-        CGFloat dx = px - cx, dy = py - cy;
-        CGFloat wx, wy;
-        if (left) { wx = winCenter.x + dy; wy = winCenter.y - dx; }
-        else      { wx = winCenter.x - dy; wy = winCenter.y + dx; }
-        if (wx < x0) x0 = wx;
-        if (wx > x1) x1 = wx;
-        if (wy < y0) y0 = wy;
-        if (wy > y1) y1 = wy;
+        CGPoint wp = ds_esp_map_point(
+            CGPointMake((k & 1) ? CGRectGetMaxX(r) : r.origin.x,
+                        (k & 2) ? CGRectGetMaxY(r) : r.origin.y),
+            landW, landH, winCenter, orientation);
+        if (wp.x < x0) x0 = wp.x;
+        if (wp.x > x1) x1 = wp.x;
+        if (wp.y < y0) y0 = wp.y;
+        if (wp.y > y1) y1 = wp.y;
     }
     return CGRectMake(x0, y0, x1 - x0, y1 - y0);
 }
@@ -1851,7 +1854,15 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         CGRect bottom = ds_esp_map_rect(CGRectMake(b.x, b.y + b.h - kDSESPBorder, b.w, kDSESPBorder), landW, landH, winCenter, orientation);
         CGRect left = ds_esp_map_rect(CGRectMake(b.x, b.y, kDSESPBorder, b.h), landW, landH, winCenter, orientation);
         CGRect right = ds_esp_map_rect(CGRectMake(b.x + b.w - kDSESPBorder, b.y, kDSESPBorder, b.h), landW, landH, winCenter, orientation);
-        CGRect lf = ds_esp_map_rect(CGRectMake(b.x - 20, b.y - 16, b.w + 40, 14), landW, landH, winCenter, orientation);
+        // Label mét LUÔN vẽ ngang theo mép trên của box ĐÃ MAP: nếu xoay cả
+        // rect label (dẹt ngang) theo ±90° nó thành dải dọc 14pt, chữ bị cắt
+        // mất. Tính anchor top-center ở hệ game rồi map điểm, dựng rect ngang.
+        CGPoint anchor = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5, b.y),
+                                          landW, landH, winCenter, orientation);
+        CGFloat mappedW = fabs(CGRectGetMaxX(right) - CGRectGetMinX(left));
+        if (!(mappedW >= 4)) mappedW = b.w; // fallback portrait/edge
+        CGRect lf = CGRectMake(anchor.x - (mappedW + 40.0) * 0.5, anchor.y - 16.0,
+                               mappedW + 40.0, 14.0);
         char distTxt[16] = {0};
         snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
         CGRect want[5] = { top, bottom, left, right, lf };
@@ -2033,7 +2044,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "lerp1"
+#define DS_ESP_BUILD_TAG "lbl1"
 
 // Mẫu refresh để nội suy (chỉ chạm từ worker queue).
 typedef struct {
