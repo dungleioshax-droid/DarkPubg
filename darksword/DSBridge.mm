@@ -1735,6 +1735,9 @@ static void ds_esp_overlay_hide(RemoteCall *process) {
 // ở bản transform-remote (chữ mét dựng đứng ma). Chạy 1 lần trước khi tạo
 // overlay mới của session này (sau disable/enable lại cho quét tiếp).
 static BOOL s_espStaleCleaned = NO;
+// Tạm KHÔNG gọi trong đường ensure (xem comment bên dưới). Giữ lại để bật khi
+// đã xác nhận nó không làm chết phiên RemoteCall.
+__attribute__((unused))
 static void ds_esp_cleanup_stale(RemoteCall *process) {
     if (!process || !process.trojanMem) return;
     if (s_espStaleCleaned) return;
@@ -1784,26 +1787,40 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         }
         if (ok) return YES;
     }
-    // Session cũ có thể để lại container ma trong SpringBoard (kill app khi
-    // chưa disable) — dọn trước khi tạo mới để không hiện boxes đông cứng.
-    ds_esp_cleanup_stale(process);
+    // KHÔNG dọn stale trong đường ensure nữa: cleanup quét toàn bộ window của
+    // SpringBoard bằng remote call, chỉ cần 1 call fail là RemoteCall tự
+    // destroyRemoteCall (trojanMem=0) -> HUD chết đứng. Dọn stale giờ chạy
+    // một lần lúc bật HUD (ds_finish_enable), không nằm trong present path.
     uint64_t alloc = ds_remote_sel(process, "alloc");
-    uint64_t workspaceClass = ds_remote_class(process, "SBMainWorkspace");
     uint64_t windowClass = ds_remote_class(process, "UIWindow");
     uint64_t viewClass = ds_remote_class(process, "UIView");
     uint64_t labelClass = ds_remote_class(process, "UILabel");
     uint64_t colorClass = ds_remote_class(process, "UIColor");
-    if (!workspaceClass || !windowClass || !viewClass || !labelClass || !colorClass) return NO;
-
-    uint64_t workspace = ds_remote_get_object_on_main(process, workspaceClass, "sharedInstance");
-    uint64_t scene = workspace ? ds_remote_get_object_on_main(process, workspace, "mainWindowScene") : g_remoteWindowScene;
-    if (!scene) return NO;
+    if (!windowClass || !viewClass || !labelClass || !colorClass) {
+        ESPLog("esp ensure fail: class win=%llx view=%llx lbl=%llx col=%llx",
+               (unsigned long long)windowClass, (unsigned long long)viewClass,
+               (unsigned long long)labelClass, (unsigned long long)colorClass);
+        return NO;
+    }
+    // Dùng scene của HUD đã tạo thành công — KHÔNG dò SBMainWorkspace bằng
+    // thêm remote call nữa (mỗi call thừa là một cơ hội fail -> RemoteCall tự
+    // destroy, trojanMem=0, HUD chết).
+    uint64_t scene = g_remoteWindowScene;
+    if (!scene) { ESPLog("esp ensure fail: no scene"); return NO; }
 
     uint64_t window = remote_msg(process, windowClass, alloc, 0, 0, 0, 0);
     uint64_t container = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
-    if (!window || !container) return NO;
+    if (!window || !container) {
+        ESPLog("esp ensure fail: alloc win=%llx cont=%llx",
+               (unsigned long long)window, (unsigned long long)container);
+        return NO;
+    }
     if (!ds_remote_invoke_noarg_on_main(process, window, "init") ||
-        !ds_remote_invoke_noarg_on_main(process, container, "init")) return NO;
+        !ds_remote_invoke_noarg_on_main(process, container, "init")) {
+        ESPLog("esp ensure fail: init win=%llx cont=%llx",
+               (unsigned long long)window, (unsigned long long)container);
+        return NO;
+    }
 
     ds_remote_set_rect_on_main(process, window, "setFrame:", portraitBounds);
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setWindowScene:"), scene, YES);
@@ -1822,12 +1839,15 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_remote_set_rect_on_main(process, container, "setFrame:", portraitBounds);
 
     uint64_t font = ds_remote_font(process, 9.0, NO);
-    if (!font) return NO;
+    if (!font) { ESPLog("esp ensure fail: font"); return NO; }
 
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
         for (int e = 0; e < 4; e++) {
             uint64_t v = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
-            if (!v || !ds_remote_invoke_noarg_on_main(process, v, "init")) return NO;
+            if (!v || !ds_remote_invoke_noarg_on_main(process, v, "init")) {
+                ESPLog("esp ensure fail: border i=%d v=%llx", i, (unsigned long long)v);
+                return NO;
+            }
             ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "setBackgroundColor:"), red, YES);
             ds_remote_set_u64_on_main(process, v, "setHidden:", 1);
             ds_remote_set_u64_on_main(process, v, "setUserInteractionEnabled:", 0);
@@ -1835,7 +1855,10 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
             g_espBorders[i][e] = v;
         }
         uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
-        if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) return NO;
+        if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) {
+            ESPLog("esp ensure fail: label i=%d lb=%llx", i, (unsigned long long)lb);
+            return NO;
+        }
         ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"), white, YES);
         ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
         ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), font, YES);
