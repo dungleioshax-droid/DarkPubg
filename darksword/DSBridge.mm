@@ -2149,14 +2149,20 @@ static void ds_esp_tick(void) {
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
         double minInterval = 1.0 / (double)ESP_REFRESH_HZ;
+        // Khai báo ngoài if throttle: block snap/lerp bên dưới dùng cả khi
+        // tick này không refresh (giữ mẫu cũ để present timer nội suy tiếp).
+        uint64_t gen = 0;
+        int count = 0;
+        BOOL didRefresh = NO;
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
+            didRefresh = YES;
             // Game landscape: W = cạnh dài (khớp với overlay update).
             float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
-            uint64_t gen = 0;
-            int count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
-                                              s_boxes, ESPOverlayMaxBoxes, &gen);
+            gen = 0;
+            count = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
+                                          s_boxes, ESPOverlayMaxBoxes, &gen);
             int fromFull = 0;
             if (count == 0) {
                 // Chưa có tracked actor (mới vào trận / lượt quét đầu):
@@ -2200,7 +2206,9 @@ static void ds_esp_tick(void) {
         }
         // Snap hay nội suy: cùng gen + cùng count + cùng orient mới lerp theo
         // index được (tracked order ổn định); còn lại snap present ngay.
-        if (count > 0) {
+        // Chỉ xử lý khi tick này CÓ refresh (didRefresh) — tick throttle giữ
+        // nguyên mẫu cũ để present timer nội suy tiếp, không hide oan.
+        if (didRefresh && count > 0) {
             s_zeroHidden = NO;
             if (s_prev.count == count && s_prev.gen == gen && gen != 0 &&
                 s_prev.orient == orient) {
@@ -2231,7 +2239,7 @@ static void ds_esp_tick(void) {
                 s_prev.orient = orient;
                 s_tgt = s_prev;
             }
-        } else if (!s_zeroHidden) {
+        } else if (didRefresh && !s_zeroHidden && count == 0) {
             // Hết box: hide 1 lần (không spam mỗi tick).
             s_zeroHidden = YES;
             s_prev.count = 0;
