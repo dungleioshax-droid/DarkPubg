@@ -2268,7 +2268,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "smooth-fix"
+#define DS_ESP_BUILD_TAG "60fps"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2366,7 +2366,7 @@ static void ds_esp_tick(void) {
 
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
-        double minInterval = 1.0 / (double)ESP_REFRESH_HZ;
+        double minInterval = 0.85 / (double)ESP_REFRESH_HZ;
 
         uint64_t gen = 0;
         int count = 0;
@@ -2458,7 +2458,7 @@ static void ds_start_esp_timer(void) {
     g_espTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
     dispatch_source_set_timer(g_espTimer,
                               dispatch_time(DISPATCH_TIME_NOW, interval),
-                              interval, 5 * NSEC_PER_MSEC);
+                              interval, 1 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(g_espTimer, ^{
         @autoreleasepool {
             ds_esp_tick();
