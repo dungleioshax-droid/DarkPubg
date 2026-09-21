@@ -13,6 +13,8 @@
 #define ESP_CACHE_TTL 2.0 // quét nền 2s/lần — box refresh đủ nhanh mà không dồn kernel
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
-#define ESP_REFRESH_HZ 4
+// Overlay tick 8Hz qua timer riêng (ds_esp_tick) + cache frame nên mượt mà
+// không quá tải IPC sang SpringBoard.
+#define ESP_REFRESH_HZ 8
 
 #endif /* ESPConfig_h */
