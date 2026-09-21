@@ -2029,6 +2029,10 @@ static void ds_update_rate(void) {
     // này giữ 1Hz cho text. Xem ds_esp_tick bên dưới.
 }
 
+// Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
+// đang chạy bản nào (box tick in kèm tag).
+#define DS_ESP_BUILD_TAG "maplocal1"
+
 // ESP Box thật trên SpringBoard (RemoteCall) 8Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ),
 // lượt quét đầy đủ vẫn theo TTL riêng của engine. Remote call được cache:
@@ -2134,7 +2138,8 @@ static void ds_esp_tick(void) {
             // Log 1 lần mỗi khi bật để biết kẹt ở đâu (xem ESP.log).
             if (!s_espBoxLogged) {
                 s_espBoxLogged = YES;
-                ESPLog("box tick: count=%d orient=%d fg=%d dev=%ld sb=%.0fx%.0f land=%.0fx%.0f %s",
+                ESPLog("box tick: %s count=%d orient=%d fg=%d dev=%ld sb=%.0fx%.0f land=%.0fx%.0f %s",
+                       DS_ESP_BUILD_TAG,
                        count, orient, g_foregroundOrientation.load(),
                        (long)UIDevice.currentDevice.orientation,
                        (double)CGRectGetWidth(sbBounds),
