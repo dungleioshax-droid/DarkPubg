@@ -2259,7 +2259,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "stable-v3"
+#define DS_ESP_BUILD_TAG "smooth-60fps"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2281,15 +2281,13 @@ typedef struct {
     int orient;
 } DSESPFrame;
 
-static std::atomic_bool s_espBusy{false}; // refresh trước chưa xong thì skip tick
+static std::atomic<DSESPFrame *> s_latestFrame{nullptr};
+static std::atomic_bool s_espPresenting{false};
 static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam async), chỉ chạm từ worker
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
-static void ds_esp_present(DSESPFrame *frame) {
-    if (!frame) {
-        s_espBusy.store(false);
-        return;
-    }
+static void ds_esp_present_single(DSESPFrame *frame) {
+    if (!frame) return;
     @try {
         if (frame->count < 0) {
             // Lệnh hide từ worker.
@@ -2307,7 +2305,36 @@ static void ds_esp_present(DSESPFrame *frame) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP present failed: %{public}@", exception.reason);
     }
     free(frame);
-    s_espBusy.store(false);
+}
+
+static void ds_esp_presentation_loop(void) {
+    while (true) {
+        DSESPFrame *frame = s_latestFrame.exchange(nullptr);
+        if (!frame) {
+            s_espPresenting.store(false);
+            // Double-check: phòng ngừa trường hợp frame mới đến ngay trước khi store false
+            frame = s_latestFrame.exchange(nullptr);
+            if (!frame) {
+                break;
+            }
+            s_espPresenting.store(true);
+        }
+        ds_esp_present_single(frame);
+    }
+}
+
+static void ds_esp_schedule_present(DSESPFrame *frame) {
+    if (!frame) return;
+    DSESPFrame *old = s_latestFrame.exchange(frame);
+    if (old) {
+        free(old);
+    }
+    bool expected = false;
+    if (s_espPresenting.compare_exchange_strong(expected, true)) {
+        dispatch_async(ds_bridge_queue(), ^{
+            ds_esp_presentation_loop();
+        });
+    }
 }
 
 static void ds_esp_tick(void) {
@@ -2326,17 +2353,18 @@ static void ds_esp_tick(void) {
     if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
         if (!s_espHideSent) {
             s_espHideSent = YES;
-            dispatch_async(ds_bridge_queue(), ^{
-                if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
-            });
+            DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+            if (frame) {
+                frame->count = -1;
+                frame->bounds = CGRectZero;
+                frame->orient = 0;
+                ds_esp_schedule_present(frame);
+            }
         }
         return;
     }
     s_espHideSent = NO;
 
-    // Chống overlap: refresh trước chậm hơn interval thì bỏ tick này
-    bool expected = false;
-    if (!s_espBusy.compare_exchange_strong(expected, true)) return;
     @try {
         CGRect sbBounds = CGRectZero;
         if (CGRectIsNull(s_geoCache) || nowP - s_geoAt > 0.5) {
@@ -2347,17 +2375,14 @@ static void ds_esp_tick(void) {
             sbBounds = s_geoCache;
         }
         if (CGRectIsNull(sbBounds) || sbBounds.size.width <= 0) {
-            s_espBusy.store(false);
             return;
         }
         static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
         static CFAbsoluteTime s_lastRefresh = 0;
         static CFAbsoluteTime s_lastFullScan = 0;
         static BOOL s_zeroHidden = NO;
-        static CFAbsoluteTime s_lastZeroLog = 0;
         static CFAbsoluteTime s_lastEnsureFailLog = 0;
         static CFAbsoluteTime s_lastPerfLog = 0;
-        static BOOL s_espBoxLogged = NO;
 
         // Persistent slot tracking state
         typedef struct {
@@ -2370,7 +2395,8 @@ static void ds_esp_tick(void) {
 
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
-        double minInterval = 0.85 / (double)ESP_REFRESH_HZ;
+        // 0.5 frame interval để tránh jitter timer làm skip frame
+        double minInterval = 0.5 / (double)ESP_REFRESH_HZ;
 
         uint64_t gen = 0;
         int count = 0;
@@ -2410,22 +2436,13 @@ static void ds_esp_tick(void) {
                         rawMatched[r] = true;
                         ESPBox2D prev = s_slots[s].box;
                         ESPBox2D cur = rawBoxes[r];
-                        // Không làm mượt giả gây giật giật (lag rồi snap): cập nhật trực tiếp toạ độ 3D.
-                        // Chỉ bỏ qua nếu sai số dưới 0.5px để giảm tải IPC sang SpringBoard.
                         float dx = fabsf(cur.x - prev.x);
                         float dy = fabsf(cur.y - prev.y);
-                        float dw = fabsf(cur.w - prev.w);
-                        float dh = fabsf(cur.h - prev.h);
                         if (dx > 40.0f || dy > 40.0f) {
                             ESPLog("BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
                                    s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
                         }
-                        if (dx < 0.5f && dy < 0.5f && dw < 0.5f && dh < 0.5f) {
-                            s_slots[s].box.distance = cur.distance;
-                            s_slots[s].box.visible = cur.visible;
-                        } else {
-                            s_slots[s].box = cur;
-                        }
+                        s_slots[s].box = cur;
                         s_slots[s].lastSeen = now2;
                         break;
                     }
@@ -2508,7 +2525,6 @@ static void ds_esp_tick(void) {
             }
         }
 
-        BOOL dispatched = NO;
         static int s_zeroCountFrames = 0;
         if (didRefresh && count > 0) {
             s_zeroCountFrames = 0;
@@ -2519,10 +2535,7 @@ static void ds_esp_tick(void) {
                 frame->count = count;
                 frame->bounds = sbBounds;
                 frame->orient = orient;
-                dispatched = YES;
-                dispatch_async(ds_bridge_queue(), ^{
-                    ds_esp_present(frame);
-                });
+                ds_esp_schedule_present(frame);
             }
         } else if (didRefresh && !s_zeroHidden && count == 0) {
             // Hết box: chỉ hide sau ít nhất 20 frames liên tiếp không có box (~0.7s)
@@ -2535,10 +2548,7 @@ static void ds_esp_tick(void) {
                     frame->count = 0;
                     frame->bounds = sbBounds;
                     frame->orient = orient;
-                    dispatched = YES;
-                    dispatch_async(ds_bridge_queue(), ^{
-                        ds_esp_present(frame);
-                    });
+                    ds_esp_schedule_present(frame);
                 }
             }
         }
@@ -2549,12 +2559,8 @@ static void ds_esp_tick(void) {
                    orient, (double)CGRectGetWidth(sbBounds),
                    (double)CGRectGetHeight(sbBounds));
         }
-        if (!dispatched) {
-            s_espBusy.store(false);
-        }
     } @catch (NSException *exception) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
-        s_espBusy.store(false);
     }
 }
 
@@ -2577,6 +2583,8 @@ static void ds_stop_esp_timer(void) {
     if (!g_espTimer) return;
     dispatch_source_cancel(g_espTimer);
     g_espTimer = nil;
+    DSESPFrame *old = s_latestFrame.exchange(nullptr);
+    if (old) free(old);
 }
 
 static void ds_start_rate_timer(void) {
