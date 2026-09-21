@@ -1724,18 +1724,13 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    // Check sống (hidden/dead) thưa 2Hz thay vì mỗi refresh: trạng thái chết
-    // không đổi trong 0.5s, tiết kiệm 2 reads/actor/tick. Scan đầy đủ (2s)
-    // vẫn check đầy đủ nên box héo tự hết.
-    static int s_liveDiv = 0;
-    BOOL checkLive = ((s_liveDiv++ & 3) == 0);
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
         uint8_t flags[2] = {0, 0};
         // bHidden ở 0xE8, bDead ở 0xE7C — cách nhau quá xa nên không gộp được
         // 1 lần đọc; đọc bHidden trước, chết/ẩn thì khỏi đọc bDead.
-        if (checkLive && ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
+        if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
             if (flags[0] & 0x1) { cHid++; continue; }
             if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
                 if (flags[1] & 0x1) { cHid++; continue; }

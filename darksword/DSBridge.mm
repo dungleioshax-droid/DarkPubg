@@ -2295,7 +2295,10 @@ static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam asyn
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
 static void ds_esp_present(DSESPFrame *frame) {
-    if (!frame) return;
+    if (!frame) {
+        s_espBusy.store(false);
+        return;
+    }
     @try {
         if (frame->count < 0) {
             // Lệnh hide từ worker.
@@ -2313,6 +2316,7 @@ static void ds_esp_present(DSESPFrame *frame) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP present failed: %{public}@", exception.reason);
     }
     free(frame);
+    s_espBusy.store(false);
 }
 
 static void ds_esp_tick(void) {
@@ -2414,7 +2418,10 @@ static void ds_esp_tick(void) {
             }
         }
 
+        BOOL dispatched = NO;
+        static int s_zeroCountFrames = 0;
         if (didRefresh && count > 0) {
+            s_zeroCountFrames = 0;
             s_zeroHidden = NO;
             DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
             if (frame) {
@@ -2422,21 +2429,27 @@ static void ds_esp_tick(void) {
                 frame->count = count;
                 frame->bounds = sbBounds;
                 frame->orient = orient;
+                dispatched = YES;
                 dispatch_async(ds_bridge_queue(), ^{
                     ds_esp_present(frame);
                 });
             }
         } else if (didRefresh && !s_zeroHidden && count == 0) {
-            // Hết box: hide 1 lần (không spam mỗi tick).
-            s_zeroHidden = YES;
-            DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
-            if (frame) {
-                frame->count = 0;
-                frame->bounds = sbBounds;
-                frame->orient = orient;
-                dispatch_async(ds_bridge_queue(), ^{
-                    ds_esp_present(frame);
-                });
+            // Hết box: chỉ hide sau ít nhất 6 frames liên tiếp không có box (~100ms)
+            // để tránh chớp tắt khi 1 frame bị hụt camera hoặc lag đọc bộ nhớ.
+            s_zeroCountFrames++;
+            if (s_zeroCountFrames >= 6) {
+                s_zeroHidden = YES;
+                DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
+                if (frame) {
+                    frame->count = 0;
+                    frame->bounds = sbBounds;
+                    frame->orient = orient;
+                    dispatched = YES;
+                    dispatch_async(ds_bridge_queue(), ^{
+                        ds_esp_present(frame);
+                    });
+                }
             }
         }
 
@@ -2446,10 +2459,13 @@ static void ds_esp_tick(void) {
                    orient, (double)CGRectGetWidth(sbBounds),
                    (double)CGRectGetHeight(sbBounds));
         }
+        if (!dispatched) {
+            s_espBusy.store(false);
+        }
     } @catch (NSException *exception) {
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
+        s_espBusy.store(false);
     }
-    s_espBusy.store(false);
 }
 
 static void ds_start_esp_timer(void) {
