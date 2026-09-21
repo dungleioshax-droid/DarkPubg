@@ -11,6 +11,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <ifaddrs.h>
 #import <net/if.h>
 #import <notify.h>
@@ -1472,7 +1473,7 @@ static void ds_esp_ensure_orientation_observer(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         dlopen("/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices", RTLD_NOW);
-        Class cls = objc_getClass("FBSOrientationObserver");
+        Class cls = NSClassFromString(@"FBSOrientationObserver");
         if (cls) {
             g_espOrientationObserver = [[cls alloc] init];
             [g_espOrientationObserver setHandler:^(FBSOrientationUpdate *update) {
