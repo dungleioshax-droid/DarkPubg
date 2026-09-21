@@ -1125,16 +1125,13 @@ NSString *ESPEngineScanInfoText(void) {
         // "%d D" = trong đó có bao nhiêu là hình nhân huấn luyện — để biết
         // ngay con hình nhân nào bị lọt khỏi bộ lọc. "B %d" = số box đang vẽ
         // trên SpringBoard (cam+track OK). B=0 mà P>0 thì camera/track lỗi.
-        // T%d = đường đọc đang dùng: 0 = kernel page cache, 1 = task_for_pid,
-        // 2 = processor_set_tasks. Thấy T1/T2 là task port đã bật (đọc µs).
         if (g_espTrackedCount > 0 || g_espLastBoxes > 0) {
-            return [NSString stringWithFormat:@"scan ok %d P %d D B%d T%d %.1fs",
+            return [NSString stringWithFormat:@"scan ok %d P %d D B%d %.1fs",
                     g_espLastScanEnemies, g_espLastScanDummies, g_espLastBoxes,
-                    ESPMemoryTaskPortMode(), g_espLastScanSeconds];
+                    g_espLastScanSeconds];
         }
-        return [NSString stringWithFormat:@"scan ok %d P %d D T%d %.1fs",
-                g_espLastScanEnemies, g_espLastScanDummies,
-                ESPMemoryTaskPortMode(), g_espLastScanSeconds];
+        return [NSString stringWithFormat:@"scan ok %d P %d D %.1fs",
+                g_espLastScanEnemies, g_espLastScanDummies, g_espLastScanSeconds];
     }
     return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
 #endif

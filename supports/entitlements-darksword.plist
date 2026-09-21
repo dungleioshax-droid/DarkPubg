@@ -4,12 +4,6 @@
 <dict>
 	<key>get-task-allow</key>
 	<true/>
-	<!-- Cho phép lấy task port của process game (đường đọc siêu nhanh
-	     mach_vm_read_overwrite). Chỉ có hiệu lực nếu bên sign gán được
-	     entitlement này (TrollStore / ldid trên máy jailbreak); nếu không
-	     thì ESPMemory tự rớt về đường kernel và vẫn chạy bình thường. -->
-	<key>task_for_pid-allow</key>
-	<true/>
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)*</string>

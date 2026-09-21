@@ -637,16 +637,6 @@ static uint64_t ds_scan_process_base(uint64_t vmMap) {
     return found;
 }
 
-// Đảm bảo task port của game khớp pid hiện tại (đường đọc siêu nhanh).
-// Không lấy được thì ESPMemory tự rớt về kernel — không hỏng gì.
-static pid_t g_taskPortPid = 0;
-static void ds_ensure_game_taskport(pid_t pid) {
-    if (pid <= 0) return;
-    if (pid == g_taskPortPid && ESPMemoryTaskPortMode() != 0) return;
-    g_taskPortPid = pid;
-    ESPMemoryOpenTaskPort(pid);
-}
-
 static void ds_refresh_game_base_locked(NSString *wantedName) {
     if (g_gameBaseChecking) return;
     g_gameBaseChecking = YES;
@@ -667,7 +657,6 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
             g_gameBaseCheckedAt = CFAbsoluteTimeGetCurrent();
             return;
         }
-        ds_ensure_game_taskport(pid);
         uint64_t task = taskbyproc(proc);
         uint64_t vmMap = task ? task_get_vm_map(task) : 0;
         uint64_t base = ds_scan_process_base(vmMap);
@@ -2664,8 +2653,6 @@ static void ds_finish_disable(void) {
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
-    ESPMemoryCloseTaskPort();
-    g_taskPortPid = 0;
     ESPMemoryFlushPageCache(); // nhả mapping + port của world cũ
     g_hudActive.store(false);
     if (process) {

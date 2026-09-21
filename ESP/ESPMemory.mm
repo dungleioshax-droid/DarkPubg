@@ -5,7 +5,6 @@
 
 #import "ESPMemory.h"
 #import "ESPConfig.h"
-#import "ESPLog.h"
 #import <mach/mach.h>
 #include <mutex>
 
@@ -14,86 +13,6 @@ extern "C" {
 #import "darksword.h"
 #import "offsets.h"
 #import "utils.h"
-}
-
-// ---- Đường đọc SIÊU NHANH qua TASK PORT (mach_vm_read_overwrite) ----
-// Giống các cheat tham chiếu: lấy task port của game rồi đọc trực tiếp vào
-// buffer của mình (bulk, micro giây, không tạo mapping/port mỗi lần đọc).
-// DarkSword KRW chỉ là bàn đạp để lấy port. Nếu KHÔNG lấy được port (app cài
-// sideload không có entitlement task_for_pid-allow/platform-application, hoặc
-// chưa root) thì tự rớt về đường kernel page cache bên dưới — không hỏng gì.
-static task_t s_gameTask = MACH_PORT_NULL;
-static int s_gameTaskMode = 0; // 0 = none, 1 = task_for_pid, 2 = processor_set_tasks
-
-// mach/processor_set API (không phải lúc nào cũng có prototype trong SDK).
-// Bắt buộc extern "C": file này là Objective-C++ nên không có thì linker sẽ
-// đi tìm symbol C++ (undefined).
-extern "C" {
-// <mach/mach_vm.h> báo "unsupported" trên SDK iOS -> tự khai báo prototype.
-kern_return_t mach_vm_read_overwrite(mach_port_t target_task, mach_vm_address_t address,
-                                     mach_vm_size_t size, mach_vm_address_t data,
-                                     mach_vm_size_t *outsize);
-kern_return_t task_for_pid(mach_port_t target_tport, int pid, mach_port_t *t);
-kern_return_t pid_for_task(task_t task, int *pid);
-kern_return_t processor_set_default(host_t host, processor_set_name_t *default_set);
-kern_return_t host_processor_set_priv(host_priv_t host_priv, processor_set_name_t set_name, processor_set_t *set);
-kern_return_t processor_set_tasks(processor_set_t ps, task_array_t *task_list, mach_msg_type_number_t *task_listCnt);
-}
-
-int ESPMemoryTaskPortMode(void) {
-    return s_gameTaskMode;
-}
-
-void ESPMemoryCloseTaskPort(void) {
-    if (s_gameTask != MACH_PORT_NULL) {
-        mach_port_deallocate(mach_task_self_, s_gameTask);
-    }
-    s_gameTask = MACH_PORT_NULL;
-    s_gameTaskMode = 0;
-}
-
-// Mở task port cho pid game. Trả YES nếu lấy được (đọc qua mach_vm_read_overwrite).
-BOOL ESPMemoryOpenTaskPort(pid_t pid) {
-    if (pid <= 0) return NO;
-    ESPMemoryCloseTaskPort();
-    mach_port_t t = MACH_PORT_NULL;
-    // Cách 1: task_for_pid (cần entitlement task_for_pid-allow hoặc platform).
-    if (task_for_pid(mach_task_self_, pid, &t) == KERN_SUCCESS && t != MACH_PORT_NULL) {
-        s_gameTask = t;
-        s_gameTaskMode = 1;
-        ESPLog("taskport OK mode=task_for_pid pid=%d", pid);
-        return YES;
-    }
-    // Cách 2: duyệt processor_set_tasks (cần host_priv = root/platform).
-    host_t host = mach_host_self();
-    processor_set_name_t psn = MACH_PORT_NULL;
-    processor_set_t ps = MACH_PORT_NULL;
-    if (processor_set_default(host, &psn) == KERN_SUCCESS &&
-        host_processor_set_priv(host, psn, &ps) == KERN_SUCCESS) {
-        task_array_t tasks = NULL;
-        mach_msg_type_number_t n = 0;
-        if (processor_set_tasks(ps, &tasks, &n) == KERN_SUCCESS && tasks) {
-            for (mach_msg_type_number_t i = 0; i < n; i++) {
-                int tp = -1;
-                if (pid_for_task(tasks[i], &tp) == KERN_SUCCESS && tp == pid) {
-                    s_gameTask = tasks[i];
-                    s_gameTaskMode = 2;
-                } else {
-                    mach_port_deallocate(mach_task_self_, tasks[i]);
-                }
-            }
-            vm_deallocate(mach_task_self_, (vm_address_t)tasks, n * sizeof(task_t));
-        }
-        if (ps != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, ps);
-        if (psn != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, psn);
-    }
-    if (host != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, host);
-    if (s_gameTask != MACH_PORT_NULL) {
-        ESPLog("taskport OK mode=processor_set_tasks pid=%d", pid);
-        return YES;
-    }
-    ESPLog("taskport FAIL pid=%d (thiếu entitlement/root) -> dùng kernel", pid);
-    return NO;
 }
 
 struct ESPShmem {
@@ -234,17 +153,6 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (len > 0x10000) return NO; // chặn đọc quá lớn 1 lần
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
-    // Đường TASK PORT: đọc thẳng vào buffer, không lock, không mapping.
-    if (s_gameTask != MACH_PORT_NULL) {
-        mach_vm_size_t outSize = 0;
-        kern_return_t kr = mach_vm_read_overwrite(s_gameTask,
-                                                  (mach_vm_address_t)remoteAddr,
-                                                  (mach_vm_size_t)len,
-                                                  (mach_vm_address_t)(uintptr_t)buf,
-                                                  &outSize);
-        if (kr == KERN_SUCCESS && outSize == len) return YES;
-        // fail (trang chưa resident / race) -> rớt xuống đường kernel.
-    }
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
     s_pageCacheClock++;
     // Đọc dài hơn 1 page (cửa sổ 0xF00 lúc phân loại actor) là stream: đi
@@ -279,16 +187,6 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (len > 0x40000) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
-    // TASK PORT: 1 lần copyout cho cả cửa sổ (nhanh hơn nhiều so với map page).
-    if (s_gameTask != MACH_PORT_NULL) {
-        mach_vm_size_t outSize = 0;
-        kern_return_t kr = mach_vm_read_overwrite(s_gameTask,
-                                                  (mach_vm_address_t)remoteAddr,
-                                                  (mach_vm_size_t)len,
-                                                  (mach_vm_address_t)(uintptr_t)buf,
-                                                  &outSize);
-        if (kr == KERN_SUCCESS && outSize == len) return YES;
-    }
     if ((uint64_t)PAGE_SIZE > ESP_MAX_PAGE) return NO;
     uint8_t pageBuf[ESP_MAX_PAGE];
     uint8_t *out = (uint8_t *)buf;
@@ -310,9 +208,6 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 }
 #else
 // Simulator / non-DarkSword: không có kernel RW — stub để link được.
-BOOL ESPMemoryOpenTaskPort(pid_t pid) { (void)pid; return NO; }
-int ESPMemoryTaskPortMode(void) { return 0; }
-void ESPMemoryCloseTaskPort(void) {}
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     (void)proc;
     return 0;
