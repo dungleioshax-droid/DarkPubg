@@ -2044,7 +2044,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "lbl1"
+#define DS_ESP_BUILD_TAG "smooth2"
 
 // Mẫu refresh để nội suy (chỉ chạm từ worker queue).
 typedef struct {
@@ -2111,9 +2111,18 @@ static void ds_esp_present(DSESPFrame *frame) {
 
 static void ds_esp_tick(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard) return;
-    NSDictionary *preferences = nil;
-    @try { preferences = ds_hud_preferences(); } @catch (__unused NSException *e) {}
-    if (!preferences) preferences = @{};
+    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
+    // Cache prefs 1s (đọc plist file mỗi tick 8Hz rất tốn) + geometry 0.5s
+    // (dispatch_sync main mỗi tick). Chỉ chạm từ worker queue.
+    static NSDictionary *s_prefsCache = nil;
+    static CFAbsoluteTime s_prefsAt = 0;
+    static CGRect s_geoCache = CGRectNull;
+    static CFAbsoluteTime s_geoAt = 0;
+    if (!s_prefsCache || nowP - s_prefsAt > 1.0) {
+        @try { s_prefsCache = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+        s_prefsAt = nowP;
+    }
+    NSDictionary *preferences = s_prefsCache ?: @{};
     if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
         if (!s_espHideSent) {
             s_espHideSent = YES;
@@ -2132,7 +2141,13 @@ static void ds_esp_tick(void) {
     if (!s_espBusy.compare_exchange_strong(expected, true)) return;
     @try {
         CGRect sbBounds = CGRectZero;
-        ds_screen_geometry(&sbBounds, NULL);
+        if (CGRectIsNull(s_geoCache) || nowP - s_geoAt > 0.5) {
+            ds_screen_geometry(&sbBounds, NULL);
+            s_geoCache = sbBounds;
+            s_geoAt = nowP;
+        } else {
+            sbBounds = s_geoCache;
+        }
         if (CGRectIsNull(sbBounds) || sbBounds.size.width <= 0) {
             s_espBusy.store(false);
             return;
@@ -2328,7 +2343,9 @@ static void ds_start_esp_timer(void) {
     });
     dispatch_resume(g_espTimer);
     if (!g_espPresentTimer) {
-        const uint64_t pinterval = NSEC_PER_SEC / 12;
+        // 20Hz nội suy (lerp mịn). Frame cache dedup IPC khi đứng yên nên
+        // không quá tải SpringBoard.
+        const uint64_t pinterval = NSEC_PER_SEC / 20;
         g_espPresentTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ds_esp_work_queue());
         dispatch_source_set_timer(g_espPresentTimer,
                                   dispatch_time(DISPATCH_TIME_NOW, pinterval),
