@@ -807,12 +807,20 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             tr.actor = actor;
             tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
             tr.fallback = 0;
+            tr.parent = 0;
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
                 if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
                 if (!tr.root && tr.fallback) tr.root = tr.fallback;
             } else {
                 tr.kind = 1;
+            }
+            // Nhớ AttachedParent ngay lúc track: root character thường không có
+            // parent -> refresh sau này bỏ hẳn parent read (tiết kiệm 1-2 reads).
+            if (tr.root) {
+                BOOL okp = NO;
+                uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
+                if (okp && ESPIsUserPtr(par)) tr.parent = par;
             }
             localTracked.push_back(tr);
         }
@@ -1583,17 +1591,18 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
 // Đọc vị trí world của 1 tracked actor: root.Relative (+parent) trước, rồi
 // ComponentToWorld của fallback (hình nhân), rồi ReplicatedMovement.
 static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *out) {
-    BOOL ok0 = NO;
     if (!tr || !out) return NO;
     if (tr->root && ESPIsUserPtr(tr->root)) {
         ESPVector loc = {0,0,0};
         if (ESPMemoryRead(vmMap, tr->root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
             fabsf(loc.x) < ESP_POS_BOUND && fabsf(loc.y) < ESP_POS_BOUND && fabsf(loc.z) < ESP_POS_BOUND &&
             (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
-            uint64_t parent = ESPReadU64(vmMap, tr->root + ESPOff_Scene_AttachedParent, &ok0);
-            if (ok0 && ESPIsUserPtr(parent)) {
+            // Parent đã nhớ lúc scan: ==0 thì bỏ hẳn parent read (đa số root
+            // character). !=0 thì đọc ploc từ cached ptr (parent hiếm khi đổi;
+            // héo thì dùng tạm loc, scan sau sửa).
+            if (tr->parent && ESPIsUserPtr(tr->parent)) {
                 ESPVector pl = {0,0,0};
-                if (ESPMemoryRead(vmMap, parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
+                if (ESPMemoryRead(vmMap, tr->parent + ESPOff_Scene_RelativeLocation, &pl, sizeof(pl)) &&
                     fabsf(pl.x) < ESP_POS_BOUND && fabsf(pl.y) < ESP_POS_BOUND && fabsf(pl.z) < ESP_POS_BOUND) {
                     loc.x += pl.x; loc.y += pl.y; loc.z += pl.z;
                 }
@@ -1640,13 +1649,18 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
+    // Check sống (hidden/dead) thưa 2Hz thay vì mỗi refresh: trạng thái chết
+    // không đổi trong 0.5s, tiết kiệm 2 reads/actor/tick. Scan đầy đủ (2s)
+    // vẫn check đầy đủ nên box héo tự hết.
+    static int s_liveDiv = 0;
+    BOOL checkLive = ((s_liveDiv++ & 3) == 0);
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
         uint8_t flags[2] = {0, 0};
         // bHidden ở 0xE8, bDead ở 0xE7C — cách nhau quá xa nên không gộp được
         // 1 lần đọc; đọc bHidden trước, chết/ẩn thì khỏi đọc bDead.
-        if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
+        if (checkLive && ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
             if (flags[0] & 0x1) { cHid++; continue; }
             if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
                 if (flags[1] & 0x1) { cHid++; continue; }

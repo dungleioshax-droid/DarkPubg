@@ -43,6 +43,7 @@ typedef struct {
     uint64_t actor;
     uint64_t root;      // RootComponent (0 nếu không có)
     uint64_t fallback;  // StaticMeshComp/MoveRoot (ComponentToWorld) cho hình nhân
+    uint64_t parent;    // AttachedParent của root lúc scan (0 = không có -> refresh bỏ qua parent read)
     int kind;           // 1 = character, 3 = hình nhân
 } ESPTrackedActor;
 
