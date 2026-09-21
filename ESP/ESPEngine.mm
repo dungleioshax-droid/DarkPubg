@@ -1798,6 +1798,15 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
+    if (tracked.size() > 0 && n == 0) {
+        static CFAbsoluteTime s_lastZeroRefreshLog = 0;
+        CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
+        if (nowLog - s_lastZeroRefreshLog >= 2.0) {
+            s_lastZeroRefreshLog = nowLog;
+            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u",
+                   tracked.size(), cHid, cPos, cW2s, cSelf, cH);
+        }
+    }
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
     return n;

@@ -2416,6 +2416,10 @@ static void ds_esp_tick(void) {
                         float dy = fabsf(cur.y - prev.y);
                         float dw = fabsf(cur.w - prev.w);
                         float dh = fabsf(cur.h - prev.h);
+                        if (dx > 40.0f || dy > 40.0f) {
+                            ESPLog("BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
+                                   s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
+                        }
                         if (dx < 0.5f && dy < 0.5f && dw < 0.5f && dh < 0.5f) {
                             s_slots[s].box.distance = cur.distance;
                             s_slots[s].box.visible = cur.visible;
@@ -2450,6 +2454,9 @@ static void ds_esp_tick(void) {
                     }
                 }
                 if (bestSlot >= 0) {
+                    ESPLog("BOX-ASSIGN: slot[%d] +NEW act=0x%llx dist=%.1fm box=[%.1f,%.1f,%.1f,%.1f]",
+                           bestSlot, (unsigned long long)rawBoxes[r].actor, rawBoxes[r].distance,
+                           rawBoxes[r].x, rawBoxes[r].y, rawBoxes[r].w, rawBoxes[r].h);
                     s_slots[bestSlot].actor = rawBoxes[r].actor;
                     s_slots[bestSlot].box = rawBoxes[r];
                     s_slots[bestSlot].lastSeen = now2;
@@ -2467,6 +2474,8 @@ static void ds_esp_tick(void) {
                         s_boxes[s].visible = 1;
                         count++;
                     } else {
+                        ESPLog("BOX-DROP: slot[%d] -TIMEOUT act=0x%llx lastSeen=%.2fs ago",
+                               s, (unsigned long long)s_slots[s].actor, now2 - s_slots[s].lastSeen);
                         s_slots[s].active = NO;
                         s_slots[s].actor = 0;
                         s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
@@ -2478,23 +2487,20 @@ static void ds_esp_tick(void) {
 
             ESPBoxCounterSet(count);
 
-            if (!s_espBoxLogged) {
-                s_espBoxLogged = YES;
-                ESPLog("box tick: %s count=%d orient=%d fg=%d dev=%ld sb=%.0fx%.0f land=%.0fx%.0f %s",
-                       DS_ESP_BUILD_TAG,
-                       count, orient, g_foregroundOrientation.load(),
-                       (long)UIDevice.currentDevice.orientation,
-                       (double)CGRectGetWidth(sbBounds),
-                       (double)CGRectGetHeight(sbBounds),
-                       (double)landW, (double)landH,
-                       ESPEngineLastBoxDiag());
-            }
-            if (count == 0 && now2 - s_lastZeroLog > 10.0) {
-                s_lastZeroLog = now2;
-                ESPLog("box tick0: %s orient=%d fg=%d dev=%ld land=%.0fx%.0f",
-                       ESPEngineLastBoxDiag(), orient, g_foregroundOrientation.load(),
-                       (long)UIDevice.currentDevice.orientation,
-                       (double)landW, (double)landH);
+            static CFAbsoluteTime s_lastBoxSummaryLog = 0;
+            if (now2 - s_lastBoxSummaryLog >= 1.0) {
+                s_lastBoxSummaryLog = now2;
+                ESPLog("BOX-SUM: %s raw=%d act=%d ori=%d land=%.0fx%.0f %s",
+                       DS_ESP_BUILD_TAG, rawCount, count, orient,
+                       (double)landW, (double)landH, ESPEngineLastBoxDiag());
+                for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                    if (s_slots[s].active) {
+                        ESPLog("  slot[%d]: act=0x%llx d=%.0fm box=[%.0f,%.0f,%.0f,%.0f] age=%.2fs",
+                               s, (unsigned long long)s_slots[s].actor, s_slots[s].box.distance,
+                               s_slots[s].box.x, s_slots[s].box.y, s_slots[s].box.w, s_slots[s].box.h,
+                               now2 - s_slots[s].lastSeen);
+                    }
+                }
             }
             if (now2 - s_lastPerfLog > 10.0) {
                 s_lastPerfLog = now2;
