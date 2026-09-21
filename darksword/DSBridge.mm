@@ -1452,15 +1452,21 @@ static inline CGRect ds_esp_map_rect(CGRect r, CGFloat landW, CGFloat landH,
     return CGRectMake(x0, y0, x1 - x0, y1 - y0);
 }
 
-extern "C" int __BKSHIDGetCurrentDeviceOrientation(void) __attribute__((weak_import));
-extern "C" int _BKHIDServicesGetCurrentDeviceOrientation(void) __attribute__((weak_import));
-
 static inline int ds_bks_orientation(void) {
+    static int (*pfn_bkshid)(void) = NULL;
+    static int (*pfn_bkhid)(void) = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+        if (!h) h = RTLD_DEFAULT;
+        pfn_bkshid = (int (*)(void))dlsym(h, "_BKSHIDGetCurrentDeviceOrientation");
+        pfn_bkhid = (int (*)(void))dlsym(h, "BKHIDServicesGetCurrentDeviceOrientation");
+    });
     int o = 0;
-    if (__BKSHIDGetCurrentDeviceOrientation) {
-        o = __BKSHIDGetCurrentDeviceOrientation();
-    } else if (_BKHIDServicesGetCurrentDeviceOrientation) {
-        o = _BKHIDServicesGetCurrentDeviceOrientation();
+    if (pfn_bkshid) {
+        o = pfn_bkshid();
+    } else if (pfn_bkhid) {
+        o = pfn_bkhid();
     }
     // 3 = BKHIDDeviceOrientationLandscapeRight, 4 = BKHIDDeviceOrientationLandscapeLeft
     if (o == 3) return (int)UIInterfaceOrientationLandscapeRight;
