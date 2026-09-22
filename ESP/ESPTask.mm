@@ -18,6 +18,7 @@
 #import "ESPLog.h"
 #include <mutex>
 #include <unistd.h>
+#include <dlfcn.h>
 
 extern "C" {
 #import "darksword.h"
@@ -37,12 +38,21 @@ static const uint32_t kCSRequireLV = 0x2000;
 
 // csops(CS_OPS_STATUS) trả ĐÚNG giá trị p_csflags của process -> dùng để xác
 // nhận offset tìm được bằng đọc-only (không đoán, không ghi kernel mò).
-#if __has_include(<sys/codesign.h>)
-#include <sys/codesign.h>
-#else
-extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
-#define CS_OPS_STATUS 0 /* return status */
-#endif
+// Không khai báo trực tiếp: header SDK thiếu extern "C" nên build ObjC++ sẽ đi
+// tìm symbol đã C++-mangle -> link fail ("found '_csops' in
+// libsystem_kernel.dylib"). Lấy qua dlsym cho khỏi phụ thuộc khai báo.
+#define ESP_CS_OPS_STATUS 0 /* return status */
+typedef int (*ESPCsopsFn)(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+
+static ESPCsopsFn ESPTaskCSOps(void) {
+    static ESPCsopsFn fn = NULL;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        fn = (ESPCsopsFn)dlsym(RTLD_DEFAULT, "csops");
+    }
+    return fn;
+}
 
 // ---- Định vị p_csflags ----
 // iOS 16+ KHÔNG còn p_csflags trong `proc`: nó nằm trong `proc_ro`
@@ -75,8 +85,10 @@ static inline BOOL ESPTaskIsKernelPtr(uint64_t v) {
 }
 
 static BOOL ESPTaskOurCSFlags(uint32_t *out) {
+    ESPCsopsFn csops = ESPTaskCSOps();
+    if (!csops) return NO;
     uint32_t v = 0;
-    if (csops(getpid(), CS_OPS_STATUS, &v, sizeof(v)) != 0) return NO;
+    if (csops(getpid(), ESP_CS_OPS_STATUS, &v, sizeof(v)) != 0) return NO;
     if (!v) return NO; // không có bit nào: không dùng làm mốc xác nhận
     *out = v;
     return YES;
