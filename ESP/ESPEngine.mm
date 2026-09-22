@@ -806,10 +806,12 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     int logged = 0;
     for (uint32_t i = 0; i < scanN; i++) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
-        // Nhường mutex read cho box refresh 8Hz chen vào: scan giữ từng read
-        // hàng chục ms, không nhường thì refresh đói tới vài giây (max 4.8s
-        // đo thực tế). 3ms/64 actors ~ không đáng kể với scan.
-        if ((i & 63) == 0) usleep(3000);
+        // Nhường mutex read cho box refresh chen vào: scan giữ từng read hàng
+        // chục ms, không nhường thì refresh đói tới vài giây (max 4.8s đo thực
+        // tế). Nhịp 15Hz/1ms thay vì 64/3ms: cửa sổ actor giờ đi qua page cache
+        // nên vòng lặp vào/ra mutex rất nhanh -> nhường thưa thì refresh bị
+        // starve (mutex không fair) và tick vẽ bị treo cả giây.
+        if ((i & 15) == 0) usleep(1000);
         uint64_t actor = s_actors[i];
         if (!ESPIsUserPtr(actor)) continue;
         r.scanned++;
@@ -1826,11 +1828,19 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
 // (giật) và timer 60Hz bị trễ theo. Hash theo actor (actor cấp phát theo 0x1000
 // nên shift 4 là tản đủ); va chạm chỉ làm miss 1 frame, không sai.
 #define ESP_POS_HIST 96
+// Vận tốc tối đa dùng cho ngoại suy: 60 m/s (xe/airdrop PUBG ~150km/h = 41m/s).
+// Mẫu vượt mức này là rác (read torn / actor vừa respawn) — kẹp lại.
+#define ESP_MAX_VEL 6000.0f    // cm/s
+// Bước nhảy tối đa giữa 2 mẫu liên tiếp trước khi coi là mẫu rác: 20 m.
+// (Ở nhịp đọc 15Hz thì 20m = 300m/s — không có gì trong game nhảy vậy.)
+#define ESP_MAX_JUMP 2000.0f   // cm
+
 typedef struct {
     uint64_t actor;
     ESPVector pos;
     ESPVector vel;   // cm/giây
     CFAbsoluteTime at;
+    int outliers;    // số mẫu bất thường liên tiếp (để tự hồi phục)
     BOOL valid;
 } ESPPosHist;
 static ESPPosHist s_posHist[ESP_POS_HIST];
@@ -1841,6 +1851,7 @@ static ESPPosHist *ESPPosHistSlot(uint64_t actor) {
     // Slot của actor khác: coi như chưa có mẫu (lần này sẽ đọc thật).
     h->actor = actor;
     h->valid = NO;
+    h->outliers = 0;
     h->pos = (ESPVector){0, 0, 0};
     h->vel = (ESPVector){0, 0, 0};
     h->at = 0;
@@ -1913,23 +1924,48 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             }
             ESPVector fresh = {0,0,0};
             if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
-            // Vận tốc = delta 2 mẫu gần nhất (bỏ mẫu quá cũ/không hợp lệ).
+            // Vận tốc = delta 2 mẫu gần nhất, nhưng phải KIỂM TRA HỢP LÝ trước
+            // khi dùng: 1 mẫu rác (read torn giữa 2 frame game / actor respawn /
+            // mapping héo) nhân với dt sẽ bắn box khỏi màn hình -> W2S fail hết.
+            // Log thực tế bản smooth3: "REFRESH-ZERO: trk=4 pos=0 w2s=4" xen kẽ
+            // BOX-JUMP dx/dy ±100px đúng kiểu vận tốc rác.
+            BOOL sampleReject = NO;
             if (h->valid && h->at > 0) {
                 double ddt = nowF - h->at;
-                if (ddt > 0.001 && ddt < 1.0) {
-                    h->vel = (ESPVector){ (fresh.x - h->pos.x) / (float)ddt,
-                                          (fresh.y - h->pos.y) / (float)ddt,
-                                          (fresh.z - h->pos.z) / (float)ddt };
+                float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
+                float jump = sqrtf(dx*dx + dy*dy + dz*dz);
+                if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
+                    ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
+                    float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+                    if (sp > ESP_MAX_VEL) {
+                        float s = ESP_MAX_VEL / sp;
+                        v.x *= s; v.y *= s; v.z *= s;
+                    }
+                    h->vel = v;
+                    h->outliers = 0;
                 } else {
+                    // Mẫu bất thường: không ngoại suy. Nếu đúng là nhảy thật
+                    // (respawn/teleport) thì 2 mẫu liên tiếp sẽ được chấp nhận
+                    // (tránh box "đóng băng" ở vị trí cũ mãi).
                     h->vel = (ESPVector){0, 0, 0};
+                    if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
+                        sampleReject = YES;
+                    } else {
+                        h->outliers = 0;
+                    }
                 }
             } else {
                 h->vel = (ESPVector){0, 0, 0};
+                h->outliers = 0;
             }
-            h->pos = fresh;
             h->at = nowF;
             h->valid = YES;
-            pos = fresh;
+            if (sampleReject) {
+                pos = h->pos;      // giữ vị trí cũ cho frame này
+            } else {
+                h->pos = fresh;    // mẫu hợp lệ -> theo vị trí mới
+                pos = fresh;
+            }
         }
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
@@ -1971,9 +2007,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             // log thực tế: ngay sau lượt scan `win=0/2` thì pos=4 hết). Xả page
             // cache (nhả toàn bộ mapping + port) để map lại từ đầu, thay vì "chết"
             // tới lượt scan đầy đủ kế tiếp (~10s).
-            ESPMemoryFlushPageCache();
-            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u (flushed cache)",
-                   tracked.size(), cHid, cPos, cW2s, cSelf, cH);
+            // IfIdle: KHÔNG chờ mutex đọc (scan nền có thể đang map page hàng
+            // trăm ms) — trước đây flush blocking làm chính tick vẽ bị treo
+            // (log: box perf max=1425ms). Bận thì để lần sau.
+            BOOL didFlush = ESPMemoryFlushPageCacheIfIdle();
+            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u (flush=%d)",
+                   tracked.size(), cHid, cPos, cW2s, cSelf, cH, didFlush ? 1 : 0);
         }
     }
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,

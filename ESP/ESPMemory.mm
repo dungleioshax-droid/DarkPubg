@@ -123,8 +123,8 @@ static BOOL ESPPageCacheGet(uint64_t vmMap, uint64_t pageStart,
     return YES;
 }
 
-void ESPMemoryFlushPageCache(void) {
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+// KHÔNG lock — caller đã giữ s_espReadMutex.
+static void ESPPageCacheFlushLocked(void) {
     for (int i = 0; i < ESP_PAGE_CACHE_SIZE; i++) {
         ESPPageCacheEntry *e = &s_pageCache[i];
         if (e->pageStart) {
@@ -135,6 +135,18 @@ void ESPMemoryFlushPageCache(void) {
             e->pageStart = 0; e->localAddress = 0; e->port = 0; e->lastUse = 0;
         }
     }
+}
+
+void ESPMemoryFlushPageCache(void) {
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    ESPPageCacheFlushLocked();
+}
+
+BOOL ESPMemoryFlushPageCacheIfIdle(void) {
+    std::unique_lock<std::mutex> readLock(s_espReadMutex, std::try_to_lock);
+    if (!readLock.owns_lock()) return NO; // scan nền đang map page — để lần sau
+    ESPPageCacheFlushLocked();
+    return YES;
 }
 
 // Đường trực tiếp: map -> memcpy -> nhả ngay, KHÔNG qua cache. Dùng cho đọc
@@ -249,6 +261,9 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     return NO;
 }
 void ESPMemoryFlushPageCache(void) {
+}
+BOOL ESPMemoryFlushPageCacheIfIdle(void) {
+    return NO;
 }
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = 0;

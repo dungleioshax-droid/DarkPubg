@@ -30,6 +30,12 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 // cũ phải nhả cùng port để không tích port/mapping vô hạn).
 void ESPMemoryFlushPageCache(void);
 
+// Như trên nhưng KHÔNG BAO GIỜ BLOCK: nếu mutex đọc đang bận (scan nền đang
+// map page) thì bỏ qua, để lần sau. Dùng cho đường refresh — xả cache ở đó mà
+// chờ mutex thì chính tick vẽ bị treo (log thực tế: max=1425ms).
+// Trả YES nếu đã xả.
+BOOL ESPMemoryFlushPageCacheIfIdle(void);
+
 // Đếm cache page hit/miss tích luỹ (chẩn đoán perf refresh).
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss);
 
