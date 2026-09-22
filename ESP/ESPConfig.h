@@ -11,11 +11,15 @@
 // 1 lượt quét đầy đủ ~452 actor giờ chỉ tốn ~0.3-1.5s (đọc cửa sổ 0xF00/actor
 // + bulk mảng), nên TTL ngắn để box bám người. Vẫn còn mutex chặn 2 luồng.
 //
-// TTL này là độ trễ để ĐỊCH MỚI XUẤT HIỆN có box: chỉ lượt quét mới phân loại
-// được actor mới. Để 2.0s thì log thực tế cho thấy phải 5-6s mới thấy box (TTL
-// 2s + lượt quét đầy đủ lâu). Sau khi cửa sổ actor đi qua page cache, lượt quét
-// "ấm" chỉ tốn ~0.1-0.3s (log: dt=0.1s) nên 0.8s là thoải mái.
-#define ESP_CACHE_TTL 0.8 // quét nền 0.8s/lần — địch mới hiện box trong ~1s
+// TTL này là độ trễ phụ của quét ĐẦY ĐỦ (re-validate verdict/address reuse).
+// Phát hiện địch MỚI không còn lệ thuộc TTL này — xem ESPEngineDiscoverTick
+// (phân loại riêng actor chưa biết mỗi ~120ms). TTL 0.8s chỉ là nhịp quét nền.
+#define ESP_CACHE_TTL 0.8 // quét nền 0.8s/lần — re-validate + địch mới qua discover
+
+// Discover địch mới: khoảng (giây) giữa 2 lần + budget phân loại full/lần.
+// 0.12s ~= 8Hz; budget 16 actor unknown mỗi lượt (page cache warm thì ~vài ms).
+#define ESP_DISCOVER_INTERVAL 0.12
+#define ESP_DISCOVER_BUDGET 16
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
 // Overlay tick qua timer riêng (ds_esp_tick) + cache frame nên mượt mà

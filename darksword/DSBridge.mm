@@ -2258,7 +2258,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "direct1"
+#define DS_ESP_BUILD_TAG "fastesp"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2412,9 +2412,9 @@ static void ds_esp_tick(void) {
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
             didRefresh = YES;
-            // Đặt lịch quét nền MỖI tick (hàm tự gộp theo TTL): địch mới xuất
-            // hiện chỉ có được box từ lượt quét, mà trước đây scan chỉ được kick
-            // từ dòng text HUD (nhịp 1Hz). Giờ độ trễ = ESP_CACHE_TTL (~0.8s).
+            // Đặt lịch quét nền MỖI tick (hàm tự gộp theo TTL) + discover
+            // địch mới ~120ms (không đợi lượt quét đầy đủ 5-6s).
+            ESPEngineDiscoverTick(g_gameBase);
             ESPEngineRequestScan(g_gameBase);
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
@@ -2436,6 +2436,7 @@ static void ds_esp_tick(void) {
                 // trăm ms -> box đứng hình đúng nhịp 1 giây, đúng kiểu "giật
                 // giật"). Giờ chỉ ĐẶT LỊCH quét trên queue nền (không block,
                 // TTL gộp lịch); frame sau RefreshBoxes tự ăn tracked mới.
+                ESPEngineDiscoverTick(g_gameBase);
                 ESPEngineRequestScan(g_gameBase);
                 // Cứu cánh hiếm: CHƯA TỪNG có tracked (scan nền chưa xong hoặc
                 // kẹt) thì cho phép 1 lượt quét đồng bộ, tối đa 10s/lần — để

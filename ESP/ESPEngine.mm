@@ -1233,6 +1233,208 @@ static uint64_t ESPProcVMMap(uint64_t *outProc) {
 }
 #endif
 
+#if USE_DARKSWORD
+// Phát hiện địch MỚI: quét nền đầy đủ mất 0.3–5s+TTL nên địch spawn/unhide
+// phải đợi lượt quét kế tiếp mới vào tracked (log: 5–6s). Hàm này chạy ~8Hz
+// trên tick bridge: bulk-read mảng actor, chỉ phân loại actor CHƯA có verdict
+// (budget) + re-check verdict địch chưa vào tracked + peek VTable verdict-2
+// (địa chỉ object pool tái dùng). KHÔNG giữ g_espClassifyMutex khi gọi
+// ESPIsEnemy (hàm đó tự lock — giữ song song sẽ deadlock).
+void ESPEngineDiscoverTick(uint64_t gameBase) {
+    if (!gameBase || !ds_is_ready()) return;
+    static CFAbsoluteTime s_last = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (s_last && now - s_last < ESP_DISCOVER_INTERVAL) return;
+    s_last = now;
+
+    uint64_t vmMap = ESPProcVMMap(NULL);
+    if (!vmMap) return;
+    uint64_t world = g_espCache.world;
+    if (!world) {
+        world = ESPWorldViaViewport(vmMap, gameBase);
+        if (!world) return;
+        // Giúp path Boxes/Refresh có world ngay cả khi scan nền chưa xong.
+        if (!g_espCache.world) g_espCache.world = world;
+    }
+    ESPVerdictResetIfWorldChanged(world);
+
+    // Snapshot tracked + verdict DƯỚI 1 lock ngắn; sau đó nhả lock rồi mới
+    // ESPIsEnemy (hàm đó tự lock cùng mutex).
+    std::unordered_set<uint64_t> trackedSet;
+    std::unordered_set<uint64_t> hasVerdict;
+    std::unordered_set<uint64_t> enemyVerdict;
+    std::unordered_map<uint64_t, uint64_t> verdictVt;
+    {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        trackedSet.reserve(g_espTracked.size());
+        for (const auto &t : g_espTracked) trackedSet.insert(t.actor);
+        hasVerdict.reserve(g_espVerdict.size());
+        for (const auto &kv : g_espVerdict) {
+            hasVerdict.insert(kv.first);
+            if (kv.second == 1 || kv.second == 3) enemyVerdict.insert(kv.first);
+        }
+        verdictVt = g_espVerdictVt;
+    }
+
+    uint64_t level = 0, actorsData = 0;
+    uint32_t actorsCount = 0;
+    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount) ||
+        !actorsData || actorsCount == 0 || actorsCount > 20000) {
+        return;
+    }
+    uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
+
+    static thread_local std::vector<uint64_t> discActors;
+    discActors.resize(scanN);
+    uint32_t got = 0;
+    while (got < scanN) {
+        uint32_t chunk = scanN - got;
+        if (chunk > 2048) chunk = 2048;
+        if (!ESPReadWindow(vmMap, actorsData + (uint64_t)got * 8, discActors.data() + got,
+                           (uint64_t)chunk * 8)) {
+            for (uint32_t k = 0; k < chunk; k++) {
+                BOOL okk = NO;
+                discActors[got + k] = ESPReadU64(vmMap, actorsData + (uint64_t)(got + k) * 8, &okk);
+            }
+        }
+        got += chunk;
+    }
+
+    int myTeam = INT_MIN;
+    uint64_t myPawn = 0;
+    {
+        int t = INT_MIN;
+        uint64_t lp = 0;
+        if (ESPMyTeamAndPawn(vmMap, world, &lp, &t)) {
+            myTeam = t;
+            myPawn = lp;
+        }
+    }
+
+    // Round-robin: unknown không dồn vào đầu mảng mãi (budget hết thì lượt sau
+    // lấy unknown kế tiếp, không quét lại 16 actor cũ).
+    static uint32_t s_discOff = 0;
+    std::vector<uint32_t> unknownIdx;
+    unknownIdx.reserve(64);
+    std::vector<ESPTrackedActor> newTracked;
+    newTracked.reserve(8);
+    int cls = 0;  // số ESPIsEnemy gọi thật (unknown full + enemy-not-tracked + vt-peek)
+    int added = 0;
+
+    auto addTracked = [&](uint64_t actor, int team, const ESPClassifyDiag &dg) {
+        if (trackedSet.count(actor) || newTracked.size() >= 64) return;
+        ESPTrackedActor tr;
+        tr.actor = actor;
+        tr.root = ESPIsUserPtr(dg.root) ? dg.root : 0;
+        tr.fallback = 0;
+        tr.parent = 0;
+        if (team == ESPTeam_Dummy) {
+            tr.kind = 3;
+            if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
+            if (!tr.root && tr.fallback) tr.root = tr.fallback;
+        } else {
+            tr.kind = 1;
+        }
+        if (tr.root) {
+            BOOL okp = NO;
+            uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
+            if (okp && ESPIsUserPtr(par)) tr.parent = par;
+        }
+        newTracked.push_back(tr);
+        trackedSet.insert(actor);
+        added++;
+    };
+
+    // Pass 1: verdict địch 1/3 chưa tracked (vừa unhide) + peek VTable
+    // verdict-2 (object pool tái dùng địa chỉ -> có thể đã thành địch).
+    // Unknown gom vào pass 2 theo budget.
+    for (uint32_t i = 0; i < scanN; i++) {
+        uint64_t actor = discActors[i];
+        if (!ESPIsUserPtr(actor) || trackedSet.count(actor)) continue;
+        if (!hasVerdict.count(actor)) {
+            unknownIdx.push_back(i);
+            continue;
+        }
+        if (enemyVerdict.count(actor)) {
+            // Verdict 1/3 nhưng chưa tracked: check_live (ẩn/chết) rồi add.
+            int team = 0;
+            float hp = 0;
+            ESPClassifyDiag dg;
+            cls++;
+            if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                addTracked(actor, team, dg);
+            }
+            continue;
+        }
+        // Verdict 2: peek 8B VTable từ page cache. Đổi class => phân loại lại
+        // ngay. KHÔNG gọi ESPIsEnemy khi age hết hạn — full scan lo re-validate
+        // (gọi ESPIsEnemy lúc age>kESPverdictExpiryFrames sẽ full-read TOÀN BỘ
+        // verdict-2 mỗi 120ms — hundreds of window reads, giật tick).
+        uint64_t vtOld = 0;
+        auto vti = verdictVt.find(actor);
+        if (vti != verdictVt.end()) vtOld = vti->second;
+        if (!vtOld) continue;
+        uint64_t vtNow = 0;
+        if (!ESPMemoryReadCached(vmMap, actor, &vtNow, sizeof(vtNow)) || vtNow == vtOld) {
+            continue;
+        }
+        int team = 0;
+        float hp = 0;
+        ESPClassifyDiag dg;
+        cls++;
+        if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+            addTracked(actor, team, dg);
+        }
+    }
+
+    // Pass 2: phân loại unknown theo budget + round-robin.
+    int budget = ESP_DISCOVER_BUDGET;
+    int unknownTried = 0;
+    if (!unknownIdx.empty()) {
+        uint32_t off = s_discOff % (uint32_t)unknownIdx.size();
+        for (int b = 0; b < budget && !unknownIdx.empty(); b++) {
+            uint32_t i = unknownIdx[(off + (uint32_t)b) % (uint32_t)unknownIdx.size()];
+            uint64_t actor = discActors[i];
+            if (trackedSet.count(actor)) continue;
+            int team = 0;
+            float hp = 0;
+            ESPClassifyDiag dg;
+            cls++;
+            unknownTried++;
+            if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                addTracked(actor, team, dg);
+            }
+        }
+        s_discOff = off + (uint32_t)budget;
+    }
+
+    if (!newTracked.empty()) {
+        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        for (const auto &nt : newTracked) {
+            bool exists = false;
+            for (const auto &t : g_espTracked) {
+                if (t.actor == nt.actor) { exists = true; break; }
+            }
+            if (!exists) g_espTracked.push_back(nt);
+        }
+        g_espTrackGen++;
+        g_espTrackedCount = (int)g_espTracked.size();
+    }
+    // Log khi thêm được địch hoặc đang nhai unknown (tránh spam 8 dòng/giây
+    // chỉ vì cls++ trên verdict-2 peek).
+    if (added > 0 || unknownTried > 0) {
+        ESPLog("discover: cls=%d +E=%d unk=%zu left=%zu trk=%d",
+               cls, added, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
+                   ? unknownIdx.size() - (size_t)unknownTried : 0,
+               g_espTrackedCount);
+    }
+}
+#else
+void ESPEngineDiscoverTick(uint64_t gameBase) {
+    (void)gameBase;
+}
+#endif
+
 // --- Camera PC resolver: field LocalPlayers trong UGameInstance trôi theo
 // bản game (0x48 ở dump cũ đã gãy: gameInst đọc OK nhưng +0x48 fail).
 // Resolver thử các candidate offset, validate BẰNG CẢ CHAIN xuống tới FOV

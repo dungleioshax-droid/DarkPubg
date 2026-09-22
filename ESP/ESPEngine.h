@@ -18,6 +18,11 @@ ESPScanResult ESPEngineScan(uint64_t gameBase);
 // Đặt lịch quét nền nếu cache cũ (không block, gộp lịch). Gọi thoải mái từ tick/UI.
 void ESPEngineRequestScan(uint64_t gameBase);
 
+// Phát hiện địch MỚI CHỈ trong ~120ms (không đợi lượt quét đầy đủ 5-6s):
+// bulk-read mảng actor, phân loại actor CHƯA có verdict + verdict địch chưa
+// vào tracked (vừa unhide). Gọi mỗi tick bridge; hàm tự throttle.
+void ESPEngineDiscoverTick(uint64_t gameBase);
+
 // Text ngắn cho HUD SpringBoard, vd: @"ESP: 123 actors / 8 players" hoặc @"ESP: --".
 // KHÔNG quét đồng bộ nữa — chỉ đọc cache + đặt lịch quét nền.
 NSString *ESPEngineStatusText(uint64_t gameBase);
