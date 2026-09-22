@@ -4,6 +4,7 @@
 //  verify bằng task_info/pid_for_task, đọc bulk bằng vm_read_overwrite.
 //  Esign qua được vì patch CS_GET_TASK_ALLOW lên proc GAME (phía target),
 //  không cần entitlement đặc biệt phía app mình.
+//  Đọc bulk bằng vm_read_overwrite (SDK iOS không khai báo mach_vm_read_overwrite).
 //
 //  Điểm quan trọng học từ aovcheat (cachedKyriosPtr/cachedGameFrameworkAddr):
 //  mọi pointer hệ thống (proc, pid, task port) phải CACHE và chỉ verify thưa.
@@ -150,10 +151,12 @@ BOOL ESPTaskRead(uint64_t remoteAddr, void *buf, uint64_t len) {
     if (task == MACH_PORT_NULL || !remoteAddr || !buf || !len) return NO;
     if (len > 0x10000) return NO;
     if (remoteAddr < 0x100000000ULL || remoteAddr > 0x300000000000ULL - len) return NO;
-    mach_vm_size_t outSize = 0;
-    kern_return_t kr = mach_vm_read_overwrite(task, (mach_vm_address_t)remoteAddr,
-                                              (mach_vm_size_t)len, (mach_vm_address_t)buf, &outSize);
-    if (kr == KERN_SUCCESS && outSize == (mach_vm_size_t)len) {
+    // vm_read_overwrite (không phải mach_vm_read_overwrite — SDK iOS không khai
+    // báo tiền tố mach_vm_*; trên arm64 vm_size_t đã là 64-bit nên tương đương).
+    vm_size_t outSize = 0;
+    kern_return_t kr = vm_read_overwrite(task, (vm_address_t)remoteAddr,
+                                         (vm_size_t)len, (vm_address_t)buf, &outSize);
+    if (kr == KERN_SUCCESS && outSize == (vm_size_t)len) {
         g_taskReadFails = 0;
         return YES;
     }
