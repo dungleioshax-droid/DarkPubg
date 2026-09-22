@@ -2052,19 +2052,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         g_espLastContainerBounds = portRect;
     }
 
-    // Cập nhật transform và bounds cho UILabel khi hướng xoay đổi
+    // Label mét LUÔN giữ ngang (không xoay): text xoay đứng không đọc được.
+    // Trước đây xoay labels theo orient -> chữ mét dựng đúng như user báo.
+    // Borders đã map local đúng hướng nên boxes ngang; label dựng ngang theo.
     BOOL orientChanged = (mapOrient != g_espLastLabelOrient);
     if (orientChanged) {
         g_espLastLabelOrient = mapOrient;
-        CGFloat angle = (mapOrient == UIInterfaceOrientationLandscapeLeft) ? (CGFloat)-M_PI_2 : (CGFloat)M_PI_2;
-        CGAffineTransform t = CGAffineTransformMakeRotation(angle);
-        CGRect labelBounds = CGRectMake(0, 0, 60.0, 14.0);
-        for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-            if (g_espLabels[i]) {
-                ds_remote_set_transform_on_main(process, g_espLabels[i], t);
-                ds_remote_set_rect_on_main(process, g_espLabels[i], "setBounds:", labelBounds);
-            }
-        }
     }
 
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
