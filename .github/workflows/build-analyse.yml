@@ -1,8 +1,9 @@
 name: Xcode - Build and Analyze
 
+# Tạm chỉ chạy tay (workflow_dispatch) để dành macOS minutes cho Build Release.
+# Bật lại push khi quota rủng rỉnh.
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch:
   pull_request:
     branches: [ "main" ]
 
