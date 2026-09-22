@@ -1792,6 +1792,34 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
     return NO;
 }
 
+// --- Snapshot + NGOẠI SUY vị trí (kiểu aovcheat: đọc thưa, project dày) ---
+// Refresh chạy ESP_REFRESH_HZ (60) nhưng chỉ ĐỌC KERNEL vị trí mỗi actor
+// ESP_POS_READ_HZ (15) lần/giây; giữa 2 lần đọc thì ngoại suy từ vận tốc (delta
+// 2 mẫu gần nhất). Trước đây mỗi frame đều đọc kernel -> box nhảy theo nhịp đọc
+// (giật) và timer 60Hz bị trễ theo. Hash theo actor (actor cấp phát theo 0x1000
+// nên shift 4 là tản đủ); va chạm chỉ làm miss 1 frame, không sai.
+#define ESP_POS_HIST 96
+typedef struct {
+    uint64_t actor;
+    ESPVector pos;
+    ESPVector vel;   // cm/giây
+    CFAbsoluteTime at;
+    BOOL valid;
+} ESPPosHist;
+static ESPPosHist s_posHist[ESP_POS_HIST];
+
+static ESPPosHist *ESPPosHistSlot(uint64_t actor) {
+    ESPPosHist *h = &s_posHist[(size_t)((actor >> 4) % ESP_POS_HIST)];
+    if (h->valid && h->actor == actor) return h;
+    // Slot của actor khác: coi như chưa có mẫu (lần này sẽ đọc thật).
+    h->actor = actor;
+    h->valid = NO;
+    h->pos = (ESPVector){0, 0, 0};
+    h->vel = (ESPVector){0, 0, 0};
+    h->at = 0;
+    return h;
+}
+
 int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes,
                          uint64_t *outGen) {
     if (outGen) *outGen = 0;
@@ -1831,20 +1859,51 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
+    const double kPosReadInterval = 1.0 / (double)ESP_POS_READ_HZ;
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
-        // Actor đã chết/ẩn giữa 2 lượt quét thì bỏ qua (đọc bHidden/bDead rẻ).
-        uint8_t flags[2] = {0, 0};
-        // bHidden ở 0xE8, bDead ở 0xE7C — cách nhau quá xa nên không gộp được
-        // 1 lần đọc; đọc bHidden trước, chết/ẩn thì khỏi đọc bDead.
-        if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
-            if (flags[0] & 0x1) { cHid++; continue; }
-            if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
-                if (flags[1] & 0x1) { cHid++; continue; }
-            }
-        }
+        CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();
+        ESPPosHist *h = ESPPosHistSlot(tr->actor);
         ESPVector pos = {0,0,0};
-        if (!ESPTrackedPos(vmMap, tr, &pos)) { cPos++; continue; }
+        if (h->valid && nowF - h->at < kPosReadInterval) {
+            // Còn trong cửa sổ ngoại suy: KHÔNG chạm kernel, chỉ cộng vận tốc.
+            // Chặn dt để một frame trễ (timer dồn) không đẩy box vọt xa.
+            float dt = (float)(nowF - h->at);
+            if (dt > 0.25f) dt = 0.25f;
+            pos.x = h->pos.x + h->vel.x * dt;
+            pos.y = h->pos.y + h->vel.y * dt;
+            pos.z = h->pos.z + h->vel.z * dt;
+        } else {
+            // Đến hạn đọc: đọc cả cờ ẩn/chết ở đây (thay vì đọc mỗi frame).
+            // bHidden ở 0xE8, bDead ở 0xE7C — cách xa nên không gộp 1 lần đọc;
+            // đọc bHidden trước, ẩn/chết thì khỏi đọc bDead.
+            uint8_t flags[2] = {0, 0};
+            if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
+                if (flags[0] & 0x1) { cHid++; h->valid = NO; continue; }
+                if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
+                    if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
+                }
+            }
+            ESPVector fresh = {0,0,0};
+            if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
+            // Vận tốc = delta 2 mẫu gần nhất (bỏ mẫu quá cũ/không hợp lệ).
+            if (h->valid && h->at > 0) {
+                double ddt = nowF - h->at;
+                if (ddt > 0.001 && ddt < 1.0) {
+                    h->vel = (ESPVector){ (fresh.x - h->pos.x) / (float)ddt,
+                                          (fresh.y - h->pos.y) / (float)ddt,
+                                          (fresh.z - h->pos.z) / (float)ddt };
+                } else {
+                    h->vel = (ESPVector){0, 0, 0};
+                }
+            } else {
+                h->vel = (ESPVector){0, 0, 0};
+            }
+            h->pos = fresh;
+            h->at = nowF;
+            h->valid = YES;
+            pos = fresh;
+        }
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }

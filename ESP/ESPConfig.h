@@ -17,6 +17,13 @@
 // không quá tải IPC sang SpringBoard.
 #define ESP_REFRESH_HZ 60
 
+// Nhịp ĐỌC KERNEL vị trí actor (Hz). Refresh ở trên chạy ESP_REFRESH_HZ nhưng
+// giữa 2 lần đọc thì box được NGOẠI SUY từ vận tốc, nên box vẫn mượt 60Hz kể
+// cả khi đường đọc memory chỉ kịp vài chục lần/giây (log thực tế: ~20ms/lần
+// đọc kernel cho 1 actor). Giảm số này = càng nhẹ kernel nhưng ngoại suy càng
+// xa (dễ lệch khi mục tiêu đổi hướng đột ngột). 15Hz là điểm cân bằng tốt.
+#define ESP_POS_READ_HZ 15
+
 // Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
 // NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất.
 #define ESP_PRESENT_HZ 60
