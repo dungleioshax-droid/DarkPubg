@@ -681,6 +681,12 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     uint64_t vmMap = task ? task_get_vm_map(task) : 0;
     if (!vmMap) { g_espStep = 2; return r; }
 
+    // Task port game (như aovcheat): lấy NGAY ĐẦU lượt quét để lượt quét đầu
+    // tiên đã đọc bulk bằng vm_read_overwrite — trước đây port chưa bật nên
+    // lượt đầu phải map từng page (~5s cho ~130 actor) rồi box mới lên.
+    // Chưa lấy được thì vẫn rơi về đường kernel như cũ (không hỏng gì).
+    ESPGameTaskEnsure();
+
     g_espStep = 3;
     uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
     if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx", g_espStep, (unsigned long long)gameBase); return r; }
@@ -1923,7 +1929,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    const double kPosReadInterval = 1.0 / (double)ESP_POS_READ_HZ;
+    // Có task port thì đọc vị trí mỗi frame (một syscall, ~µs) — box bám sát,
+    // không cần ngoại suy. Chưa có port thì vẫn đọc thưa + ngoại suy như cũ
+    // (đường kernel ~ms/lần đọc cho mỗi actor).
+    const double kPosReadInterval = (ESPGameTaskPort() != MACH_PORT_NULL)
+                                        ? 0.0
+                                        : 1.0 / (double)ESP_POS_READ_HZ;
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();

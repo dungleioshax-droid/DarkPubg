@@ -16,6 +16,8 @@
 #import "ESPTask.h"
 #import "ESPConfig.h"
 #import "ESPLog.h"
+#include <mutex>
+#include <unistd.h>
 
 extern "C" {
 #import "darksword.h"
@@ -25,6 +27,155 @@ extern "C" {
 
 // CS_GET_TASK_ALLOW: cho phép process khác lấy task port (XNU csflags bit 2).
 static const uint32_t kCSGetTaskAllow = 0x4;
+// Bộ bit "đủ để debuggable" theo mọi bản kpatch csflags: bật GET_TASK_ALLOW +
+// DEBUGGED, bỏ HARD/KILL/RESTRICT/REQUIRE_LV (các bit chặn debug).
+static const uint32_t kCSDebugged = 0x10000000;
+static const uint32_t kCSHard = 0x100;
+static const uint32_t kCSKill = 0x200;
+static const uint32_t kCSRestrict = 0x800;
+static const uint32_t kCSRequireLV = 0x2000;
+
+// csops(CS_OPS_STATUS) trả ĐÚNG giá trị p_csflags của process -> dùng để xác
+// nhận offset tìm được bằng đọc-only (không đoán, không ghi kernel mò).
+#if __has_include(<sys/codesign.h>)
+#include <sys/codesign.h>
+#else
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#define CS_OPS_STATUS 0 /* return status */
+#endif
+
+// ---- Định vị p_csflags ----
+// iOS 16+ KHÔNG còn p_csflags trong `proc`: nó nằm trong `proc_ro`
+// (bsd/sys/proc_ro.h). Đường kernelcache không đi được vì libxpf trong app chỉ
+// có 7 item kernelStruct.* (không có proc.p_csflags) -> resolve luôn trả 0 ->
+// task port chưa bao giờ bật, mọi read vẫn map page từng cái.
+//
+// Layout proc_ro (đúng cho cả iOS 16-18 lẫn 26):
+//   pr_proc 0x00, pr_task 0x08, p_uniqueid 0x10, p_idversion 0x18,
+//   [iOS 26: p_orig_ppid 0x1c, p_orig_ppidversion 0x20]
+//   p_csflags = p_ucred - 4, p_ucred, syscall_filter_mask, p_platform_data
+// => p_csflags = off_proc_ro_p_ucred - 4 (offsets.m đã có p_ucred cho từng bản).
+//
+// Xác nhận bằng csops(getpid()): nếu u32 tại offset ứng viên trong proc_ro của
+// CHÍNH MÌNH bằng đúng csflags của mình thì chắc chắn đúng chỗ (thuần đọc).
+static uint64_t g_csAddr = 0;   // địa chỉ kernel p_csflags của proc game
+static uint64_t g_csProc = 0;   // proc tương ứng (proc đổi thì tìm lại)
+static uint32_t g_csOff = 0;    // offset trong proc (cũ) hoặc proc_ro (mới)
+static BOOL g_csInRO = NO;      // YES = offset nằm trong proc_ro
+static BOOL g_csLoaded = NO;
+// YES = offset đã được xác nhận chắc chắn (bảng offsets hoặc csops so khớp).
+// NO = mới là suy từ layout -> nếu task_for_pid vẫn fail thì xoá để tìm lại.
+static BOOL g_csVerified = NO;
+
+static NSString *const kCSExtraKeyOff = @"esp.cs_off";
+static NSString *const kCSExtraKeyRO = @"esp.cs_in_ro";
+
+static inline BOOL ESPTaskIsKernelPtr(uint64_t v) {
+    return (v >> 48) == 0xffffULL; // con trỏ kernel heap/text
+}
+
+static BOOL ESPTaskOurCSFlags(uint32_t *out) {
+    uint32_t v = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &v, sizeof(v)) != 0) return NO;
+    if (!v) return NO; // không có bit nào: không dùng làm mốc xác nhận
+    *out = v;
+    return YES;
+}
+
+static void ESPTaskSaveCSLocation(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setObject:@(g_csOff) forKey:kCSExtraKeyOff];
+    [d setObject:@(g_csInRO ? 1 : 0) forKey:kCSExtraKeyRO];
+    [d synchronize];
+}
+
+// Quên vị trí đã cache (patch không dính -> chỗ đó không phải csflags).
+static void ESPTaskForgetCSFlags(void) {
+    g_csOff = 0;
+    g_csInRO = NO;
+    g_csAddr = 0;
+    g_csVerified = NO;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d removeObjectForKey:kCSExtraKeyOff];
+    [d removeObjectForKey:kCSExtraKeyRO];
+    [d synchronize];
+}
+
+// Trả địa chỉ kernel của p_csflags trong proc đã cho (0 = không tìm được).
+static uint64_t ESPTaskCSFlagsAddr(uint64_t proc) {
+    if (!proc) return 0;
+    if (!g_csLoaded) {
+        g_csLoaded = YES;
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        g_csOff = (uint32_t)[[d objectForKey:kCSExtraKeyOff] unsignedIntValue];
+        g_csInRO = [[d objectForKey:kCSExtraKeyRO] boolValue];
+    }
+    if (g_csAddr && g_csProc == proc) return g_csAddr;
+    // (1) Layout cũ (< iOS 16): p_csflags nằm trong proc.
+    if (!g_csInRO) {
+        uint32_t off = g_csOff ? g_csOff : off_proc_p_csflags;
+        if (!off) off = resolve_proc_p_csflags();
+        if (off) {
+            if (!g_csOff) { g_csOff = off; g_csInRO = NO; ESPTaskSaveCSLocation(); }
+            g_csVerified = YES; // từ kernelcache/bảng offsets: đáng tin
+            g_csProc = proc;
+            g_csAddr = proc + off;
+            return g_csAddr;
+        }
+    }
+    // (2) iOS 16+: csflags trong proc_ro.
+    if (!off_proc_p_proc_ro) return 0;
+    uint64_t ro = ds_kread64(proc + off_proc_p_proc_ro);
+    if (!ESPTaskIsKernelPtr(ro)) return 0;
+    if (g_csInRO && g_csOff) {
+        g_csProc = proc;
+        g_csAddr = ro + g_csOff;
+        return g_csAddr;
+    }
+    // Ứng viên, ưu tiên công thức layout (ngay trước p_ucred).
+    uint32_t cands[5];
+    int n = 0;
+    if (off_proc_ro_p_ucred >= 4) cands[n++] = off_proc_ro_p_ucred - 4;
+    cands[n++] = 0x1C;
+    cands[n++] = 0x24;
+    cands[n++] = 0x20;
+    cands[n++] = 0x18;
+    // Xác nhận đọc-only bằng csflags của chính mình (đọc từ đúng proc_ro của
+    // mình) — không cần ghi kernel để dò.
+    uint32_t self = 0;
+    uint64_t ourProc = ds_get_our_proc();
+    if (ourProc) {
+        uint64_t ourRO = ds_kread64(ourProc + off_proc_p_proc_ro);
+        if (ESPTaskIsKernelPtr(ourRO) && ESPTaskOurCSFlags(&self)) {
+            for (int i = 0; i < n; i++) {
+                if (ds_kread32(ourRO + cands[i]) == self) {
+                    g_csOff = cands[i];
+                    g_csInRO = YES;
+                    g_csVerified = YES;
+                    ESPTaskSaveCSLocation();
+                    ESPLog("gametask: csflags @ proc_ro+0x%x (csops 0x%x xac nhan)",
+                           g_csOff, self);
+                    g_csProc = proc;
+                    g_csAddr = ro + g_csOff;
+                    return g_csAddr;
+                }
+            }
+            ESPLog("gametask: csops=0x%x but no matching offset in proc_ro", self);
+        }
+    }
+    // (3) csops không dùng được: tin công thức layout, task_for_pid là bước
+    // xác nhận cuối (patch không dính thì xoá cache để lần sau tìm lại).
+    if (off_proc_ro_p_ucred >= 4) {
+        g_csOff = off_proc_ro_p_ucred - 4;
+        g_csInRO = YES;
+        ESPTaskSaveCSLocation();
+        ESPLog("gametask: csflags @ proc_ro+0x%x (layout, csops NA)", g_csOff);
+        g_csProc = proc;
+        g_csAddr = ro + g_csOff;
+        return g_csAddr;
+    }
+    return 0;
+}
 
 // Verify port bằng pid_for_task (rẻ) mỗi 2s; giữa 2 lần verify thì đường đọc
 // hoàn toàn không chạm kernel (đúng kiểu pointer cache của aovcheat).
@@ -39,11 +190,16 @@ static CFAbsoluteTime g_taskRetryAt = 0;  // throttle khi lấy port fail
 static CFAbsoluteTime g_taskVerifyAt = 0; // hạn verify port kế tiếp
 static int g_taskReadFails = 0;           // read fail liên tiếp
 
+// Ensure() được gọi từ 2 thread (tick vẽ 60Hz + scan nền). Serialize để hai
+// đường không cùng patch csflags / cùng lấy port. Đường ĐỌC (ESPTaskRead)
+// KHÔNG lock — nó chỉ gọi syscall nên rẻ và không chặn nhau.
+static std::mutex s_taskEnsureMutex;
+
 mach_port_t ESPGameTaskPort(void) {
     return g_taskPort;
 }
 
-void ESPGameTaskReset(void) {
+static void ESPGameTaskResetLocked(void) {
     if (g_taskPort != MACH_PORT_NULL) {
         mach_port_deallocate(mach_task_self(), g_taskPort);
         g_taskPort = MACH_PORT_NULL;
@@ -53,6 +209,15 @@ void ESPGameTaskReset(void) {
     g_taskRetryAt = 0;
     g_taskVerifyAt = 0;
     g_taskReadFails = 0;
+    // Proc game đổi (restart) -> địa chỉ csflags cache không còn đúng; offset
+    // đã tìm được vẫn giữ (lần sau chỉ cần đọc lại proc_ro của proc mới).
+    g_csAddr = 0;
+    g_csProc = 0;
+}
+
+void ESPGameTaskReset(void) {
+    std::lock_guard<std::mutex> resetLock(s_taskEnsureMutex);
+    ESPGameTaskResetLocked();
 }
 
 // Chỉ gọi khi KHÔNG có cache (đắt: walk proclist).
@@ -67,6 +232,7 @@ BOOL ESPGameTaskEnsure(void) {
     return NO;
 #else
     if (!ds_is_ready()) return NO;
+    std::lock_guard<std::mutex> ensureLock(s_taskEnsureMutex);
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     // 1) Đường nhanh: port đã verify trong `kTaskVerifyInterval` giây qua.
     //    Không procbyname, không kernel read — đây là thứ khiến tick 60Hz rẻ.
@@ -79,7 +245,7 @@ BOOL ESPGameTaskEnsure(void) {
             g_taskReadFails = 0;
             return YES;
         }
-        ESPGameTaskReset();
+        ESPGameTaskResetLocked();
     }
     if (now < g_taskRetryAt) return NO;
     // 3) Cần lấy port: chỉ dùng proc cache, chỉ resolve proclist nếu chưa có.
@@ -89,7 +255,7 @@ BOOL ESPGameTaskEnsure(void) {
     if (!proc || pid <= 0) {
         proc = ESPGameProcResolve();
         if (!proc) {
-            if (g_taskPort) ESPGameTaskReset();
+            if (g_taskPort) ESPGameTaskResetLocked();
             g_taskProc = 0;
             g_taskRetryAt = now + 2.0;
             return NO;
@@ -102,26 +268,44 @@ BOOL ESPGameTaskEnsure(void) {
         }
         g_taskProc = proc;
     }
-    if (!off_proc_p_csflags && !resolve_proc_p_csflags()) {
-        ESPLog("gametask: no p_csflags offset (keep exploit reads)");
-        g_taskRetryAt = now + 30.0;
-        return NO;
-    }
-    // Patch CS_GET_TASK_ALLOW lên proc game (giữ nguyên các bit khác).
-    uint32_t cs = ds_kread32(proc + off_proc_p_csflags);
-    if (!(cs & kCSGetTaskAllow)) {
-        ds_kwrite32(proc + off_proc_p_csflags, cs | kCSGetTaskAllow);
-        uint32_t cs2 = ds_kread32(proc + off_proc_p_csflags);
-        ESPLog("gametask: csflags 0x%x -> 0x%x", cs, cs2);
-        if (!(cs2 & kCSGetTaskAllow)) {
-            g_taskRetryAt = now + 30.0;
-            return NO;
-        }
-    }
+    // 4) Thử lấy port TRƯỚC khi patch: nếu app có entitlement (TrollStore /
+    //    ldid) thì không cần ghi kernel lần nào.
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
     if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        ESPLog("gametask: task_for_pid pid=%d kr=0x%x (%s)", pid, kr, mach_error_string(kr));
+        // 5) Chưa được -> patch csflags của proc GAME rồi thử lại. Đây là chỗ
+        //    trước đây luôn fail ("no p_csflags offset") nên box phải map page.
+        uint64_t csAddr = ESPTaskCSFlagsAddr(proc);
+        if (!csAddr) {
+            ESPLog("gametask: no p_csflags offset (keep exploit reads)");
+            g_taskRetryAt = now + 30.0;
+            return NO;
+        }
+        uint32_t cs = ds_kread32(csAddr);
+        if (!(cs & kCSGetTaskAllow)) {
+            uint32_t patched = (cs | kCSGetTaskAllow | kCSDebugged) &
+                               ~(kCSHard | kCSKill | kCSRestrict | kCSRequireLV);
+            ds_kwrite32(csAddr, patched);
+            uint32_t cs2 = ds_kread32(csAddr);
+            ESPLog("gametask: csflags 0x%x -> 0x%x @0x%llx", cs, cs2,
+                   (unsigned long long)csAddr);
+            if (!(cs2 & kCSGetTaskAllow)) {
+                // Ghi không dính (vùng bị bảo vệ / sai chỗ) -> lần sau tìm lại.
+                ESPLog("gametask: csflags write did not stick, forgetting offset");
+                ESPTaskForgetCSFlags();
+                g_taskRetryAt = now + 30.0;
+                return NO;
+            }
+        }
+        task = MACH_PORT_NULL;
+        kr = task_for_pid(mach_task_self(), pid, &task);
+    }
+    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
+        ESPLog("gametask: task_for_pid pid=%d kr=0x%x (%s) cs=0x%x", pid, kr,
+               mach_error_string(kr), g_csOff);
+        // Offset mới chỉ SUY từ layout mà vẫn không lấy được port -> lần sau
+        // tìm lại bằng csops thay vì ghi lại đúng chỗ đó mãi.
+        if (g_csOff && !g_csVerified) ESPTaskForgetCSFlags();
         g_taskRetryAt = now + 10.0;
         return NO;
     }

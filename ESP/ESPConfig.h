@@ -28,6 +28,10 @@
 // đọc kernel cho 1 actor). Giảm số này = càng nhẹ kernel nhưng ngoại suy càng
 // xa (dễ lệch khi mục tiêu đổi hướng đột ngột). 15Hz là điểm cân bằng tốt.
 #define ESP_POS_READ_HZ 15
+// Khi TASK PORT của game bật được (patch CS_GET_TASK_ALLOW), mỗi lần đọc vị trí
+// chỉ là 1 syscall (~µs) nên ESPEngineRefreshBoxes bỏ qua mốc này và đọc vị trí
+// MỖI frame (60Hz, box bám sát, không ngoại suy). Giá trị 15Hz chỉ áp dụng cho
+// đường kernel exploit (map page / đọc từng field).
 
 // Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
 // NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất.

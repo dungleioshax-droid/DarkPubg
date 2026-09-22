@@ -2412,6 +2412,9 @@ static void ds_esp_tick(void) {
         static BOOL s_zeroHidden = NO;
         static CFAbsoluteTime s_lastEnsureFailLog = 0;
         static CFAbsoluteTime s_lastPerfLog = 0;
+        // Port sống => không cần mapping page nào nữa (mọi read đi
+        // vm_read_overwrite) -> trả hết mapping + memory-entry port một lần.
+        static BOOL s_pageCacheShed = NO;
 
         // Persistent slot tracking state
         typedef struct {
@@ -2440,6 +2443,10 @@ static void ds_esp_tick(void) {
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
             ESPGameTaskEnsure();
+            if (!s_pageCacheShed && ESPGameTaskPort() != MACH_PORT_NULL) {
+                // Non-blocking: scan nền đang đọc kernel thì để lần refresh sau.
+                s_pageCacheShed = ESPMemoryFlushPageCacheIfIdle();
+            }
             float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             gen = 0;
