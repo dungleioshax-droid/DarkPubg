@@ -188,8 +188,16 @@ static uint64_t g_espPlayerVTable = 0; // VTable class player đã học
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
 static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
+// VTable lúc kết luận "other" — để phát hiện object pool TÁI DÙNG địa chỉ
+// (địch mới spawn lấy lại chỗ của object không phải địch). Xem ESPIsEnemy.
+static std::unordered_map<uint64_t, uint64_t> g_espVerdictVt;
 static int g_espFrame = 0;
-static const int kESPverdictExpiryFrames = 6; // verdict 2 quá 6 scans thì đánh giá lại
+// Verdict 2 (không phải địch) được đánh giá lại sau bao nhiêu lượt quét.
+// Đây TỪNG là 6 — với TTL 2s thì một object-đã-biến-thành-địch phải 12s mới
+// được soi lại (log thực tế: địch xuất hiện 5-6s mới có box). Cửa sổ actor giờ
+// nằm trong page cache nên soi lại rẻ; kèm peek VTable ở ESPIsEnemy thì ca
+// "đổi class" còn được nhận ra ngay ở lượt kế tiếp.
+static const int kESPverdictExpiryFrames = 1;
 static uint64_t g_espVerdictWorld = 0;
 // Số lượt quét còn ghi log chi tiết (field từng actor + histogram VTable).
 // Đặt lại mỗi khi đổi world => mỗi map/trận chỉ ghi vài lượt đầu.
@@ -231,6 +239,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
         g_espVerdictFrame.clear();
+        g_espVerdictVt.clear();
         g_espVerdictWorld = world;
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPasses = 0;
@@ -268,6 +277,7 @@ static void ESPVerdictSetLocked(uint64_t actor, char v, int team) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
         g_espVerdictFrame.clear();
+        g_espVerdictVt.clear();
     }
     g_espVerdict[actor] = v;
     g_espVerdictFrame[actor] = g_espFrame;
@@ -299,12 +309,24 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         auto fit = g_espVerdictFrame.find(actor);
         int age = (fit != g_espVerdictFrame.end()) ? (g_espFrame - fit->second) : 999;
         if (age <= kESPverdictExpiryFrames) {
-            if (diag) diag->rule = -3; // verdict cũ còn hiệu lực (không đọc gì)
-            return NO;
+            // Verdict còn hạn — nhưng actor pool của PUBG TÁI DÙNG địa chỉ: một
+            // object "không phải địch" có thể BỊ THAY bằng nhân vật mới spawn.
+            // Peek VTable (8 byte, chỉ đọc từ page cache — không map page mới)
+            // rồi so với VTable lúc kết luận. Khác => object đã đổi => phân loại
+            // lại NGAY, không đợi hết hạn. Đây là fix cho "địch xuất hiện 5-6s
+            // mới có box" (trước đây đợi 6 lượt quét).
+            uint64_t vtOld = 0, vtNow = 0;
+            auto vti = g_espVerdictVt.find(actor);
+            if (vti != g_espVerdictVt.end()) vtOld = vti->second;
+            if (!vtOld || !ESPMemoryReadCached(vmMap, actor, &vtNow, sizeof(vtNow)) || vtNow == vtOld) {
+                if (diag) diag->rule = -3; // verdict cũ còn hiệu lực
+                return NO;
+            }
         }
         g_espVerdict.erase(actor);
         g_espVerdictFrame.erase(actor);
         g_espTeamCache.erase(actor);
+        g_espVerdictVt.erase(actor);
         vit = g_espVerdict.end();
     }
     if (vit == g_espVerdict.end()) {
@@ -405,6 +427,8 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         if (diag && f.hasTarget && ESPIsUserPtr(f.tMesh)) diag->nearDummy = 1;
         ESPVerdictSetLocked(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
+        // Nhớ VTable để lượt sau phát hiện object đổi class (tái dùng địa chỉ).
+        if (f.hasVtable) g_espVerdictVt[actor] = f.vtable;
         if (diag) diag->rule = 0;
         return NO;
     }
@@ -978,7 +1002,9 @@ void ESPEngineRequestScan(uint64_t gameBase) {
     if (!gameBase || !ds_is_ready()) return;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     // Vài lượt đầu quét dày hơn để số players chóng đúng, sau đó về TTL thường.
-    double ttl = (g_espPasses < 3) ? 2.0 : ESP_CACHE_TTL;
+    // Vài lượt đầu quét dày để địch/players hiện số đúng sớm nhất có thể (TTL
+    // là khoảng nghỉ TỐI THIỂU, lượt quét dài bao nhiêu còn tuỳ cache).
+    double ttl = (g_espPasses < 3) ? 0.5 : ESP_CACHE_TTL;
     if (now - g_espCheckedAt < ttl && g_espCheckedAt > 0) return;
     bool expected = false;
     if (!g_espScanning.compare_exchange_strong(expected, true)) {
@@ -2002,15 +2028,18 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
         if (nowLog - s_lastZeroRefreshLog >= 2.0) {
             s_lastZeroRefreshLog = nowLog;
-            // Có tracked mà không ra box nào = đường đọc bắt đầu fail (thường là
-            // vmmapremotepage hết memory entry / mapping héo sau lượt quét nặng —
-            // log thực tế: ngay sau lượt scan `win=0/2` thì pos=4 hết). Xả page
-            // cache (nhả toàn bộ mapping + port) để map lại từ đầu, thay vì "chết"
-            // tới lượt scan đầy đủ kế tiếp (~10s).
-            // IfIdle: KHÔNG chờ mutex đọc (scan nền có thể đang map page hàng
-            // trăm ms) — trước đây flush blocking làm chính tick vẽ bị treo
-            // (log: box perf max=1425ms). Bận thì để lần sau.
-            BOOL didFlush = ESPMemoryFlushPageCacheIfIdle();
+            // CHỈ xả cache khi ĐỌC VỊ TRÍ THẤT BẠI (pos>0) — lúc đó mới nghi
+            // mapping héo/hết memory entry.
+            //
+            // KHÔNG xả khi chỉ w2s>0 (project bị từ chối): w2s là lỗi TOÁN, không
+            // phải lỗi đọc. Bản smooth3 xả ở đây nên cứ ~2s lại quét sạch 130+
+            // page của actor, lượt quét đầy đủ sau đó phải map lại từ đầu -> 5.0s
+            // (log smooth3: `win=132/6 dt=5.0s`), và ĐÓ chính là độ trễ 5-6s để
+            // địch mới hiện box.
+            // IfIdle: không chờ mutex đọc (scan nền có thể đang map page) — flush
+            // blocking từng làm tick vẽ treo (log: box perf max=1425ms).
+            BOOL didFlush = NO;
+            if (cPos > 0) didFlush = ESPMemoryFlushPageCacheIfIdle();
             ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u (flush=%d)",
                    tracked.size(), cHid, cPos, cW2s, cSelf, cH, didFlush ? 1 : 0);
         }

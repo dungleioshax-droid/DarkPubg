@@ -47,7 +47,11 @@ static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
 // dữ liệu nóng (statics, mảng actors, camera, root địch) sau lần chạm đầu chỉ
 // còn memcpy thuần. Đọc cửa sổ lớn (0xF00/actor lúc phân loại) đi đường trực
 // tiếp không cache để không đuổi dữ liệu nóng khỏi cache.
-#define ESP_PAGE_CACHE_SIZE 256
+// 512 slot = 512 x PAGE_SIZE (16KB) ~ 8MB pinned: đủ giữ page của MỌI actor
+// (kể cả trận 300+ actor) + camera + statics + mảng actors, để lượt quét đầy đủ
+// và probe VTable không phải map lại page nào (map page là ~37ms/vòng — đo từ
+// log: lượt quét 132 actor ngốn 5.0s khi cache bị xả).
+#define ESP_PAGE_CACHE_SIZE 512
 
 struct ESPPageCacheEntry {
     uint64_t pageStart;    // địa chỉ page đã map (0 = slot trống)
@@ -172,6 +176,32 @@ static BOOL ESPReadDirectLocked(uint64_t vmMap, uint64_t remoteAddr, void *buf, 
     return YES;
 }
 
+BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    if (!vmMap || !remoteAddr || !buf || !len) return NO;
+    if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
+    if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    // Task port có thì dùng luôn (còn rẻ hơn cache).
+    if (ESPTaskRead(remoteAddr, buf, len)) { s_taskReads++; return YES; }
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    uint64_t off = 0;
+    uint8_t *out = (uint8_t *)buf;
+    while (off < len) {
+        uint64_t addr = remoteAddr + off;
+        uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t pageOff = addr - pageStart;
+        // CHỈ tìm trong cache — không gọi vmmapremotepage: đường peek không được
+        // phép làm phình số mapping (real match có thể 300+ actor).
+        ESPPageCacheEntry *e = ESPPageCacheFind(pageStart);
+        if (!e) return NO;
+        s_cacheHit++;
+        uint64_t chunk = len - off;
+        if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
+        memcpy(out + off, (void *)(uintptr_t)(e->localAddress + pageOff), (size_t)chunk);
+        off += chunk;
+    }
+    return YES;
+}
+
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     if (!proc) return 0;
     if (!ds_is_ready()) return 0;
@@ -257,6 +287,10 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     return NO;
 }
 BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
+    (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
+    return NO;
+}
+BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
     (void)vmMap; (void)remoteAddr; (void)buf; (void)len;
     return NO;
 }

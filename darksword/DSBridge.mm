@@ -2288,7 +2288,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "smooth4"
+#define DS_ESP_BUILD_TAG "smooth5"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2433,6 +2433,10 @@ static void ds_esp_tick(void) {
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
             didRefresh = YES;
+            // Đặt lịch quét nền MỖI tick (hàm tự gộp theo TTL): địch mới xuất
+            // hiện chỉ có được box từ lượt quét, mà trước đây scan chỉ được kick
+            // từ dòng text HUD (nhịp 1Hz). Giờ độ trễ = ESP_CACHE_TTL (~0.8s).
+            ESPEngineRequestScan(g_gameBase);
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
             ESPGameTaskEnsure();
