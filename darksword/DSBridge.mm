@@ -118,6 +118,7 @@ static void ds_set_error(NSString *message) {
 #import "ESPConfig.h"
 #import "ESPOverlay.h"
 #import "ESPMemory.h"
+#import "ESPTask.h"
 #import "ESPLog.h"
 
 // These vendored headers are plain C/Objective-C. Keep C linkage from this .mm.
@@ -2268,7 +2269,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "smooth-60fps"
+#define DS_ESP_BUILD_TAG "taskport1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2413,6 +2414,9 @@ static void ds_esp_tick(void) {
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
             didRefresh = YES;
+            // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
+            // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
+            ESPGameTaskEnsure();
             float landW = (float)MAX(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             gen = 0;

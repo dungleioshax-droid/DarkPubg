@@ -7,6 +7,7 @@
 #import "ESPEngine.h"
 #import "ESPOffsets.h"
 #import "ESPMemory.h"
+#import "ESPTask.h"
 #import "ESPConfig.h"
 #import "ESPName.h"
 #import "ESPLog.h"
@@ -228,6 +229,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
         g_espTrackGen++; // mẫu refresh cũ hết hiệu lực nội suy
+        ESPGameTaskReset(); // world mới => task port cũ héo, resolve lại
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;

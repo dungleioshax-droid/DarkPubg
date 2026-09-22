@@ -5,6 +5,7 @@
 
 #import "ESPMemory.h"
 #import "ESPConfig.h"
+#import "ESPTask.h"
 #import <mach/mach.h>
 #include <mutex>
 
@@ -163,6 +164,9 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (len > 0x10000) return NO; // chặn đọc quá lớn 1 lần
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    // Đường NHANH (như aovcheat): task port game + mach_vm_read_overwrite bulk.
+    // Không cần mutex (không đụng vmmapremotepage). Fail thì rơi xuống exploit.
+    if (ESPTaskRead(remoteAddr, buf, len)) return YES;
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
     s_pageCacheClock++;
     // Đọc dài hơn 1 page (cửa sổ 0xF00 lúc phân loại actor) là stream: đi
@@ -198,6 +202,8 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     if ((uint64_t)PAGE_SIZE > ESP_MAX_PAGE) return NO;
+    // Đường NHANH: 1 lần mach_vm_read_overwrite thay vì map từng page.
+    if (len <= 0x10000 && ESPTaskRead(remoteAddr, buf, len)) return YES;
     uint8_t pageBuf[ESP_MAX_PAGE];
     uint8_t *out = (uint8_t *)buf;
     uint64_t off = 0;

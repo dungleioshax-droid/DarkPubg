@@ -34,11 +34,13 @@
 		ESPB0OVLD000000000001 /* ESPOverlay.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0OVLM000000000001 /* ESPOverlay.mm */; };
 		ESPB0NAMED00000000001 /* ESPName.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0NAMEM0000000001 /* ESPName.mm */; };
 		ESPB0LOGD000000000001 /* ESPLog.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0LOGM00000000001 /* ESPLog.mm */; };
+		ESPB0TSKD000000000001 /* ESPTask.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0TSKM000000000001 /* ESPTask.mm */; };
 		ESPB0MEMS000000000001 /* ESPMemory.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0MEMM000000000001 /* ESPMemory.mm */; };
 		ESPB0ENGS000000000001 /* ESPEngine.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0ENGM000000000001 /* ESPEngine.mm */; };
 		ESPB0OVLS000000000001 /* ESPOverlay.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0OVLM000000000001 /* ESPOverlay.mm */; };
 		ESPB0NAMES00000000001 /* ESPName.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0NAMEM0000000001 /* ESPName.mm */; };
 		ESPB0LOGS000000000001 /* ESPLog.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0LOGM00000000001 /* ESPLog.mm */; };
+		ESPB0TSKS000000000001 /* ESPTask.mm in Sources */ = {isa = PBXBuildFile; fileRef = ESP0TSKM000000000001 /* ESPTask.mm */; };
 		D52000000000000000000001 /* RemoteCall.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000001 /* RemoteCall.m */; };
 		D52000000000000000000002 /* exc.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000002 /* exc.m */; };
 		D52000000000000000000003 /* thread.m in Sources */ = {isa = PBXBuildFile; fileRef = D51000000000000000000003 /* thread.m */; };
@@ -169,6 +171,8 @@
 		ESP0NAMEM0000000001 /* ESPName.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPName.mm; path = ESP/ESPName.mm; sourceTree = SOURCE_ROOT; };
 		ESP0LOGH000000000001 /* ESPLog.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPLog.h; path = ESP/ESPLog.h; sourceTree = SOURCE_ROOT; };
 		ESP0LOGM00000000001 /* ESPLog.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPLog.mm; path = ESP/ESPLog.mm; sourceTree = SOURCE_ROOT; };
+		ESP0TSKH000000000001 /* ESPTask.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ESPTask.h; path = ESP/ESPTask.h; sourceTree = SOURCE_ROOT; };
+		ESP0TSKM000000000001 /* ESPTask.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = ESPTask.mm; path = ESP/ESPTask.mm; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000001 /* RemoteCall.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = RemoteCall.m; path = Vendor/darksword-kexploit/TaskRop/RemoteCall.m; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000002 /* exc.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = exc.m; path = Vendor/darksword-kexploit/TaskRop/exc.m; sourceTree = SOURCE_ROOT; };
 		D51000000000000000000003 /* thread.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = thread.m; path = Vendor/darksword-kexploit/TaskRop/thread.m; sourceTree = SOURCE_ROOT; };
@@ -326,6 +330,8 @@
 				ESP0OVLM000000000001 /* ESPOverlay.mm */,
 				ESP0NAMEH00000000001 /* ESPName.h */,
 				ESP0NAMEM0000000001 /* ESPName.mm */,
+				ESP0TSKH000000000001 /* ESPTask.h */,
+				ESP0TSKM000000000001 /* ESPTask.mm */,
 				ESP0LOGH000000000001 /* ESPLog.h */,
 				ESP0LOGM00000000001 /* ESPLog.mm */,
 			);
@@ -676,6 +682,7 @@
 				ESPB0OVLS000000000001 /* ESPOverlay.mm in Sources */,
 				ESPB0NAMES00000000001 /* ESPName.mm in Sources */,
 				ESPB0LOGS000000000001 /* ESPLog.mm in Sources */,
+				ESPB0TSKS000000000001 /* ESPTask.mm in Sources */,
 				CC654E122DABD9C200D54F83 /* SPLarkPresentingAnimationController.swift in Sources */,
 				CC654E132DABD9C200D54F83 /* SPLarkDismissingAnimationController.swift in Sources */,
 				CC654E142DABD9C200D54F83 /* HUDBackdropView.mm in Sources */,
@@ -722,6 +729,7 @@
 				ESPB0OVLD000000000001 /* ESPOverlay.mm in Sources */,
 				ESPB0NAMED00000000001 /* ESPName.mm in Sources */,
 				ESPB0LOGD000000000001 /* ESPLog.mm in Sources */,
+				ESPB0TSKD000000000001 /* ESPTask.mm in Sources */,
 				D52000000000000000000001 /* RemoteCall.m in Sources */,
 				D52000000000000000000002 /* exc.m in Sources */,
 				D52000000000000000000003 /* thread.m in Sources */,
