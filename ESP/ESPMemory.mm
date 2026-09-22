@@ -7,6 +7,7 @@
 #import "ESPConfig.h"
 #import "ESPTask.h"
 #import <mach/mach.h>
+#include <atomic>
 #include <mutex>
 
 #if USE_DARKSWORD
@@ -59,10 +60,19 @@ static uint64_t s_pageCacheClock = 1; // tăng dần, trị lastUse
 // Đếm hit/miss để chẩn đoán vì sao refresh chậm (log box perf).
 static uint64_t s_cacheHit = 0;
 static uint64_t s_cacheMiss = 0;
+// Đếm đường đọc: task port (nhanh) vs kernel exploit (chậm). Atomic vì cả
+// scan queue lẫn timer bridge queue đều đọc.
+static std::atomic<uint64_t> s_taskReads{0};
+static std::atomic<uint64_t> s_kernelReads{0};
 
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = s_cacheHit;
     if (miss) *miss = s_cacheMiss;
+}
+
+void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads) {
+    if (taskReads) *taskReads = s_taskReads.load();
+    if (kernelReads) *kernelReads = s_kernelReads.load();
 }
 
 // Tìm trong cache theo page CHÍNH XÁC. KHÔNG lock — caller giữ mutex.
@@ -166,7 +176,8 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     // Đường NHANH (như aovcheat): task port game + mach_vm_read_overwrite bulk.
     // Không cần mutex (không đụng vmmapremotepage). Fail thì rơi xuống exploit.
-    if (ESPTaskRead(remoteAddr, buf, len)) return YES;
+    if (ESPTaskRead(remoteAddr, buf, len)) { s_taskReads++; return YES; }
+    s_kernelReads++;
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
     s_pageCacheClock++;
     // Đọc dài hơn 1 page (cửa sổ 0xF00 lúc phân loại actor) là stream: đi
@@ -203,7 +214,8 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     if ((uint64_t)PAGE_SIZE > ESP_MAX_PAGE) return NO;
     // Đường NHANH: 1 lần mach_vm_read_overwrite thay vì map từng page.
-    if (len <= 0x10000 && ESPTaskRead(remoteAddr, buf, len)) return YES;
+    if (len <= 0x10000 && ESPTaskRead(remoteAddr, buf, len)) { s_taskReads++; return YES; }
+    s_kernelReads++;
     uint8_t pageBuf[ESP_MAX_PAGE];
     uint8_t *out = (uint8_t *)buf;
     uint64_t off = 0;
@@ -241,5 +253,9 @@ void ESPMemoryFlushPageCache(void) {
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = 0;
     if (miss) *miss = 0;
+}
+void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads) {
+    if (taskReads) *taskReads = 0;
+    if (kernelReads) *kernelReads = 0;
 }
 #endif

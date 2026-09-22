@@ -670,11 +670,27 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
-    // Giải mã GNames 1 lần cho cả scan (để đọc tên class)
-    g_espUName = ESPResolveUName(vmMap, gameBase);
+    // Giải mã GNames 1 lần cho cả scan (để đọc tên class).
+    // Resolve FAIL tốn cả khối diag (~30 kernel read + ~8 dòng log) và lặp lại
+    // MỖI lượt quét (TTL 2s) mà kết quả không đổi -> chỉ thử 2 lượt đầu cho mỗi
+    // game base. VTable vẫn là đường nhận diện chính khi GNames không có.
     {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
-        ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
+        static uint64_t s_unameBase = 0;
+        static int s_unameTries = 0;
+        if (s_unameBase != gameBase) {
+            s_unameBase = gameBase;
+            s_unameTries = 0;
+        }
+        if (g_espUName) {
+            // đã có, không đọc lại
+        } else if (s_unameTries >= 2) {
+            // đã fail 2 lượt cho base này: bỏ qua, không read/log lại
+        } else {
+            s_unameTries++;
+            g_espUName = ESPResolveUName(vmMap, gameBase);
+            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
+        }
     }
 
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
@@ -862,10 +878,15 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espProgress.store((int)scanN);
     {
         // Publish tracked cho box path (swap dưới lock, giữ lock cực ngắn).
-        // Scan fail sớm (return trước đó) thì giữ tracked cũ — tốt hơn rỗng.
+        // Lượt quét ra 0 actor KHÔNG xoá tracked: hụt 1 lượt (world vừa đổi,
+        // read fail, actor chưa spawn) mà xoá là refresh 60Hz trả 0 box cho tới
+        // lượt quét sau (TTL 2s) — nhìn như box tắt/bật giật. Xoá tracked là
+        // việc của ESPVerdictResetIfWorldChanged khi ĐỔI world.
         std::lock_guard<std::mutex> lk(g_espClassifyMutex);
-        g_espTracked.swap(localTracked);
-        g_espTrackGen++;
+        if (!localTracked.empty()) {
+            g_espTracked.swap(localTracked);
+            g_espTrackGen++;
+        }
         g_espPasses++;
     }
     r.playerLike = enemies;
@@ -1339,8 +1360,9 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
 static double g_perfSumProc = 0, g_perfSumCam = 0, g_perfSumAct = 0;
 static int g_perfN = 0;
 static double g_perfMaxMs = 0;
-static char g_perfBuf[192] = "n/a";
+static char g_perfBuf[256] = "n/a";
 static uint64_t g_perfLastHit = 0, g_perfLastMiss = 0;
+static uint64_t g_perfLastTask = 0, g_perfLastKernel = 0;
 static void ESPPerfSample(double procMs, double camMs, double actMs) {
     g_perfSumProc += procMs;
     g_perfSumCam += camMs;
@@ -1355,16 +1377,25 @@ const char *ESPEngineBoxPerfText(void) {
     uint64_t dHit = hit - g_perfLastHit, dMiss = miss - g_perfLastMiss;
     g_perfLastHit = hit;
     g_perfLastMiss = miss;
+    // read(t=.. k=..): bao nhiêu lần đọc đi task port (nhanh) vs kernel exploit.
+    // t=0 nghĩa là task port chưa bật được -> box vẫn đi đường chậm.
+    uint64_t taskReads = 0, kernelReads = 0;
+    ESPMemoryReadPathStats(&taskReads, &kernelReads);
+    uint64_t dTask = taskReads - g_perfLastTask, dKernel = kernelReads - g_perfLastKernel;
+    g_perfLastTask = taskReads;
+    g_perfLastKernel = kernelReads;
     if (g_perfN > 0) {
         snprintf(g_perfBuf, sizeof(g_perfBuf),
-                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu)",
+                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu) read(t=%llu k=%llu)",
                  g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
                  g_perfSumAct / (double)g_perfN,
                  (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs,
-                 (unsigned long long)dHit, (unsigned long long)dMiss);
+                 (unsigned long long)dHit, (unsigned long long)dMiss,
+                 (unsigned long long)dTask, (unsigned long long)dKernel);
     } else {
-        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0 cache(h=%llu m=%llu)",
-                 (unsigned long long)dHit, (unsigned long long)dMiss);
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=0 cache(h=%llu m=%llu) read(t=%llu k=%llu)",
+                 (unsigned long long)dHit, (unsigned long long)dMiss,
+                 (unsigned long long)dTask, (unsigned long long)dKernel);
     }
     g_perfSumProc = 0;
     g_perfSumCam = 0;
@@ -1495,39 +1526,67 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
 #endif
 }
 
-BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float screenH, float *outX, float *outY, float *outDist) {
-    // Port đúng công thức Kernel/esp/unity_api/unity.mm World2Screen
-    // (cả 2 trục đều dùng screenCenterX).
+// --- View-projection "matrix" (kiểu buildViewProjection/copyViewProjection
+// của aovcheat) ---
+// Trước đây MỖI điểm cần project đều tính lại sin/cos 3 góc + tan(fov/2)
+// (2 điểm/actor => 2 lần trig/actor, ~8 nhân ma trận/actor). Giờ dựng basis 1
+// lần cho mỗi lần đọc camera rồi project mọi actor bằng nhân ma trận thuần:
+// 9 phép nhân + 1 chia cho mỗi điểm. Công thức GIỮ NGUYÊN bản gốc của source
+// Kernel (cả 2 trục đều dùng screenCenterX) nên kết quả không đổi.
+typedef struct {
+    float m00, m01, m02; // trục X của rotator
+    float m10, m11, m12; // trục Y
+    float m20, m21, m22; // trục Z
+    float lx, ly, lz;    // camera location
+    float k;             // screenWidth*0.5 / tan(fov/2)
+    float cx, cy;        // tâm màn hình
+} ESPCamBasis;
+
+static BOOL ESPCamBasisBuild(const ESPCamera *cam, float screenW, float screenH, ESPCamBasis *b) {
+    if (!cam || !b) return NO;
     if (screenW <= 0 || screenH <= 0) return NO;
-    if (!(cam.fov >= 10 && cam.fov <= 170)) return NO;
+    if (!(cam->fov >= 10.0f && cam->fov <= 170.0f)) return NO;
     const float kPi = 3.141592653589793f;
-    float radPitch = cam.rotation.pitch * kPi / 180.0f;
-    float radYaw   = cam.rotation.yaw   * kPi / 180.0f;
-    float radRoll  = cam.rotation.roll  * kPi / 180.0f;
+    float radPitch = cam->rotation.pitch * kPi / 180.0f;
+    float radYaw   = cam->rotation.yaw   * kPi / 180.0f;
+    float radRoll  = cam->rotation.roll  * kPi / 180.0f;
     float SP = sinf(radPitch), CP = cosf(radPitch);
     float SY = sinf(radYaw),   CY = cosf(radYaw);
     float SR = sinf(radRoll),  CR = cosf(radRoll);
-    // Hàng ma trận như RotatorToMatrix gốc
-    float m00 = CP*CY, m01 = CP*SY, m02 = SP;
-    float m10 = SR*SP*CY - CR*SY, m11 = SR*SP*SY + CR*CY, m12 = -SR*CP;
-    float m20 = -(CR*SP*CY + SR*SY), m21 = CY*SR - CR*SP*SY, m22 = CR*CP;
-    ESPVector d = { world.x - cam.location.x, world.y - cam.location.y, world.z - cam.location.z };
-    // vTransformed = (dot(d,Y), dot(d,Z), dot(d,X)) theo code gốc
-    float tx = d.x*m10 + d.y*m11 + d.z*m12;
-    float ty = d.x*m20 + d.y*m21 + d.z*m22;
-    float tz = d.x*m00 + d.y*m01 + d.z*m02;
-    if (tz < 10.0f) return NO; // Sau lưng hoặc quá sát camera (< 10cm)
-    float distM = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z) / 100.0f;
-    if (distM > 400.0f) return NO;
-    float cx = screenW * 0.5f, cyC = screenH * 0.5f;
-    float tanHalf = tanf(cam.fov * kPi / 360.0f);
+    float tanHalf = tanf(cam->fov * kPi / 360.0f);
     if (!(tanHalf > 0.05f && tanHalf < 5.0f)) return NO;
-    float sx = cx + tx * (cx / tanHalf) / tz;
-    float syC = cyC - ty * (cx / tanHalf) / tz;
-    if (outX) *outX = sx;
-    if (outY) *outY = syC;
+    // Hàng ma trận như RotatorToMatrix gốc
+    b->m00 = CP*CY;                  b->m01 = CP*SY;                  b->m02 = SP;
+    b->m10 = SR*SP*CY - CR*SY;       b->m11 = SR*SP*SY + CR*CY;       b->m12 = -SR*CP;
+    b->m20 = -(CR*SP*CY + SR*SY);    b->m21 = CY*SR - CR*SP*SY;       b->m22 = CR*CP;
+    b->lx = cam->location.x; b->ly = cam->location.y; b->lz = cam->location.z;
+    b->cx = screenW * 0.5f;
+    b->cy = screenH * 0.5f;
+    b->k = b->cx / tanHalf;
+    return YES;
+}
+
+static BOOL ESPCamBasisProject(const ESPCamBasis *b, ESPVector world,
+                               float *outX, float *outY, float *outDist) {
+    if (!b) return NO;
+    float dx = world.x - b->lx, dy = world.y - b->ly, dz = world.z - b->lz;
+    // vTransformed = (dot(d,Y), dot(d,Z), dot(d,X)) theo code gốc
+    float tx = dx*b->m10 + dy*b->m11 + dz*b->m12;
+    float ty = dx*b->m20 + dy*b->m21 + dz*b->m22;
+    float tz = dx*b->m00 + dy*b->m01 + dz*b->m02;
+    if (tz < 10.0f) return NO; // Sau lưng hoặc quá sát camera (< 10cm)
+    float distM = sqrtf(dx*dx + dy*dy + dz*dz) / 100.0f;
+    if (distM > 400.0f) return NO;
+    if (outX) *outX = b->cx + tx * b->k / tz;
+    if (outY) *outY = b->cy - ty * b->k / tz;
     if (outDist) *outDist = distM;
     return YES;
+}
+
+BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float screenH, float *outX, float *outY, float *outDist) {
+    ESPCamBasis basis;
+    if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) return NO;
+    return ESPCamBasisProject(&basis, world, outX, outY, outDist);
 }
 
 int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes) {
@@ -1545,6 +1604,12 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("F camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
+    // Dựng basis 1 lần cho cả vòng actor (thay 2 lần trig/actor như trước).
+    ESPCamBasis basis;
+    if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) {
+        ESPBoxDiagSet("F badFov %.1f", cam.fov);
+        return 0;
+    }
     // Chỉ dùng world từ cache — KHÔNG scan đồng bộ ở đây: hàm này chạy trên
     // timer 4Hz của bridge; scan đầy đủ là việc của ESPEngineRequestScan (queue
     // nền, TTL riêng). Trước đây scan ở đây làm HUD tick kẹt cả giây.
@@ -1565,11 +1630,12 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     static uint64_t s_boxBuf[2048];
     BOOL haveBulk2 = ESPReadWindow(vmMap, actorsData, s_boxBuf, (uint64_t)bulkN2 * 8);
     int n = 0;
-    std::vector<ESPTrackedActor> foundTracked;
+    // Buffer tái sử dụng (thread_local): hàm này chạy 1Hz trên bridge queue,
+    // cấp phát vector mới mỗi lần là rác heap + page fault trong đường vẽ.
+    static thread_local std::vector<ESPTrackedActor> foundTracked;
+    foundTracked.clear();
     // Đếm rớt từng khâu để chẩn đoán B=0 mà P>0 (xem ESPEngineLastBoxDiag).
     uint32_t cEne = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
-    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("F badFov %.1f", cam.fov); return 0; }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     for (uint32_t i = 0; i < scanN && n < maxBoxes; i++) {
         uint64_t actor = 0;
@@ -1582,13 +1648,17 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         }
         if (!ESPIsUserPtr(actor)) continue;
         int team = 0; float hp = 0;
-        if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, NULL)) continue;
+        // Lấy luôn diag: root + StaticMeshComp của hình nhân đã có sẵn từ cửa
+        // sổ 0xF00 mà ESPIsEnemy đã đọc -> khỏi đọc lại 2-3 lần/actor.
+        ESPClassifyDiag dg;
+        if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) continue;
         cEne++;
+        uint64_t rootComp = ESPIsUserPtr(dg.root) ? dg.root : 0;
         if (foundTracked.size() < 64) {
             ESPTrackedActor tr;
             tr.actor = actor;
-            tr.root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-            tr.fallback = (team == ESPTeam_Dummy) ? ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok) : 0;
+            tr.root = rootComp;
+            tr.fallback = (team == ESPTeam_Dummy && ESPIsUserPtr(dg.tMesh)) ? dg.tMesh : 0;
             tr.parent = 0;
             if (tr.root) {
                 BOOL okp = NO;
@@ -1603,8 +1673,8 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         ESPVector pos = {0,0,0};
         BOOL gotPos = NO;
         {
-            uint64_t root = ESPReadU64(vmMap, actor + ESPOff_Actor_RootComponent, &ok);
-            if (ok && ESPIsUserPtr(root)) {
+            uint64_t root = rootComp;
+            if (root) {
                 ESPVector loc = {0,0,0};
                 if (ESPMemoryRead(vmMap, root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
                     fabsf(loc.x) < ESP_POS_BOUND && fabsf(loc.y) < ESP_POS_BOUND && fabsf(loc.z) < ESP_POS_BOUND &&
@@ -1622,9 +1692,9 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             }
         }
         if (!gotPos) {
-            // Hình nhân: target sân tập ở StaticMeshComp 0x4E8
-            uint64_t comp = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
-            if (ok && ESPIsUserPtr(comp)) {
+            // Hình nhân: target sân tập ở StaticMeshComp 0x4E8 (đã có trong diag)
+            uint64_t comp = ESPIsUserPtr(dg.tMesh) ? dg.tMesh : 0;
+            if (comp) {
                 ESPVector v = {0,0,0};
                 if (ESPMemoryRead(vmMap, comp + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
                     fabsf(v.x) < ESP_POS_BOUND && fabsf(v.y) < ESP_POS_BOUND && fabsf(v.z) < ESP_POS_BOUND &&
@@ -1643,12 +1713,12 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         }
         if (!gotPos) { cPos++; continue; }
         float sx = 0, sy = 0, dist = 0;
-        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
+        if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; } // self
         ESPVector head = pos; head.z += 175.0f;
         float hx = 0, hy = 0, hd = 0;
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
-        if (ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+        if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
             topY = fminf(sy, hy);
             bottomY = fmaxf(sy, hy);
             boxH = bottomY - topY;
@@ -1656,7 +1726,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (175.0f / tz) * (screenW * 0.5f / tanHalf);
+            boxH = (175.0f / tz) * basis.k;
             topY = sy - boxH;
             centerX = sx;
         }
@@ -1733,7 +1803,8 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     if (!gameBase || !ds_is_ready()) return 0;
     if (screenW <= 0 || screenH <= 0) return 0;
     // Copy tracked + gen DƯỚI CÙNG 1 lock để bridge biết mẫu này thuộc thế hệ nào.
-    std::vector<ESPTrackedActor> tracked;
+    // thread_local: refresh chạy 60Hz nên giữ capacity, không cấp phát mỗi frame.
+    static thread_local std::vector<ESPTrackedActor> tracked;
     {
         std::lock_guard<std::mutex> lk(g_espClassifyMutex);
         tracked = g_espTracked;
@@ -1747,8 +1818,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
-    float tanHalf = tanf(cam.fov * 3.141592653589793f / 360.0f);
-    if (!(tanHalf > 0.05f && tanHalf < 5.0f)) { ESPBoxDiagSet("R badFov %.1f", cam.fov); return 0; }
+    // Dựng basis view-projection 1 lần cho cả danh sách tracked (không trig/actor).
+    ESPCamBasis basis;
+    if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) {
+        ESPBoxDiagSet("R badFov %.1f", cam.fov);
+        return 0;
+    }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
     for (int i = 0; i < maxBoxes; i++) {
         outBoxes[i] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
@@ -1771,12 +1846,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         ESPVector pos = {0,0,0};
         if (!ESPTrackedPos(vmMap, tr, &pos)) { cPos++; continue; }
         float sx = 0, sy = 0, dist = 0;
-        if (!ESPWorldToScreen(pos, cam, screenW, screenH, &sx, &sy, &dist)) { cW2s++; continue; }
+        if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }
         ESPVector head = pos; head.z += 175.0f;
         float hx = 0, hy = 0, hd = 0;
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
-        if (ESPWorldToScreen(head, cam, screenW, screenH, &hx, &hy, &hd)) {
+        if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
             topY = fminf(sy, hy);
             bottomY = fmaxf(sy, hy);
             boxH = bottomY - topY;
@@ -1784,7 +1859,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (175.0f / tz) * (screenW * 0.5f / tanHalf);
+            boxH = (175.0f / tz) * basis.k;
             topY = sy - boxH;
             centerX = sx;
         }

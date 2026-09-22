@@ -1507,7 +1507,7 @@ static void ds_esp_ensure_orientation_observer(void) {
 // PUBG Mobile luôn là game màn hình ngang (Landscape), không bao giờ là Portrait.
 // Mặc định luôn là LandscapeRight (hướng phổ biến nhất khi cầm máy chơi game).
 static int g_espLastLandscape = UIInterfaceOrientationLandscapeRight; // chỉ chạm từ bridge queue
-static int ds_esp_game_orientation(void) {
+static int ds_esp_game_orientation_uncached(void) {
     ds_esp_ensure_orientation_observer();
 
     if (g_espOrientationObserver) {
@@ -1554,6 +1554,25 @@ static int ds_esp_game_orientation(void) {
     }
 
     return UIInterfaceOrientationLandscapeRight;
+}
+
+// Cache 1s: hàm này trước đây chạy MỖI tick 60Hz, mà nhánh đầu của nó là
+// -[FBSOrientationObserver activeInterfaceOrientation] (XPC sang FrontBoard)
+// và nhánh sau là BKSGetCurrentDeviceOrientation (BackBoard) — gọi 60 lần/giây
+// là tự bóp nhịp vẽ (mỗi lần vài trăm µs - ms trên main thread SpringBoard).
+// Hướng máy chỉ đổi khi user xoay, và handler của FBSOrientationObserver đã
+// cập nhật g_foregroundOrientation ngay khi có thay đổi -> 1s là quá đủ.
+static int ds_esp_game_orientation(void) {
+    static CFAbsoluteTime s_orientAt = 0;
+    static int s_orientVal = UIInterfaceOrientationUnknown;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (s_orientVal != UIInterfaceOrientationUnknown && now - s_orientAt < 1.0) {
+        return s_orientVal;
+    }
+    int o = ds_esp_game_orientation_uncached();
+    s_orientAt = now;
+    s_orientVal = o;
+    return o;
 }
 
 // Poll orientation foreground từ SpringBoard (fail-safe: selector lạ/không
@@ -2269,7 +2288,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "taskport1"
+#define DS_ESP_BUILD_TAG "smooth2"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2389,7 +2408,7 @@ static void ds_esp_tick(void) {
         }
         static ESPBox2D s_boxes[ESPOverlayMaxBoxes];
         static CFAbsoluteTime s_lastRefresh = 0;
-        static CFAbsoluteTime s_lastFullScan = 0;
+        static CFAbsoluteTime s_lastRescueScan = 0;
         static BOOL s_zeroHidden = NO;
         static CFAbsoluteTime s_lastEnsureFailLog = 0;
         static CFAbsoluteTime s_lastPerfLog = 0;
@@ -2423,12 +2442,21 @@ static void ds_esp_tick(void) {
             static ESPBox2D rawBoxes[32];
             int rawCount = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
                                                  rawBoxes, 32, &gen);
-            if (rawCount == 0 && (now2 - s_lastFullScan >= 1.0)) {
-                s_lastFullScan = now2;
-                rawCount = ESPEngineBoxes(g_gameBase, landW, landH,
-                                          rawBoxes, 32);
-                if (rawCount > 0) {
-                    gen = ESPEngineTrackedGen();
+            if (rawCount == 0) {
+                // KHÔNG quét đồng bộ ở đây nữa (trước đây: khi rawCount==0 thì
+                // 1 giây/lần gọi ESPEngineBoxes() ngay trên tick 60Hz — mỗi
+                // lần phân loại cả trăm actor, chặn tick hàng chục tới hàng
+                // trăm ms -> box đứng hình đúng nhịp 1 giây, đúng kiểu "giật
+                // giật"). Giờ chỉ ĐẶT LỊCH quét trên queue nền (không block,
+                // TTL gộp lịch); frame sau RefreshBoxes tự ăn tracked mới.
+                ESPEngineRequestScan(g_gameBase);
+                // Cứu cánh hiếm: CHƯA TỪNG có tracked (scan nền chưa xong hoặc
+                // kẹt) thì cho phép 1 lượt quét đồng bộ, tối đa 10s/lần — để
+                // không bao giờ rơi vào cảnh không box nào mà cũng không quét.
+                if (ESPEngineTrackedGen() == 0 && now2 - s_lastRescueScan >= 10.0) {
+                    s_lastRescueScan = now2;
+                    rawCount = ESPEngineBoxes(g_gameBase, landW, landH, rawBoxes, 32);
+                    if (rawCount > 0) gen = ESPEngineTrackedGen();
                 }
             }
 
@@ -2495,11 +2523,14 @@ static void ds_esp_tick(void) {
                 }
             }
 
-            // Phase 3: Thu thập các box đang active (hysteresis 0.8s để chống chớp tắt)
+            // Phase 3: Thu thập các box đang active. Hysteresis 0.3s: đủ chống
+            // chớp tắt giữa 2 frame hụt, mà không giữ box "đông cứng" ở vị trí
+            // cũ lâu (0.8s ở 60Hz = 48 frame đứng im rồi mới biến mất — nhìn
+            // như box trơi/giật).
             count = 0;
             for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
                 if (s_slots[s].active) {
-                    if (now2 - s_slots[s].lastSeen <= 0.8) {
+                    if (now2 - s_slots[s].lastSeen <= 0.3) {
                         s_boxes[s] = s_slots[s].box;
                         s_boxes[s].visible = 1;
                         count++;

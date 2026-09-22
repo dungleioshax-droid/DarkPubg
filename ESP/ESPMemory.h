@@ -33,6 +33,11 @@ void ESPMemoryFlushPageCache(void);
 // Đếm cache page hit/miss tích luỹ (chẩn đoán perf refresh).
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss);
 
+// Đếm số lần đọc đi đường NHANH (task port + mach_vm_read_overwrite) so với
+// đường kernel (vmmapremotepage). Log box perf in ra 2 số này để biết bản
+// đang chạy có thật sự dùng được task port hay rớt về exploit read.
+void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads);
+
 // Helpers
 static inline uint64_t ESPReadU64(uint64_t vmMap, uint64_t addr, BOOL *ok) {
     uint64_t v = 0;
