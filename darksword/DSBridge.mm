@@ -2013,6 +2013,23 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
     }
+    // Diag 1 lần/process: bounds THỰC của container + window trên SpringBoard
+    // (biết SpringBoard có tự xoay window overlay theo máy không — quyết định
+    // boxes phải map local hay vẽ trực tiếp).
+    {
+        static BOOL s_espBoundsLogged = NO;
+        if (!s_espBoundsLogged) {
+            s_espBoundsLogged = YES;
+            CGRect cb = CGRectZero, wb = CGRectZero;
+            ds_remote_invoke_on_main_result(process, g_espContainer,
+                ds_remote_sel(process, "bounds"), NULL, 0, &cb, sizeof(cb));
+            ds_remote_invoke_on_main_result(process, g_espWindow,
+                ds_remote_sel(process, "bounds"), NULL, 0, &wb, sizeof(wb));
+            ESPLog("espwin: container=%@ window=%@ sb=%@",
+                   NSStringFromCGRect(cb), NSStringFromCGRect(wb),
+                   NSStringFromCGRect(portraitBounds));
+        }
+    }
     // Show/hide window
     BOOL wantHidden = (count <= 0);
     if (wantHidden != g_espWindowHiddenCache) {
@@ -2420,8 +2437,14 @@ static void ds_esp_tick(void) {
 
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
-        // 0.5 frame interval để tránh jitter timer làm skip frame
-        double minInterval = 0.5 / (double)ESP_REFRESH_HZ;
+        // 0.5 frame interval để tránh jitter timer làm skip frame.
+        // Chưa có task port: reads đi đường exploit đắt (~ms/read) -> refresh
+        // kernel CHẬM LẠI 15Hz (đủ cho ngoại suy bám), present/lerp giữ 60Hz
+        // nên mắt vẫn mượt. Có port: refresh full 60Hz. Đây là van chống quá
+        // tải kernel/SpringBoard gây respring khi port chưa bật.
+        double minInterval = (ESPGameTaskPort() != MACH_PORT_NULL)
+            ? 0.5 / (double)ESP_REFRESH_HZ
+            : 1.0 / (double)ESP_POS_READ_HZ;
 
         uint64_t gen = 0;
         int count = 0;

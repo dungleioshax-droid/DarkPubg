@@ -295,18 +295,25 @@ BOOL ESPGameTaskEnsure(void) {
         }
         uint32_t cs = ds_kread32(csAddr);
         if (!(cs & kCSGetTaskAllow)) {
-            uint32_t patched = (cs | kCSGetTaskAllow | kCSDebugged) &
-                               ~(kCSHard | kCSKill | kCSRestrict | kCSRequireLV);
-            ds_kwrite32(csAddr, patched);
-            uint32_t cs2 = ds_kread32(csAddr);
-            ESPLog("gametask: csflags 0x%x -> 0x%x @0x%llx", cs, cs2,
-                   (unsigned long long)csAddr);
-            if (!(cs2 & kCSGetTaskAllow)) {
-                // Ghi không dính (vùng bị bảo vệ / sai chỗ) -> lần sau tìm lại.
-                ESPLog("gametask: csflags write did not stick, forgetting offset");
-                ESPTaskForgetCSFlags();
-                g_taskRetryAt = now + 30.0;
-                return NO;
+            if (g_csInRO) {
+                // proc_ro là READ-ONLY (KTRR): ghi không dính + có thể gây
+                // panic/respring -> TUYỆT ĐỐI không ghi. Chỉ thử task_for_pid
+                // trực tiếp bên dưới (có entitlement thì vẫn qua).
+                ESPLog("gametask: csflags in proc_ro (read-only), skip patch");
+            } else {
+                uint32_t patched = (cs | kCSGetTaskAllow | kCSDebugged) &
+                                   ~(kCSHard | kCSKill | kCSRestrict | kCSRequireLV);
+                ds_kwrite32(csAddr, patched);
+                uint32_t cs2 = ds_kread32(csAddr);
+                ESPLog("gametask: csflags 0x%x -> 0x%x @0x%llx", cs, cs2,
+                       (unsigned long long)csAddr);
+                if (!(cs2 & kCSGetTaskAllow)) {
+                    // Ghi không dính (vùng bị bảo vệ / sai chỗ) -> lần sau tìm lại.
+                    ESPLog("gametask: csflags write did not stick, forgetting offset");
+                    ESPTaskForgetCSFlags();
+                    g_taskRetryAt = now + 30.0;
+                    return NO;
+                }
             }
         }
         task = MACH_PORT_NULL;
