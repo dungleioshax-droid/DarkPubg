@@ -43,6 +43,13 @@ static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 // (+1 port) trong kernel. Quét vài trăm actor x ~8 field là hàng nghìn vòng
 // -> app bị Jetsam kill giữa lúc quét (scan đứng ~50%). Đọc 1 cửa sổ 0xF00
 // byte chỉ còn 1-2 vòng cho mỗi actor.
+//
+// Cửa sổ này đi qua PAGE CACHE của ESPMemory (không phải ESPReadWindow map-rồi-
+// nhả từng lần): 0xF00 < 1 page nên nó nằm gọn trong page đầu của actor, và
+// page đó sau lần đầu ở lại cache (256 slot, LRU). Log thực tế trước đây:
+// quét đầy đủ mất ~10s (132 actor x 1 vòng map+refcount+dealloc); sau khi dùng
+// cache thì các lượt quét sau chỉ còn memcpy — scan đầy đủ không còn là cú
+// giật 10s, và kernel cũng bớt hàng nghìn vòng map/refcount mỗi phút.
 #define ESP_ACTOR_WINDOW 0xF00
 // Bound sanity cho tọa độ world (cm): map PUBG origin ở góc nên tọa độ tới
 // ~800.000cm (log thực tế cam x=835.589). Bound cũ 300.000 loại nhầm vị trí
@@ -106,7 +113,8 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
     f->team = INT_MIN;
     if (!ESPIsUserPtr(actor)) return;
     uint8_t win[ESP_ACTOR_WINDOW];
-    if (ESPReadWindow(vmMap, actor, win, sizeof(win))) {
+    // ESPMemoryRead (page cache) chứ không ESPReadWindow (map+dealloc mỗi lần).
+    if (ESPMemoryRead(vmMap, actor, win, sizeof(win))) {
         f->window = YES;
         f->vtable = ESPWinU64(win, 0x0);
         f->hasVtable = YES;
@@ -1761,9 +1769,19 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
 // ComponentToWorld của fallback (hình nhân), rồi ReplicatedMovement.
 static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *out) {
     if (!tr || !out) return NO;
-    if (tr->root && ESPIsUserPtr(tr->root)) {
+    // Lượt scan ăn VERDICT CACHE (`r=-3`, log `w=0`) không đọc cửa sổ actor nên
+    // tracked có thể thiếu root/fallback -> trước đây refresh fail hết
+    // (log thực tế: "REFRESH-ZERO: trk=4 hid=0 pos=4") và box tắt ngóm tới lượt
+    // scan đầy đủ kế tiếp (~10s). Đọc bù 1 lần ở đây rẻ hơn nhiều so với mất box.
+    uint64_t rootComp = tr->root;
+    if (!rootComp || !ESPIsUserPtr(rootComp)) {
+        BOOL okr = NO;
+        uint64_t r = ESPReadU64(vmMap, tr->actor + ESPOff_Actor_RootComponent, &okr);
+        rootComp = (okr && ESPIsUserPtr(r)) ? r : 0;
+    }
+    if (rootComp && ESPIsUserPtr(rootComp)) {
         ESPVector loc = {0,0,0};
-        if (ESPMemoryRead(vmMap, tr->root + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
+        if (ESPMemoryRead(vmMap, rootComp + ESPOff_Scene_RelativeLocation, &loc, sizeof(loc)) &&
             fabsf(loc.x) < ESP_POS_BOUND && fabsf(loc.y) < ESP_POS_BOUND && fabsf(loc.z) < ESP_POS_BOUND &&
             (loc.x != 0 || loc.y != 0 || loc.z != 0)) {
             // Parent đã nhớ lúc scan: ==0 thì bỏ hẳn parent read (đa số root
@@ -1780,9 +1798,18 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
             return YES;
         }
     }
-    if (tr->fallback && ESPIsUserPtr(tr->fallback)) {
+    // Hình nhân: StaticMeshComp có thể cũng chưa biết (scan ăn cache) -> đọc bù.
+    // CHỈ thử cho kind 3: với character thường, offset 0x4E8 là field khác nên
+    // có thể ra pointer rác (dù ESPIsUserPtr + bound vẫn chặn phần lớn).
+    uint64_t fb = tr->fallback;
+    if ((!fb || !ESPIsUserPtr(fb)) && tr->kind == 3) {
+        BOOL okf = NO;
+        uint64_t m = ESPReadU64(vmMap, tr->actor + ESPOff_Target_Mesh, &okf);
+        fb = (okf && ESPIsUserPtr(m)) ? m : 0;
+    }
+    if (fb && ESPIsUserPtr(fb)) {
         ESPVector v = {0,0,0};
-        if (ESPMemoryRead(vmMap, tr->fallback + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
+        if (ESPMemoryRead(vmMap, fb + ESPOff_Comp_ComponentToWorld + ESPOff_Transform_Translation, &v, sizeof(v)) &&
             fabsf(v.x) < ESP_POS_BOUND && fabsf(v.y) < ESP_POS_BOUND && fabsf(v.z) < ESP_POS_BOUND &&
             (v.x != 0 || v.y != 0 || v.z != 0)) {
             *out = v;
@@ -1939,7 +1966,13 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
         if (nowLog - s_lastZeroRefreshLog >= 2.0) {
             s_lastZeroRefreshLog = nowLog;
-            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u",
+            // Có tracked mà không ra box nào = đường đọc bắt đầu fail (thường là
+            // vmmapremotepage hết memory entry / mapping héo sau lượt quét nặng —
+            // log thực tế: ngay sau lượt scan `win=0/2` thì pos=4 hết). Xả page
+            // cache (nhả toàn bộ mapping + port) để map lại từ đầu, thay vì "chết"
+            // tới lượt scan đầy đủ kế tiếp (~10s).
+            ESPMemoryFlushPageCache();
+            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u (flushed cache)",
                    tracked.size(), cHid, cPos, cW2s, cSelf, cH);
         }
     }
