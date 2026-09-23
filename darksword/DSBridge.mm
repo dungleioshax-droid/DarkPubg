@@ -119,6 +119,7 @@ static void ds_set_error(NSString *message) {
 #import "ESPConfig.h"
 #import "ESPOverlay.h"
 #import "ESPMemory.h"
+#import "ESPProvider.h"
 #import "ESPTask.h"
 #import "ESPLog.h"
 
@@ -189,7 +190,7 @@ static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
 static int g_espRectsCap = 0;            // số CGRect buffer chứa được
-static BOOL g_espPathDisabled = NO;      // fail nhiều lần -> quay lại vẽ từng box
+static BOOL g_espPathDisabled = YES;     // CAShapeLayer batching crashes SpringBoard; default to stable per-box views
 static unsigned long g_espPathCalls = 0;
 static unsigned long g_espPathBoxes = 0;
 static unsigned long g_espPathFails = 0;
@@ -2640,7 +2641,9 @@ static void ds_esp_tick(void) {
             didRefresh = YES;
             // Đặt lịch quét nền MỖI tick (hàm tự gộp theo TTL) + discover
             // địch mới ~120ms (không đợi lượt quét đầy đủ 5-6s).
+            ESPProviderBeginRead();
             ESPEngineDiscoverTick(g_gameBase);
+            ESPProviderEndRead();
             ESPEngineRequestScan(g_gameBase);
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
@@ -2653,8 +2656,10 @@ static void ds_esp_tick(void) {
             float landH = (float)MIN(CGRectGetWidth(sbBounds), CGRectGetHeight(sbBounds));
             gen = 0;
             static ESPBox2D rawBoxes[32];
+            ESPProviderBeginRead();
             int rawCount = ESPEngineRefreshBoxes(g_gameBase, landW, landH,
                                                  rawBoxes, 32, &gen);
+            ESPProviderEndRead();
             if (rawCount == 0) {
                 // KHÔNG quét đồng bộ ở đây nữa (trước đây: khi rawCount==0 thì
                 // 1 giây/lần gọi ESPEngineBoxes() ngay trên tick 60Hz — mỗi
@@ -2662,14 +2667,18 @@ static void ds_esp_tick(void) {
                 // trăm ms -> box đứng hình đúng nhịp 1 giây, đúng kiểu "giật
                 // giật"). Giờ chỉ ĐẶT LỊCH quét trên queue nền (không block,
                 // TTL gộp lịch); frame sau RefreshBoxes tự ăn tracked mới.
+                ESPProviderBeginRead();
                 ESPEngineDiscoverTick(g_gameBase);
+                ESPProviderEndRead();
                 ESPEngineRequestScan(g_gameBase);
                 // Cứu cánh hiếm: CHƯA TỪNG có tracked (scan nền chưa xong hoặc
                 // kẹt) thì cho phép 1 lượt quét đồng bộ, tối đa 10s/lần — để
                 // không bao giờ rơi vào cảnh không box nào mà cũng không quét.
                 if (ESPEngineTrackedGen() == 0 && now2 - s_lastRescueScan >= 10.0) {
                     s_lastRescueScan = now2;
+                    ESPProviderBeginRead();
                     rawCount = ESPEngineBoxes(g_gameBase, landW, landH, rawBoxes, 32);
+                    ESPProviderEndRead();
                     if (rawCount > 0) gen = ESPEngineTrackedGen();
                 }
             }
@@ -2829,9 +2838,12 @@ static void ds_esp_tick(void) {
             }
             if (now2 - s_lastPerfLog > 10.0) {
                 s_lastPerfLog = now2;
-                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu)",
+                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu",
                        ESPEngineBoxPerfText(), count, g_espPathLayer ? 1 : 0,
-                       g_espPathCalls, g_espPathBoxes, g_espPathFails);
+                       g_espPathCalls, g_espPathBoxes, g_espPathFails,
+                       ESPProviderIsDegraded() ? 1 : 0,
+                       (unsigned long long)ESPProviderFailureCount(),
+                       (unsigned long long)ESPProviderFullScanCount());
             }
         }
 
@@ -3081,6 +3093,7 @@ static void ds_finish_disable(void) {
     RemoteCall *process = g_springBoard;
     g_springBoard = nil;
     ESPMemoryFlushPageCache(); // nhả mapping + port của world cũ
+    ESPProviderShutdown(); // reset degraded/counters của provider
     g_hudActive.store(false);
     if (process) {
         @try {

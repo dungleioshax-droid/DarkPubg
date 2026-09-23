@@ -7,6 +7,7 @@
 #import "ESPEngine.h"
 #import "ESPOffsets.h"
 #import "ESPMemory.h"
+#import "ESPProvider.h"
 #import "ESPTask.h"
 #import "ESPConfig.h"
 #import "ESPName.h"
@@ -255,6 +256,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
         g_espTrackGen++; // mẫu refresh cũ hết hiệu lực nội suy
         ESPGameTaskReset(); // world mới => task port cũ héo, resolve lại
+        ESPProviderShutdown(); // world mới => trạng thái provider mới
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;
@@ -1054,12 +1056,16 @@ void ESPEngineRequestScan(uint64_t gameBase) {
     dispatch_async(ESPScanQueue(), ^{
         @autoreleasepool {
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+            ESPProviderBeginRead();
             ESPScanResult r = ESPEngineScan(gameBase);
+            ESPProviderEndRead();
+            ESPProviderNoteFullScan();
             // World đổi (map/trận mới): page cache còn giữ mapping của world
             // cũ -> xả để nhả mapping + port, và tránh đọc page héo.
             static uint64_t s_lastCacheWorld = 0;
             if (r.world && r.world != s_lastCacheWorld) {
                 if (s_lastCacheWorld) ESPMemoryFlushPageCache();
+                ESPProviderShutdown(); // world mới => provider reset
                 s_lastCacheWorld = r.world;
             }
             g_espCache = r;
@@ -1430,7 +1436,8 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
     }
 
     // Pass 2: phân loại unknown theo budget + round-robin.
-    int budget = ESP_DISCOVER_BUDGET;
+    // Degraded: budget nhỏ lại để nhẹ kernel (port DarkSwordMemoryProvider).
+    int budget = ESPProviderDiscoverBudget();
     int unknownTried = 0;
     if (!unknownIdx.empty()) {
         uint32_t off = s_discOff % (uint32_t)unknownIdx.size();

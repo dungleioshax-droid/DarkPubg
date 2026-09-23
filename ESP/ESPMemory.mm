@@ -6,6 +6,7 @@
 #import "ESPMemory.h"
 #import "ESPConfig.h"
 #import "ESPTask.h"
+#import "ESPProvider.h"
 #import <mach/mach.h>
 #include <atomic>
 #include <mutex>
@@ -179,7 +180,9 @@ static BOOL ESPPageCacheGet(uint64_t vmMap, uint64_t pageStart,
     uint64_t chunkPages = 1;
     BOOL triedBulk = NO;
     uint64_t chunkStartAligned = pageStart & ~(uint64_t)(ESP_CHUNK_PAGES * PAGE_SIZE - 1);
-    if (s_liveBytes < ESP_MAX_LIVE_BYTES) {
+    // Degraded (đọc kernel đang fail hàng loạt): bỏ bulk-map, chỉ map 1 page
+    // cho an toàn như DarkSwordMemoryProvider.
+    if (ESPProviderShouldBulkMap() && s_liveBytes < ESP_MAX_LIVE_BYTES) {
         uint64_t fit = ESPChunkPageCount(vmMap, chunkStartAligned);
         if (fit > 1) {
             triedBulk = YES;
@@ -252,6 +255,9 @@ void ESPMemoryFlushPageCache(void) {
 }
 
 BOOL ESPMemoryFlushPageCacheIfIdle(void) {
+    // Trong transaction đọc: hoãn xả tới EndRead thay vì xả giữa lượt quét.
+    if (ESPProviderDepth() > 0) { ESPProviderDeferFlush(); return NO; }
+    (void)ESPProviderTakeFlushRequest(); // xả luôn phần đã hoãn (nếu có)
     std::unique_lock<std::mutex> readLock(s_espReadMutex, std::try_to_lock);
     if (!readLock.owns_lock()) return NO; // scan nền đang map page — để lần sau
     ESPPageCacheFlushLocked();
@@ -329,7 +335,9 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     s_kernelReads++;
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
     s_pageCacheClock++;
-    return ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
+    BOOL okr = ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
+    ESPProviderNoteKernelRead(okr);
+    return okr;
 }
 
 // 1 page là 4K hoặc 16K tuỳ build — chặn trên cho buffer trên stack.
@@ -347,7 +355,9 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     // 137 actor) — giờ cụm actor gần nhau chỉ tốn 1 lần map, lượt sau là memcpy.
     std::lock_guard<std::mutex> readLock(s_espReadMutex);
     s_pageCacheClock++;
-    return ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
+    BOOL okr = ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
+    ESPProviderNoteKernelRead(okr);
+    return okr;
 }
 #else
 // Simulator / non-DarkSword: không có kernel RW — stub để link được.

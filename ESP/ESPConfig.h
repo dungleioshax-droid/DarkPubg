@@ -37,6 +37,15 @@
 // MỖI frame (60Hz, box bám sát, không ngoại suy). Giá trị 15Hz chỉ áp dụng cho
 // đường kernel exploit (map page / đọc từng field).
 
+// Ngưỡng degraded của ESPProvider (port DarkSwordMemoryProvider của Fl0rkFF):
+// bao nhiêu lần đọc kernel fail LIÊN TIẾP thì vào degraded (bỏ bulk-map,
+// discover budget nhỏ, reset task port + xả cache héo 1 lần).
+#define ESP_PROVIDER_DEGRADE_FAILS 32
+// Bao nhiêu lần đọc kernel OK liên tiếp khi đang degraded thì hồi phục.
+#define ESP_PROVIDER_RECOVER_READS 1024
+// Discover budget khi degraded (thường = ESP_DISCOVER_BUDGET).
+#define ESP_PROVIDER_DEGRADED_BUDGET 4
+
 // Nhịp cập nhật VỊ TRÍ label mét (Hz). Box phải bám 60Hz, còn chữ mét lệch vài
 // chục ms không nhìn ra; mỗi setCenter/box/frame là phần lớn số remote call còn
 // lại sau khi box đã đi qua path layer gộp.
