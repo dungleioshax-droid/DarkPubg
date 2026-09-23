@@ -1426,6 +1426,13 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
                                     &argument, 1);
 }
 
+static BOOL ds_remote_set_transform_on_main(RemoteCall *process, uint64_t target,
+                                            CGAffineTransform value) {
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, "setTransform:"),
+                                    &argument, 1);
+}
+
 // Map 1 điểm từ hệ game-landscape sang hệ portrait-window, quay quanh tâm
 // màn hình. LandscapeLeft = R(-90°), LandscapeRight = R(+90°) — đã verify
 // bằng vector: game top-left (0,0) ra đúng physical top edge cả 2 chiều.
@@ -1967,10 +1974,10 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 1);
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
         ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
-        // Bounds ban đầu cho label: UILabel init ra bounds ZERO -> chữ mét
-        // vô hình dù setText thành công. Đặt khung ngang 60x14 ngay từ đầu
-        // (update sau chỉ setFrame theo vị trí).
-        ds_remote_set_rect_on_main(process, lb, "setFrame:", CGRectMake(0, 0, 60.0, 14.0));
+        // Bounds ngang 80x14: chữ đọc dọc local X. Transform ±90° sẽ set
+        // ở ds_esp_overlay_update khi mapOrient landscape (setBounds+setCenter).
+        ds_remote_set_rect_on_main(process, lb, "setBounds:", CGRectMake(0, 0, 80.0, 14.0));
+        ds_remote_set_rect_on_main(process, lb, "setFrame:", CGRectMake(0, 0, 80.0, 14.0));
         
         uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
         ds_remote_set_double_on_main(process, lbLayer, "setSpeed:", 999.0);
@@ -2082,6 +2089,21 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     }
     if (mapOrient != g_espLastMapOrient) {
         g_espLastMapOrient = mapOrient;
+        // Chữ mét phải nằm NGANG theo game. Hệ portrait + map ±90° khiến
+        // trục width của label thành trục dọc trên màn hình landscape — phải
+        // xoay label ±90° (local X -> trục ngang vật lý). Portrait/identity:
+        // transform identity.
+        CGFloat labelAngle = 0;
+        if (mapOrient == UIInterfaceOrientationLandscapeLeft) labelAngle = (CGFloat)-M_PI_2;
+        else if (mapOrient == UIInterfaceOrientationLandscapeRight) labelAngle = (CGFloat)M_PI_2;
+        CGAffineTransform labelT = CGAffineTransformMakeRotation(labelAngle);
+        for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+            if (g_espLabels[i]) {
+                ds_remote_set_transform_on_main(process, g_espLabels[i], labelT);
+                ds_remote_set_rect_on_main(process, g_espLabels[i], "setBounds:",
+                                           CGRectMake(0, 0, 80.0, 14.0));
+            }
+        }
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
 
@@ -2103,14 +2125,16 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         // sang hệ container (chỉ xoay khi scene portrait).
         CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
                                          landW, landH, winCenter, mapOrient);
-        // Label mét LUÔN giữ ngang: map anchor top-center của box, dựng rect
-        // ngang quanh anchor (không map cả rect label -> không xoay chữ).
-        CGPoint anchor = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, b.y),
-                                          landW, landH, winCenter, mapOrient);
-        CGFloat mappedW = fullBox.size.width;
-        if (!(mappedW >= 4.0)) mappedW = b.w;
-        CGRect lf = CGRectMake(anchor.x - (mappedW + 40.0f) * 0.5f,
-                               anchor.y - 16.0f, mappedW + 40.0f, 14.0f);
+        // Label mét: center = top-center của box đã map. Bounds ngang 80x14
+        // (text đọc dọc local X). Transform ±90° khi map landscape đã set ở
+        // block mapOrient — local X thành trục ngang vật lý -> chữ nằm ngang
+        // theo game. KHÔNG dùng setFrame khi có transform (frame chưa map).
+        CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
+        CGPoint labelCenter = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
+                                               landW, landH, winCenter, mapOrient);
+        CGFloat labelHalfW = 40.0f; // bounds 80x14
+        CGRect lf = CGRectMake(labelCenter.x - labelHalfW, labelCenter.y - 7.0f,
+                               labelHalfW * 2.0f, 14.0f);
 
         BOOL same = g_espRectValid[i] && strcmp(g_espLastDist[i], distTxt) == 0;
         if (same) {
@@ -2138,7 +2162,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             ds_remote_set_text_on_main(process, g_espLabels[i], dist);
             snprintf(g_espLastDist[i], sizeof(g_espLastDist[i]), "%s", distTxt);
         }
-        ds_remote_set_rect_on_main(process, g_espLabels[i], "setFrame:", lf);
+        // Với transform: setCenter trên bounds đã set ở block mapOrient.
+        // Không transform (portrait): setCenter vẫn đúng với bounds 80x14.
+        ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
 
         g_espLastRect[i][0] = fullBox;
         for (int e = 1; e < 4; e++) g_espLastRect[i][e] = CGRectZero;
@@ -2312,7 +2338,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "respring1"
+#define DS_ESP_BUILD_TAG "meter1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
