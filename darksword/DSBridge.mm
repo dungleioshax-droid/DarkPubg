@@ -1437,6 +1437,12 @@ static BOOL ds_remote_set_rect_on_main(RemoteCall *process, uint64_t target,
 
 static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
                                         const char *selectorName, CGPoint value) {
+    // Như set_rect: CGPoint NaN/Inf (w2s chia 0 lúc khởi động) vào setCenter:
+    // -> CoreAnimation assert trong SpringBoard -> respring. Bỏ remote call.
+    // (Hở từ bản meter1: trước đó label đi setFrame đã sanitize.)
+    if (!isfinite(value.x) || !isfinite(value.y)) {
+        return NO;
+    }
     DSRemoteArgument argument = { &value, sizeof(value) };
     return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
                                     &argument, 1);
@@ -2486,7 +2492,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "meter1"
+#define DS_ESP_BUILD_TAG "nanfix1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
