@@ -37,6 +37,11 @@
 // MỖI frame (60Hz, box bám sát, không ngoại suy). Giá trị 15Hz chỉ áp dụng cho
 // đường kernel exploit (map page / đọc từng field).
 
+// Nhịp cập nhật VỊ TRÍ label mét (Hz). Box phải bám 60Hz, còn chữ mét lệch vài
+// chục ms không nhìn ra; mỗi setCenter/box/frame là phần lớn số remote call còn
+// lại sau khi box đã đi qua path layer gộp.
+#define ESP_OVERLAY_LABEL_HZ 15
+
 // Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
 // NỀN nên CADisplayLink không tick được; đây là tương đương vsync gần nhất.
 #define ESP_PRESENT_HZ 60

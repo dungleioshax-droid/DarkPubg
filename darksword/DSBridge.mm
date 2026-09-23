@@ -182,6 +182,21 @@ static char g_espLastDist[ESPOverlayMaxBoxes][16];
 static BOOL g_espRectValid[ESPOverlayMaxBoxes] = {NO};
 static CGRect g_espLastContainerBounds = CGRectZero;
 static int g_espLastMapOrient = UIInterfaceOrientationUnknown;
+
+// Batch path layer: 1 CAShapeLayer vẽ MỌI box bằng 1 CGPath dựng trong process
+// đích -> ~5 remote call/frame BẤT KỂ số box (thay vì ~2 × N).
+static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
+static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
+static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
+static int g_espRectsCap = 0;            // số CGRect buffer chứa được
+static BOOL g_espPathDisabled = NO;      // fail nhiều lần -> quay lại vẽ từng box
+static unsigned long g_espPathCalls = 0;
+static unsigned long g_espPathBoxes = 0;
+static unsigned long g_espPathFails = 0;
+// Label mét: vị trí chỉ cập nhật ở ESP_OVERLAY_LABEL_HZ (chữ lệch vài chục ms
+// không thấy được, còn 1 setCenter/box/frame là phần lớn IPC còn lại).
+static CGPoint g_espLastLabelCenter[ESPOverlayMaxBoxes];
+static CFAbsoluteTime g_espLastLabelAt[ESPOverlayMaxBoxes] = {0};
 static dispatch_source_t g_rateTimer = nil;
 // Timer riêng cho ESP overlay 20Hz (box mượt) — tách khỏi timer HUD text 1Hz.
 static dispatch_source_t g_espTimer = nil;
@@ -1816,8 +1831,80 @@ static const NSInteger kDSESPOverlayTag = 0x45535042; // "ESPB"
 static const double kDSESPWindowLevel = kDSHUDWindowLevel - 10.0;
 static const CGFloat kDSESPBorder = 2.0;
 
+// ---------------------------------------------------------------------------
+// Batch path: vẽ mọi box bằng MỘT CAShapeLayer + MỘT CGPath.
+// Chi phí mỗi frame = 5 remote call bất kể số box:
+//   remote_write (mảng CGRect) -> CGPathCreateMutable -> CGPathAddRects
+//   -> setPath: -> CGPathRelease (path cũ)
+// CoreGraphics/libSystem nằm trong dyld shared cache nên được map ở CÙNG địa
+// chỉ trên mọi process -> địa chỉ local dùng được cho process đích (đúng cách
+// RemoteCall gọi thread_set_exception_ports / pthread_exit).
+// ---------------------------------------------------------------------------
+static void *ds_remote_system_symbol(const char *name) {
+    static NSMutableDictionary<NSString *, NSNumber *> *cache = nil;
+    if (!name) return NULL;
+    if (!cache) cache = [NSMutableDictionary dictionary];
+    NSString *key = [NSString stringWithUTF8String:name];
+    if (!key) return NULL;
+    NSNumber *hit = cache[key];
+    if (hit) return (void *)(uintptr_t)hit.unsignedLongLongValue;
+    void *addr = dlsym(RTLD_DEFAULT, name);
+    if (addr) cache[key] = @((uint64_t)(uintptr_t)addr);
+    return addr;
+}
+
+static void ds_esp_path_clear(RemoteCall *process) {
+    if (g_espPathObj) {
+        void *releaseSym = ds_remote_system_symbol("CGPathRelease");
+        if (process && process.trojanMem && releaseSym) {
+            DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
+        }
+        g_espPathObj = 0;
+    }
+    if (g_espPathLayer && process && process.trojanMem) {
+        remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), 0, 0, 0, 0);
+    }
+}
+
+static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
+    if (!process || !process.trojanMem || !g_espPathLayer || !rects || count <= 0) return NO;
+    size_t bytes = (size_t)count * sizeof(CGRect);
+    if (!g_espRectsAddr || g_espRectsCap < count) {
+        g_espRectsAddr = 0;
+        g_espRectsCap = 0;
+        void *mallocSym = ds_remote_system_symbol("malloc");
+        if (!mallocSym) return NO;
+        uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)bytes);
+        if (!addr) return NO;
+        g_espRectsAddr = addr;
+        g_espRectsCap = count;
+    }
+    if (![process remote_write:g_espRectsAddr from:rects size:(uint64_t)bytes]) return NO;
+    void *createSym = ds_remote_system_symbol("CGPathCreateMutable");
+    void *addRectsSym = ds_remote_system_symbol("CGPathAddRects");
+    void *releaseSym = ds_remote_system_symbol("CGPathRelease");
+    if (!createSym || !addRectsSym) return NO;
+    // CGPathCreateMutable(void): tham số thừa trong x0 bị bỏ qua (không thể gọi
+    // remote call với 0 arg vì macro remote tạo mảng args rỗng).
+    uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
+    if (!path) return NO;
+    DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0, g_espRectsAddr, (uint64_t)count);
+    if (!remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, 0, 0, 0)) {
+        if (releaseSym) DSRemoteArbCallWithTimeout(1, process, releaseSym, path);
+        return NO;
+    }
+    if (g_espPathObj && releaseSym) {
+        DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
+    }
+    g_espPathObj = path;
+    g_espPathCalls += 5;
+    g_espPathBoxes += (unsigned long)count;
+    return YES;
+}
+
 static void ds_esp_overlay_hide(RemoteCall *process) {
     if (!process || !g_espWindow) return;
+    ds_esp_path_clear(process);
     if (!g_espWindowHiddenCache) {
         ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", 1);
         g_espWindowHiddenCache = YES;
@@ -1874,6 +1961,12 @@ static void ds_esp_cleanup_stale(RemoteCall *process) {
 
 static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
+    // Session/process mới: địa chỉ path layer + buffer CGRect cũ không còn dùng
+    // được (object cũ leak như policy HUD).
+    g_espPathLayer = 0;
+    g_espPathObj = 0;
+    g_espRectsAddr = 0;
+    g_espRectsCap = 0;
     if (g_espWindow && g_espContainer) {
         BOOL ok = YES;
         for (int i = 0; i < ESPOverlayMaxBoxes && ok; i++) {
@@ -1987,6 +2080,29 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         g_espHiddenCache[i] = YES;
     }
 
+    // Batch path layer: 1 CAShapeLayer chứa TẤT CẢ box. Khi layer này sống,
+    // các view viền từng box chỉ để fallback (giữ hidden) -> present path
+    // không còn setFrame cho từng box.
+    if (!g_espPathDisabled) {
+        uint64_t shapeClass = ds_remote_class(process, "CAShapeLayer");
+        uint64_t pl = shapeClass ? remote_msg(process, shapeClass, alloc, 0, 0, 0, 0) : 0;
+        if (pl && ds_remote_invoke_noarg_on_main(process, pl, "init")) {
+            uint64_t clearLayer = ds_remote_get_u64_on_main(process, clear, "CGColor");
+            uint64_t redLayer = ds_remote_get_u64_on_main(process, red, "CGColor");
+            if (redLayer) ds_perform_on_springboard_main(process, pl, ds_remote_sel(process, "setStrokeColor:"), redLayer, YES);
+            if (clearLayer) ds_perform_on_springboard_main(process, pl, ds_remote_sel(process, "setFillColor:"), clearLayer, YES);
+            ds_remote_set_double_on_main(process, pl, "setLineWidth:", kDSESPBorder);
+            ds_remote_set_double_on_main(process, pl, "setSpeed:", 999.0);
+            uint64_t containerLayer = ds_remote_get_object_on_main(process, container, "layer");
+            if (containerLayer) ds_perform_on_springboard_main(process, containerLayer, ds_remote_sel(process, "addSublayer:"), pl, YES);
+            g_espPathLayer = pl;
+            ESPLog("esp path layer ON (pid=%d layer=0x%llx)", (int)process.pid, (unsigned long long)pl);
+        } else {
+            g_espPathDisabled = YES;
+            ESPLog("esp path layer FAIL (shape=0x%llx) -> per-box", (unsigned long long)shapeClass);
+        }
+    }
+
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "addSubview:"), container, YES);
     ds_remote_set_u64_on_main(process, window, "setHidden:", 0);
     g_espWindow = window;
@@ -2027,6 +2143,7 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
+    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
     }
@@ -2057,7 +2174,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         // Hide stale boxes once
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
             if (!g_espHiddenCache[i]) {
-                if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
+                if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
                 ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
                 g_espHiddenCache[i] = YES;
             }
@@ -2107,11 +2224,17 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
 
+    // Rect đã map cho path layer (0 = box ẩn -> không vẽ).
+    CGRect s_pathRects[ESPOverlayMaxBoxes];
+    memset(s_pathRects, 0, sizeof(s_pathRects));
+    BOOL s_pathDirty = NO;
+    static int s_pathFailStreak = 0;
+
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
         ESPBox2D b = boxes[i];
         BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
-            if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
+            if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
             g_espHiddenCache[i] = hide;
             if (hide) g_espRectValid[i] = NO;
@@ -2136,40 +2259,64 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         CGRect lf = CGRectMake(labelCenter.x - labelHalfW, labelCenter.y - 7.0f,
                                labelHalfW * 2.0f, 14.0f);
 
-        BOOL same = g_espRectValid[i] && strcmp(g_espLastDist[i], distTxt) == 0;
-        if (same) {
-            CGRect o = g_espLastRect[i][0], w = fullBox;
-            if (fabs(o.origin.x - w.origin.x) > 0.5 || fabs(o.origin.y - w.origin.y) > 0.5 ||
-                fabs(o.size.width - w.size.width) > 0.5 || fabs(o.size.height - w.size.height) > 0.5) {
-                same = NO;
-            }
+        // Box có dịch chuyển? (dùng cho cả đường path lẫn đường per-box)
+        BOOL boxMoved = YES;
+        CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
+        if (g_espRectValid[i]) {
+            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) <= 0.5 &&
+                         fabs(prevBox.origin.y - fullBox.origin.y) <= 0.5 &&
+                         fabs(prevBox.size.width - fullBox.size.width) <= 0.5 &&
+                         fabs(prevBox.size.height - fullBox.size.height) <= 0.5);
         }
-        if (same) {
-            CGRect o = g_espLastRect[i][4], w = lf;
-            if (fabs(o.origin.x - w.origin.x) > 0.5 || fabs(o.origin.y - w.origin.y) > 0.5 ||
-                fabs(o.size.width - w.size.width) > 0.5 || fabs(o.size.height - w.size.height) > 0.5) {
-                same = NO;
-            }
+        s_pathRects[i] = boxMoved ? fullBox : prevBox;
+        if (boxMoved) s_pathDirty = YES;
+        if (!g_espPathLayer && boxMoved) {
+            // Fallback: 1 setFrame cho view viền của box này.
+            ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
         }
-        if (same) continue; // đứng yên: 0 remote call
-
-        // Cập nhật 1 frame duy nhất cho view tổng
-        ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
-        if (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0) {
+        BOOL textChanged = (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0);
+        if (textChanged) {
             NSString *dist = [NSString stringWithUTF8String:distTxt];
             ds_remote_set_text_on_main(process, g_espLabels[i], dist);
             snprintf(g_espLastDist[i], sizeof(g_espLastDist[i]), "%s", distTxt);
         }
         // Với transform: setCenter trên bounds đã set ở block mapOrient.
         // Không transform (portrait): setCenter vẫn đúng với bounds 80x14.
-        ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
+        // Vị trí label chỉ bắn ở ESP_OVERLAY_LABEL_HZ (text đổi thì bắn ngay).
+        BOOL labelMoved = !g_espRectValid[i] ||
+            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 0.5 ||
+            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 0.5;
+        if (labelMoved && (textChanged || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
+            ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
+            g_espLastLabelCenter[i] = labelCenter;
+            g_espLastLabelAt[i] = nowP;
+        }
 
         g_espLastRect[i][0] = fullBox;
         for (int e = 1; e < 4; e++) g_espLastRect[i][e] = CGRectZero;
         g_espLastRect[i][4] = lf;
         g_espRectValid[i] = YES;
+    }
+
+    // Batch: dựng lại toàn bộ path một lần cho MỌI box (5 remote call).
+    if (g_espPathLayer && s_pathDirty) {
+        if (!ds_esp_path_update(process, s_pathRects, (int)ESPOverlayMaxBoxes)) {
+            g_espPathFails++;
+            if (++s_pathFailStreak >= 3) {
+                // Hỏng liên tục -> trả về đường vẽ từng box (an toàn, không để
+                // box biến mất khi path lỗi).
+                s_pathFailStreak = 0;
+                g_espPathDisabled = YES;
+                ds_esp_path_clear(process);
+                g_espPathLayer = 0;
+                for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
+                ESPLog("esp path layer OFF -> per-box (fails=%lu)", g_espPathFails);
+            }
+        } else {
+            s_pathFailStreak = 0;
+        }
     }
 }
 
@@ -2682,7 +2829,9 @@ static void ds_esp_tick(void) {
             }
             if (now2 - s_lastPerfLog > 10.0) {
                 s_lastPerfLog = now2;
-                ESPLog("box perf: %s count=%d", ESPEngineBoxPerfText(), count);
+                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu)",
+                       ESPEngineBoxPerfText(), count, g_espPathLayer ? 1 : 0,
+                       g_espPathCalls, g_espPathBoxes, g_espPathFails);
             }
         }
 
