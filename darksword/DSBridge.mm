@@ -2258,7 +2258,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "fastesp"
+#define DS_ESP_BUILD_TAG "disco1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2489,11 +2489,12 @@ static void ds_esp_tick(void) {
                         break;
                     }
                 }
-                // Ưu tiên 2: Nếu đầy slot, tìm slot cũ nhất đã quá hạn 0.8s
+                // Ưu tiên 2: Nếu đầy slot, tìm slot cũ nhất đã quá hạn 1.0s
+                // (khớp hysteresis Phase 3 — không chiếm slot đang còn hạn).
                 if (bestSlot < 0) {
                     CFAbsoluteTime oldest = now2;
                     for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
-                        if (now2 - s_slots[s].lastSeen > 0.8 && s_slots[s].lastSeen < oldest) {
+                        if (now2 - s_slots[s].lastSeen > 1.0 && s_slots[s].lastSeen < oldest) {
                             oldest = s_slots[s].lastSeen;
                             bestSlot = s;
                         }
@@ -2511,14 +2512,14 @@ static void ds_esp_tick(void) {
                 }
             }
 
-            // Phase 3: Thu thập các box đang active. Hysteresis 0.3s: đủ chống
-            // chớp tắt giữa 2 frame hụt, mà không giữ box "đông cứng" ở vị trí
-            // cũ lâu (0.8s ở 60Hz = 48 frame đứng im rồi mới biến mất — nhìn
-            // như box trơi/giật).
+            // Phase 3: Thu thập các box đang active. Hysteresis 0.5s: đủ chống
+            // chớp tắt giữa 2-3 frame hụt (w2s fail khi địch sát mép màn hình),
+            // mà không giữ box "đông cứng" quá lâu. 0.3s trước đây drop khi
+            // REFRESH-ZERO 1 nhịp -> BOX-ASSIGN lại = nhấp nháy + BOX-JUMP.
             count = 0;
             for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
                 if (s_slots[s].active) {
-                    if (now2 - s_slots[s].lastSeen <= 0.3) {
+                    if (now2 - s_slots[s].lastSeen <= 0.5) {
                         s_boxes[s] = s_slots[s].box;
                         s_boxes[s].visible = 1;
                         count++;

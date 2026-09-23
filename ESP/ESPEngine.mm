@@ -233,6 +233,14 @@ static const char *ESPCameraResolveDiag(void); // định nghĩa ở cụm camer
 static BOOL ESPCameraIsResolved(void);
 static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBase);
 
+// Cooldown Pass 1 discover — file-scope để ESPVerdictResetIfWorldChanged xả
+// theo world (addr tái dùng giữa match không bị kẹt cooldown cũ).
+static std::unordered_map<uint64_t, CFAbsoluteTime> g_espPass1At;
+static void ESPDiscoverResetCooldowns(void) {
+    // Gọi khi ĐÃ giữ g_espClassifyMutex (từ ESPVerdictResetIfWorldChanged).
+    g_espPass1At.clear();
+}
+
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
     std::lock_guard<std::mutex> lk(g_espClassifyMutex);
     if (g_espVerdictWorld != world) {
@@ -250,6 +258,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;
+        ESPDiscoverResetCooldowns();
     }
 }
 
@@ -299,9 +308,16 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         diag->nearChar = -1;
         diag->nearDummy = -1;
     }
-    // Lọc chính mình (local pawn) ngay từ đầu
+    // Lọc chính mình (local pawn) ngay từ đầu. PHẢI set verdict=2: nếu return
+    // không ghi gì, discover nhai lại actor này mỗi 120ms mãi (log unk=1 left=0).
     if (myPawn && actor == myPawn) {
         if (diag) diag->rule = -4;
+        if (g_espVerdict.find(actor) == g_espVerdict.end()) {
+            ESPVerdictSetLocked(actor, 2, INT_MIN);
+            BOOL vtok = NO;
+            uint64_t vtp = ESPReadU64(vmMap, actor, &vtok);
+            if (vtok && vtp) g_espVerdictVt[actor] = vtp;
+        }
         return NO;
     }
     auto vit = g_espVerdict.find(actor);
@@ -445,6 +461,8 @@ check_live:;
     ESPActorFieldsRead(vmMap, actor, &f);
     if ((f.bHidden & 0x1) || (f.bDead & 0x1)) {
         if (diag) diag->rule = -1;
+        // Giữ verdict 1 để khi unhide/revive không cần phân loại lại từ đầu —
+        // nhưng discover sẽ throttle Pass 1 theo cooldown (không spam cls).
         return NO;
     }
     // Lọc chính mình (local pawn)
@@ -452,6 +470,8 @@ check_live:;
         if (diag) diag->rule = -4;
         return NO;
     }
+    // Đồng đội: hạ verdict 1 -> 2 ngay (check_live path).
+    // (Pass ở trên đã set khi team đọc được — đây là safety nếu vào từ nhánh khác.)
     int team = INT_MIN;
     if (f.hasTeam && f.team >= 0 && f.team <= 200000000) {
         team = f.team;
@@ -464,6 +484,11 @@ check_live:;
     // (chỉ loại theo bHidden/bDead).
     if (myTeam != INT_MIN && team != INT_MIN && team == myTeam && team != ESPTeam_Dummy) {
         if (diag) diag->rule = -4; // đồng đội
+        // Hạ verdict 1 -> 2: teammate không bao giờ là địch. Giữ verdict 1 làm
+        // discover Pass 1 (enemyVerdict) gọi ESPIsEnemy lại mỗi 120ms (log cls=17).
+        // Vẫn ghi VTable để address-reuse (pool tái dùng) bắt được nếu ô đổi class.
+        ESPVerdictSetLocked(actor, 2, INT_MIN);
+        if (f.hasVtable) g_espVerdictVt[actor] = f.vtable;
         return NO;
     }
     if (outTeam) *outTeam = team;
@@ -1348,6 +1373,12 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
     // Pass 1: verdict địch 1/3 chưa tracked (vừa unhide) + peek VTable
     // verdict-2 (object pool tái dùng địa chỉ -> có thể đã thành địch).
     // Unknown gom vào pass 2 theo budget.
+    // Cooldown Pass 1: địch chết/ẩn giữ verdict 1 — check_live mỗi 120ms trên
+    // hàng chục actor là cls=17 spam (window read thừa). 0.4s vẫn bắt unhide
+    // đủ nhanh, giảm ~3 lần kernel đọc mỗi discover.
+    // Map này cũng được ESPVerdictResetIfWorldChanged clear dưới cùng mutex
+    // classify — truy cập ngắn dưới lock, không giữ qua ESPIsEnemy.
+    const CFAbsoluteTime pass1Cd = 0.4;
     for (uint32_t i = 0; i < scanN; i++) {
         uint64_t actor = discActors[i];
         if (!ESPIsUserPtr(actor) || trackedSet.count(actor)) continue;
@@ -1356,6 +1387,17 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
             continue;
         }
         if (enemyVerdict.count(actor)) {
+            BOOL pass1Skip = NO;
+            {
+                std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+                auto p1 = g_espPass1At.find(actor);
+                if (p1 != g_espPass1At.end() && now - p1->second < pass1Cd) {
+                    pass1Skip = YES;
+                } else {
+                    g_espPass1At[actor] = now;
+                }
+            }
+            if (pass1Skip) continue;
             // Verdict 1/3 nhưng chưa tracked: check_live (ẩn/chết) rồi add.
             int team = 0;
             float hp = 0;
@@ -1420,11 +1462,18 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         g_espTrackGen++;
         g_espTrackedCount = (int)g_espTracked.size();
     }
-    // Log khi thêm được địch hoặc đang nhai unknown (tránh spam 8 dòng/giây
-    // chỉ vì cls++ trên verdict-2 peek).
-    if (added > 0 || unknownTried > 0) {
+    // Log khi THẬT SỰ thêm địch, hoặc unknown đổi số (không nhai lại cùng 1
+    // actor mỗi 120ms). Heartbeat hiếm khi còn unknown để chẩn đoán.
+    static CFAbsoluteTime s_lastUnkLog = 0;
+    if (added > 0) {
         ESPLog("discover: cls=%d +E=%d unk=%zu left=%zu trk=%d",
                cls, added, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
+                   ? unknownIdx.size() - (size_t)unknownTried : 0,
+               g_espTrackedCount);
+    } else if (!unknownIdx.empty() && now - s_lastUnkLog >= 5.0) {
+        s_lastUnkLog = now;
+        ESPLog("discover: cls=%d +E=0 unk=%zu left=%zu trk=%d",
+               cls, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
                    ? unknownIdx.size() - (size_t)unknownTried : 0,
                g_espTrackedCount);
     }
