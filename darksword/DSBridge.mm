@@ -2303,7 +2303,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "map60"
+#define DS_ESP_BUILD_TAG "stable1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2500,6 +2500,15 @@ static void ds_esp_tick(void) {
 
             bool rawMatched[32] = {false};
 
+            // Rate-limit log sự kiện box (BOX-JUMP/ASSIGN/DROP): ghi mỗi frame
+            // gây I/O blocking trên tick 60Hz -> thấy lag. Chỉ log mẫu ~2Hz.
+            static CFAbsoluteTime s_lastBoxEventLog = 0;
+            auto boxEventLog = [&](const char *msg) {
+                if (now2 - s_lastBoxEventLog < 0.5) return;
+                s_lastBoxEventLog = now2;
+                ESPLog("%s", msg);
+            };
+
             // Phase 1: Giữ nguyên slot cho các actor đã được gán trước đó (chống nhảy slot)
             for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
                 if (!s_slots[s].active || s_slots[s].actor == 0) continue;
@@ -2512,8 +2521,11 @@ static void ds_esp_tick(void) {
                         float dx = fabsf(cur.x - prev.x);
                         float dy = fabsf(cur.y - prev.y);
                         if (dx > 40.0f || dy > 40.0f) {
-                            ESPLog("BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
-                                   s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
+                            char msg[192];
+                            snprintf(msg, sizeof(msg),
+                                     "BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
+                                     s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
+                            boxEventLog(msg);
                         }
                         s_slots[s].box = cur;
                         s_slots[s].lastSeen = now2;
@@ -2533,21 +2545,25 @@ static void ds_esp_tick(void) {
                         break;
                     }
                 }
-                // Ưu tiên 2: Nếu đầy slot, tìm slot cũ nhất đã quá hạn 1.0s
-                // (khớp hysteresis Phase 3 — không chiếm slot đang còn hạn).
+                // Ưu tiên 2: Nếu đầy slot, chiếm slot NHÌN LÂU NHẤT (kể cả
+                // còn hạn) — 8 địch trên màn hình + 1 mới thì phải thay cái
+                // cũ nhất. Khớp Phase 3: slot age > 2.5s sẽ bị drop anyway.
                 if (bestSlot < 0) {
                     CFAbsoluteTime oldest = now2;
                     for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
-                        if (now2 - s_slots[s].lastSeen > 1.0 && s_slots[s].lastSeen < oldest) {
+                        if (s_slots[s].lastSeen < oldest) {
                             oldest = s_slots[s].lastSeen;
                             bestSlot = s;
                         }
                     }
                 }
                 if (bestSlot >= 0) {
-                    ESPLog("BOX-ASSIGN: slot[%d] +NEW act=0x%llx dist=%.1fm box=[%.1f,%.1f,%.1f,%.1f]",
-                           bestSlot, (unsigned long long)rawBoxes[r].actor, rawBoxes[r].distance,
-                           rawBoxes[r].x, rawBoxes[r].y, rawBoxes[r].w, rawBoxes[r].h);
+                    char msg[160];
+                    snprintf(msg, sizeof(msg),
+                             "BOX-ASSIGN: slot[%d] +NEW act=0x%llx dist=%.1fm box=[%.1f,%.1f,%.1f,%.1f]",
+                             bestSlot, (unsigned long long)rawBoxes[r].actor, rawBoxes[r].distance,
+                             rawBoxes[r].x, rawBoxes[r].y, rawBoxes[r].w, rawBoxes[r].h);
+                    boxEventLog(msg);
                     s_slots[bestSlot].actor = rawBoxes[r].actor;
                     s_slots[bestSlot].box = rawBoxes[r];
                     s_slots[bestSlot].lastSeen = now2;
@@ -2556,27 +2572,60 @@ static void ds_esp_tick(void) {
                 }
             }
 
-            // Phase 3: Thu thập các box đang active. Hysteresis 0.5s: đủ chống
-            // chớp tắt giữa 2-3 frame hụt (w2s fail khi địch sát mép màn hình),
-            // mà không giữ box "đông cứng" quá lâu. 0.3s trước đây drop khi
-            // REFRESH-ZERO 1 nhịp -> BOX-ASSIGN lại = nhấp nháy + BOX-JUMP.
+            // Phase 3: Thu thập box active. 2 ngưỡng:
+            //  - lastSeen <= 0.5s: project OK -> hiện box.
+            //  - 0.5s < lastSeen <= 2.5s: w2s fail / địch ra mép màn hình ->
+            //    ẨN box (visible=0) nhưng GIỮ slot (không clear actor) để khi
+            //    project lại được thì Phase 1 rematch tức thì — không rơi vào
+            //    BOX-DROP + BOX-ASSIGN +NEW = nhấp nháy / giật như map60.
+            //  - > 2.5s: actor chắc chắn mất / out-of-tracked -> drop slot.
+            // Clamp rect vào [0,landW]x[0,landH]; center ngoài màn hình -> hide.
             count = 0;
             for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
-                if (s_slots[s].active) {
-                    if (now2 - s_slots[s].lastSeen <= 0.5) {
-                        s_boxes[s] = s_slots[s].box;
-                        s_boxes[s].visible = 1;
-                        count++;
-                    } else {
-                        ESPLog("BOX-DROP: slot[%d] -TIMEOUT act=0x%llx lastSeen=%.2fs ago",
-                               s, (unsigned long long)s_slots[s].actor, now2 - s_slots[s].lastSeen);
-                        s_slots[s].active = NO;
-                        s_slots[s].actor = 0;
-                        s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
-                    }
-                } else {
+                if (!s_slots[s].active) {
                     s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
+                    continue;
                 }
+                double age = now2 - s_slots[s].lastSeen;
+                if (age > 2.5) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg),
+                             "BOX-DROP: slot[%d] -TIMEOUT act=0x%llx lastSeen=%.2fs ago",
+                             s, (unsigned long long)s_slots[s].actor, age);
+                    boxEventLog(msg);
+                    s_slots[s].active = NO;
+                    s_slots[s].actor = 0;
+                    s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
+                    continue;
+                }
+                if (age > 0.5) {
+                    // Slot giữ lại, box ẩn (chưa project được).
+                    s_boxes[s] = s_slots[s].box;
+                    s_boxes[s].visible = 0;
+                    continue;
+                }
+                ESPBox2D b = s_slots[s].box;
+                float cx = b.x + b.w * 0.5f, cy = b.y + b.h * 0.5f;
+                if (cx < -20 || cx > landW + 20 || cy < -20 || cy > landH + 20) {
+                    // Center ngoài màn hình (hệ landscape) -> ẩn, giữ slot.
+                    b.visible = 0;
+                } else {
+                    float x0 = MAX(0.0f, b.x);
+                    float y0 = MAX(0.0f, b.y);
+                    float x1 = MIN(landW, b.x + b.w);
+                    float y1 = MIN(landH, b.y + b.h);
+                    if (x1 - x0 < 2.0f || y1 - y0 < 4.0f) {
+                        b.visible = 0;
+                    } else {
+                        b.x = x0;
+                        b.y = y0;
+                        b.w = x1 - x0;
+                        b.h = y1 - y0;
+                        b.visible = 1;
+                    }
+                }
+                s_boxes[s] = b;
+                if (b.visible) count++;
             }
 
             ESPBoxCounterSet(count);
