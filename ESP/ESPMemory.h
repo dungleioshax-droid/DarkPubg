@@ -49,6 +49,12 @@ void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss);
 // đang chạy có thật sự dùng được task port hay rớt về exploit read.
 void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads);
 
+// Đếm bulk map (map nhiều page liền nhau trong 1 lần, thay cho việc map từng
+// page) — đây là bản kernel tương đương "đọc bulk" của aovcheat.
+// maps = số lần bulk thành công, pages = tổng page phủ, fails = số lần thử mà
+// phải rơi về map 1 page (khác vm_map_entry / vượt object).
+void ESPMemoryChunkStats(uint64_t *maps, uint64_t *pages, uint64_t *fails);
+
 // Helpers
 static inline uint64_t ESPReadU64(uint64_t vmMap, uint64_t addr, BOOL *ok) {
     uint64_t v = 0;
