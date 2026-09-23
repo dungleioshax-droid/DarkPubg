@@ -22,6 +22,7 @@
 #include <atomic>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -1405,6 +1406,14 @@ static BOOL ds_remote_set_double_on_main(RemoteCall *process, uint64_t target,
 
 static BOOL ds_remote_set_rect_on_main(RemoteCall *process, uint64_t target,
                                        const char *selectorName, CGRect value) {
+    // CGRect NaN/Inf từ w2s/map -> SpringBoard setFrame: -> CoreAnimation assert
+    // -> respring. Bỏ remote call, giữ frame cũ.
+    if (!isfinite(value.origin.x) || !isfinite(value.origin.y) ||
+        !isfinite(value.size.width) || !isfinite(value.size.height) ||
+        value.size.width < 0 || value.size.height < 0 ||
+        value.size.width > 100000 || value.size.height > 100000) {
+        return NO;
+    }
     DSRemoteArgument argument = { &value, sizeof(value) };
     return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
                                     &argument, 1);
@@ -2303,7 +2312,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "stable1"
+#define DS_ESP_BUILD_TAG "respring1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
