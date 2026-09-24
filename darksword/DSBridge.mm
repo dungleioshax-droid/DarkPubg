@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -234,6 +235,30 @@ static const NSTimeInterval kDSNetworkRetryDelay = 3.0;
 
 static const uint64_t kDSRemoteTextScratchOffset = 0x1000;
 static const size_t kDSRemoteTextScratchCapacity = 0x800;
+
+// --- Breadcrumb chẩn đoán respring -----------------------------------------
+// Triệu chứng: bấm OPEN HUD, progress đạt 100% rồi máy respring NGAY, HUD chưa
+// kịp hiện => exploit + tạo HUD đã xong, máy chết trong ~1-2s sau đó (lúc HUD
+// attach/render và overlay ESP bắt đầu dựng trong SpringBoard). ds_trace ghi
+// từng bước kèm mốc thời gian so với lúc bật HUD, chỉ trong 10s đầu — lần sau
+// respring thì dòng cuối ESP.log sẽ chỉ đúng bước giết máy, và không spam log
+// khi HUD chạy bình thường.
+static CFAbsoluteTime g_hudEnabledAt = 0;
+// Hoãn phần ESP sau khi bật HUD để không dồn hàng trăm remote call dựng overlay
+// vào đúng lúc SpringBoard vừa attach cửa sổ HUD.
+static const NSTimeInterval kDSESPSettleDelay = 2.5;
+
+static void ds_trace(const char *fmt, ...) {
+    if (g_hudEnabledAt <= 0) return;
+    double ms = (CFAbsoluteTimeGetCurrent() - g_hudEnabledAt) * 1000.0;
+    if (ms < 0 || ms > 10000.0) return;
+    char body[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(body, sizeof(body), fmt, args);
+    va_end(args);
+    ESPLog("TRACE +%.0fms %s", ms, body);
+}
 
 static void ds_update_rate(void);
 static void ds_stop_keepalive(void);
@@ -1711,6 +1736,8 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
         ? ds_remote_get_object_on_main(process, workspace, "mainWindowScene")
         : 0;
     if (!scene) return 0;
+    ds_trace("hud: scene=0x%llx frame=%.0fx%.0f", (unsigned long long)scene,
+             presentation.windowFrame.size.width, presentation.windowFrame.size.height);
 
     uint64_t window = remote_msg(process, windowClass, alloc, 0, 0, 0, 0);
     uint64_t container = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
@@ -1728,6 +1755,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
         !ds_remote_invoke_noarg_on_main(process, blurView, "init")) {
         return 0;
     }
+    ds_trace("hud: views init ok win=0x%llx", (unsigned long long)window);
 
     ds_remote_set_rect_on_main(process, window, "setFrame:", presentation.windowFrame);
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setWindowScene:"), scene, YES);
@@ -1808,12 +1836,17 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_perform_on_springboard_main(process, window,
                                    ds_remote_sel(process, "addSubview:"), secureField, YES);
 
+    ds_trace("hud: views attached, resolving snapshot container");
     g_remoteWindow = window;
     g_remoteContainer = container;
     g_remoteSecureField = secureField;
     g_remoteSecureCanvas = ds_remote_secure_canvas(process, secureField);
     ds_apply_snapshot_container(process, presentation.hideAtSnapshot);
+    ds_trace("hud: snapshot canvas=0x%llx hide=%d",
+             (unsigned long long)g_remoteSecureCanvas, presentation.hideAtSnapshot ? 1 : 0);
     ds_remote_set_u64_on_main(process, window, "setHidden:", 0);
+    ds_trace("hud: window shown level=%.0f hiddenCache=%d", kDSHUDWindowLevel,
+             g_lastWindowHidden ? 1 : 0);
 
     g_remoteWindowScene = scene;
     g_remoteWindowPid = process.pid;
@@ -1968,6 +2001,8 @@ static void ds_esp_cleanup_stale(RemoteCall *process) {
 
 static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
+    ds_trace("esp ensure: start bounds=%.0fx%.0f", portraitBounds.size.width,
+             portraitBounds.size.height);
     // Session/process mới: địa chỉ path layer + buffer CGRect cũ không còn dùng
     // được (object cũ leak như policy HUD).
     g_espPathLayer = 0;
@@ -2086,6 +2121,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
     }
+    ds_trace("esp ensure: %d box views built", ESPOverlayMaxBoxes);
 
     // Batch path layer: 1 CAShapeLayer chứa TẤT CẢ box. Khi layer này sống,
     // các view viền từng box chỉ để fallback (giữ hidden) -> present path
@@ -2110,8 +2146,10 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         }
     }
 
+    ds_trace("esp ensure: attaching window");
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "addSubview:"), container, YES);
     ds_remote_set_u64_on_main(process, window, "setHidden:", 0);
+    ds_trace("esp ensure: window shown");
     g_espWindow = window;
     g_espContainer = container;
     g_espWindowHiddenCache = NO;
@@ -2464,6 +2502,11 @@ static void ds_update_rate(void) {
                                        (NSUInteger)ds_interface_orientation();
     BOOL applyStyle = presentationSignature != g_lastPresentationSignature;
 
+    static int s_presentSeq = 0;
+    int presentSeq = ++s_presentSeq;
+    ds_trace("hud present #%d start applyStyle=%d text=%d chars", presentSeq,
+             applyStyle ? 1 : 0, (int)text.length);
+
     @try {
         if (!ds_apply_remote_presentation(
                 g_springBoard, &presentation, text, focused, applyStyle)) {
@@ -2472,6 +2515,7 @@ static void ds_update_rate(void) {
                                          userInfo:nil];
         }
         g_lastPresentationSignature = presentationSignature;
+        ds_trace("hud present #%d ok", presentSeq);
     } @catch (NSException *exception) {
         ESPLog("HUD present FAIL: %s trojan=%d pid=%d label=%llx window=%llx",
                exception.reason.UTF8String ?: "?",
@@ -2521,6 +2565,7 @@ static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam asyn
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
 static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
+    ds_trace("esp present count=%d", frame->count);
     @try {
         if (frame->count < 0) {
             // Lệnh hide từ worker.
@@ -2573,6 +2618,11 @@ static void ds_esp_schedule_present(DSESPFrame *frame) {
 static void ds_esp_tick(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard) return;
     CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
+    // Vừa bật HUD: hoãn TOÀN BỘ đường ESP trong kDSESPSettleDelay giây. Trước
+    // đây tick đầu chạy ngay, dồn hàng trăm remote call (dựng window + 12 viền
+    // + 12 label + addSubLayer) cùng lúc SpringBoard vừa attach cửa sổ HUD ->
+    // máy respring trước khi HUD kịp hiện. Trong lúc hoãn coi như ESP tắt.
+    if (g_hudEnabledAt > 0 && nowP - g_hudEnabledAt < kDSESPSettleDelay) return;
     // Cache prefs 1s + geometry 0.5s. Chỉ chạm từ worker queue.
     static NSDictionary *s_prefsCache = nil;
     static CFAbsoluteTime s_prefsAt = 0;
@@ -3137,6 +3187,7 @@ static void ds_finish_disable(void) {
         g_espRectValid[i] = NO;
     }
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
+    g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;
@@ -3203,6 +3254,9 @@ static void ds_finish_enable(void) {
         g_dsProgress.store(0.98);
         ds_set_stage(ds_localized(@"Connecting to SpringBoard"));
         ds_reset_remote_symbol_cache();
+        // Mốc 0 của TRACE: từ đây tới lúc HUD hiện là cửa sổ hay respring.
+        g_hudEnabledAt = CFAbsoluteTimeGetCurrent();
+        ds_trace("enable: rc init start");
         g_springBoard = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
         if (!g_springBoard || !g_springBoard.trojanMem || g_springBoard.pid <= 1) {
             NSString *remoteError = [RemoteCall lastInitError];
@@ -3216,6 +3270,8 @@ static void ds_finish_enable(void) {
             return;
         }
 
+        ds_trace("enable: rc ok pid=%d trojan=0x%llx", (int)g_springBoard.pid,
+                 (unsigned long long)g_springBoard.trojanMem);
         g_dsProgress.store(0.99);
         ds_set_stage(ds_localized(@"Creating SpringBoard HUD"));
         g_remoteLabel = ds_create_springboard_hud(g_springBoard);
@@ -3225,6 +3281,7 @@ static void ds_finish_enable(void) {
             ds_fail_enable(ds_localized(@"SpringBoard HUD creation failed. Retry or reinstall over the existing app; restart the device only as a last resort."));
             return;
         }
+        ds_trace("enable: hud created label=0x%llx", (unsigned long long)g_remoteLabel);
     } @catch (NSException *exception) {
         g_springBoard = nil;
         ds_fail_enable([NSString stringWithFormat:
@@ -3240,6 +3297,7 @@ static void ds_finish_enable(void) {
     ds_set_error(@"");
     ds_start_rate_timer();
     ds_register_hud_notifications();
+    ds_trace("enable: DONE (hud active, ESP settle %.1fs)", kDSESPSettleDelay);
     notify_post(NOTIFY_LAUNCHED_HUD);
     ds_post_progress();
     os_log(OS_LOG_DEFAULT, "[DSBridge] SpringBoard HUD active (SpringBoard pid=%d)", g_springBoard.pid);
