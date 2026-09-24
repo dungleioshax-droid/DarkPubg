@@ -185,9 +185,8 @@ static int g_espLastBarBucket[ESPOverlayMaxBoxes];      // -2 chưa set, -1 fill
 static CGRect g_espLastBarBgF[ESPOverlayMaxBoxes];      // frame bg đã gửi
 static CGRect g_espLastBarFillF[ESPOverlayMaxBoxes];    // frame fill đã gửi
 static BOOL g_espBarHidden[ESPOverlayMaxBoxes];         // bars đang ẩn?
-static CGPoint g_espLastLineC[ESPOverlayMaxBoxes];      // center line đã gửi
-static float g_espLastLineA[ESPOverlayMaxBoxes];        // góc line đã gửi
-static float g_espLastLineL[ESPOverlayMaxBoxes];        // dài line đã gửi
+static CGRect g_espLastLineF[ESPOverlayMaxBoxes];      // frame line đã gửi
+static float g_espLastLineL[ESPOverlayMaxBoxes];        // cao line đã gửi, 0 = đang ẩn
 static CFAbsoluteTime g_espLastBarAt[ESPOverlayMaxBoxes] = {0}; // throttle bar+line 15Hz
 static BOOL g_espWindowHiddenCache = YES;
 // Cache frame/text từng box cho tick 8Hz (đứng yên thì 0 remote call).
@@ -1486,13 +1485,6 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
                                     &argument, 1);
 }
 
-static BOOL ds_remote_set_transform_on_main(RemoteCall *process, uint64_t target,
-                                            CGAffineTransform value) {
-    DSRemoteArgument argument = { &value, sizeof(value) };
-    return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, "setTransform:"),
-                                    &argument, 1);
-}
-
 // Map 1 điểm từ hệ game-landscape sang hệ portrait-window, quay quanh tâm
 // màn hình. LandscapeLeft = R(-90°), LandscapeRight = R(+90°) — đã verify
 // bằng vector: game top-left (0,0) ra đúng physical top edge cả 2 chiều.
@@ -2306,21 +2298,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     }
     if (mapOrient != g_espLastMapOrient) {
         g_espLastMapOrient = mapOrient;
-        // Chữ mét phải nằm NGANG theo game. Hệ portrait + map ±90° khiến
-        // trục width của label thành trục dọc trên màn hình landscape — phải
-        // xoay label ±90° (local X -> trục ngang vật lý). Portrait/identity:
-        // transform identity.
-        CGFloat labelAngle = 0;
-        if (mapOrient == UIInterfaceOrientationLandscapeLeft) labelAngle = (CGFloat)-M_PI_2;
-        else if (mapOrient == UIInterfaceOrientationLandscapeRight) labelAngle = (CGFloat)M_PI_2;
-        CGAffineTransform labelT = CGAffineTransformMakeRotation(labelAngle);
-        for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-            if (g_espLabels[i]) {
-                ds_remote_set_transform_on_main(process, g_espLabels[i], labelT);
-                ds_remote_set_rect_on_main(process, g_espLabels[i], "setBounds:",
-                                           CGRectMake(0, 0, 80.0, 14.0));
-            }
-        }
+        // setTransform: vô tác dụng trên SpringBoard (label/line xoay vẫn
+        // dựng đứng, nghi là thủ phạm respring) -> bỏ xoay hẳn, vẽ frames
+        // thuần như bản respring1 ổn định. Đổi orient thì vẽ lại hết.
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
 
@@ -2397,7 +2377,10 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 0.5 ||
             fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 0.5;
         if (labelMoved && (textChanged || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
-            ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
+            // setFrame thuần (không xoay): ổn định như respring1. Chữ mét sẽ
+            // đọc dọc trên màn landscape — chấp nhận tạm vì setTransform vô
+            // tác dụng trên SpringBoard nhà mình.
+            ds_remote_set_rect_on_main(process, g_espLabels[i], "setFrame:", lf);
             g_espLastLabelCenter[i] = labelCenter;
             g_espLastLabelAt[i] = nowP;
         }
@@ -2448,31 +2431,24 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                     }
                 }
             }
-            // Line: đáy-giữa màn game -> đáy box. Map 2 đầu rồi xoay view mảnh.
-            CGPoint g0 = CGPointMake(landW * 0.5f, landH);
-            CGPoint g1 = CGPointMake(b.x + b.w * 0.5f, b.y + b.h);
-            CGPoint c0 = ds_esp_map_point(g0, landW, landH, winCenter, mapOrient);
-            CGPoint c1 = ds_esp_map_point(g1, landW, landH, winCenter, mapOrient);
-            float ldx = (float)(c1.x - c0.x), ldy = (float)(c1.y - c0.y);
-            float llen = sqrtf(ldx * ldx + ldy * ldy);
-            if (llen > 2.0f && isfinite(llen)) {
+            // Line dọc từ đáy box thẳng xuống đáy màn (hệ game) — map_rect
+            // thuần, KHÔNG xoay view (setTransform: vô tác dụng, line xoay
+            // render thành vệt dọc sai vị trí). Game-dọc <-> hiển thị-dọc qua
+            // map 2 lần 90° nên line vẫn đứng đúng dưới box.
+            float lineBot = b.y + b.h;
+            float lineH = landH - lineBot;
+            if (lineH > 2.0f) {
                 if (g_espLastLineL[i] == 0.0f) {
                     ds_remote_set_u64_on_main(process, g_espLines[i], "setHidden:", 0);
                 }
-                float lang = atan2f(-ldx, ldy);
-                CGPoint lc = CGPointMake((c0.x + c1.x) * 0.5, (c0.y + c1.y) * 0.5);
-                if (!g_espRectValid[i] ||
-                    fabsf((float)(lc.x - g_espLastLineC[i].x)) > 0.5f ||
-                    fabsf((float)(lc.y - g_espLastLineC[i].y)) > 0.5f ||
-                    fabsf(lang - g_espLastLineA[i]) > 0.01f ||
-                    fabsf(llen - g_espLastLineL[i]) > 1.0f) {
-                    ds_remote_set_rect_on_main(process, g_espLines[i], "setBounds:", CGRectMake(0, 0, 2.0, llen));
-                    ds_remote_set_point_on_main(process, g_espLines[i], "setCenter:", lc);
-                    CGAffineTransform lt = CGAffineTransformMakeRotation(lang);
-                    ds_remote_set_transform_on_main(process, g_espLines[i], lt);
-                    g_espLastLineC[i] = lc;
-                    g_espLastLineA[i] = lang;
-                    g_espLastLineL[i] = llen;
+                CGRect lineGame = CGRectMake(b.x + b.w * 0.5f - 1.0f, lineBot, 2.0f, lineH);
+                CGRect lineBox = ds_esp_map_rect(lineGame, landW, landH, winCenter, mapOrient);
+                CGRect pl = (g_espRectValid[i] && g_espLastLineL[i] > 0.0f) ? g_espLastLineF[i] : CGRectMake(1e9f, 0, 0, 0);
+                if (fabsf(pl.origin.x - lineBox.origin.x) > 0.5f || fabsf(pl.origin.y - lineBox.origin.y) > 0.5f ||
+                    fabsf(pl.size.width - lineBox.size.width) > 0.5f || fabsf(pl.size.height - lineBox.size.height) > 0.5f) {
+                    ds_remote_set_rect_on_main(process, g_espLines[i], "setFrame:", lineBox);
+                    g_espLastLineF[i] = lineBox;
+                    g_espLastLineL[i] = (float)lineBox.size.height;
                 }
             } else if (g_espLastLineL[i] != 0.0f) {
                 g_espLastLineL[i] = 0.0f;
@@ -2677,7 +2653,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "bulkoff1"
+#define DS_ESP_BUILD_TAG "stable2"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
