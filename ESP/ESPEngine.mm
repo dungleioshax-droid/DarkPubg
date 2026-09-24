@@ -110,23 +110,36 @@ static BOOL ESPReadF32(uint64_t vmMap, uint64_t addr, float *out) {
 // HP percent 0-100 cho thanh máu kiểu Source Kernel (-1 nếu chưa đọc được).
 // kind 3 (hình nhân): máu ở Target_Cur/MaxHealth; còn lại Char_Health/Max.
 // Validate max như classify (50..2000) để không vẽ bar từ số rác.
+static float s_hpDbgCur = 0, s_hpDbgMax = 0;
+static int s_hpDbgPct = -1;
+static int s_hpDbgFails = 0;
+void ESPEngineHPSample(float *cur, float *max, int *pct, int *fails) {
+    if (cur) *cur = s_hpDbgCur;
+    if (max) *max = s_hpDbgMax;
+    if (pct) *pct = s_hpDbgPct;
+    if (fails) *fails = s_hpDbgFails;
+}
 static int ESPHPPercent(uint64_t vmMap, uint64_t actor, int kind) {
     if (!vmMap || !actor) return -1;
     float cur = 0, max = 0;
     if (kind == 3) {
-        if (!ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &cur)) return -1;
-        if (!ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &max)) return -1;
+        if (!ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &cur)) { s_hpDbgFails++; return -1; }
+        if (!ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &max)) { s_hpDbgFails++; return -1; }
     } else {
         uint8_t hb[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hb, sizeof(hb))) return -1;
+        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hb, sizeof(hb))) { s_hpDbgFails++; return -1; }
         memcpy(&cur, hb, 4);
         memcpy(&max, hb + 4, 4);
     }
-    if (!(max >= 50.0f && max <= 2000.0f)) return -1;
-    if (!(cur >= 0.0f) || !(cur <= max + 50.0f)) return -1;
+    s_hpDbgCur = cur; s_hpDbgMax = max;
+    if (!(max >= 50.0f && max <= 2000.0f) || !(cur >= 0.0f) || !(cur <= max + 50.0f)) {
+        s_hpDbgPct = -1; s_hpDbgFails++;
+        return -1;
+    }
     int pct = (int)(cur * 100.0f / max + 0.5f);
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
+    s_hpDbgPct = pct; s_hpDbgFails = 0;
     return pct;
 }
 

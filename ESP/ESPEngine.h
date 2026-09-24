@@ -66,6 +66,10 @@ void ESPBoxCounterSet(int n);
 // @"R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2", @"F camFail". Dùng khi B=0 mà P>0.
 const char *ESPEngineLastBoxDiag(void);
 
+// Mẫu HP gần nhất cho chẩn đoán offsets (đọc từ ESP.log dòng box perf):
+// cur/max raw, pct 0-100 (-1 fail), fails = số lần fail liên tiếp.
+void ESPEngineHPSample(float *cur, float *max, int *pct, int *fails);
+
 // Perf refresh box trong ~10s qua (đọc + reset): @"n=80 avg=12.3ms max=45.0ms".
 // Dùng để biết lag có phải do kernel read chậm không.
 const char *ESPEngineBoxPerfText(void);
