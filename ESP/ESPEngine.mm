@@ -107,6 +107,29 @@ static BOOL ESPReadF32(uint64_t vmMap, uint64_t addr, float *out) {
     return ok;
 }
 
+// HP percent 0-100 cho thanh máu kiểu Source Kernel (-1 nếu chưa đọc được).
+// kind 3 (hình nhân): máu ở Target_Cur/MaxHealth; còn lại Char_Health/Max.
+// Validate max như classify (50..2000) để không vẽ bar từ số rác.
+static int ESPHPPercent(uint64_t vmMap, uint64_t actor, int kind) {
+    if (!vmMap || !actor) return -1;
+    float cur = 0, max = 0;
+    if (kind == 3) {
+        if (!ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &cur)) return -1;
+        if (!ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &max)) return -1;
+    } else {
+        uint8_t hb[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hb, sizeof(hb))) return -1;
+        memcpy(&cur, hb, 4);
+        memcpy(&max, hb + 4, 4);
+    }
+    if (!(max >= 50.0f && max <= 2000.0f)) return -1;
+    if (!(cur >= 0.0f) || !(cur <= max + 50.0f)) return -1;
+    int pct = (int)(cur * 100.0f / max + 0.5f);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
 // Đọc hết field của 1 actor. Không fail cứng: field nào không đọc được thì
 // has* = NO, caller tự quyết định (giữ nguyên hành vi cũ khi thiếu field).
 static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f) {
@@ -2051,7 +2074,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             topY > screenH + 50.0f || topY + boxH < -50.0f) {
             cW2s++; continue;
         }
-        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, (int)hp, 1, actor };
+        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, ESPHPPercent(vmMap, actor, (team == ESPTeam_Dummy) ? 3 : 1), 1, actor };
     }
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
@@ -2145,6 +2168,7 @@ typedef struct {
     ESPVector vel;   // cm/giây
     CFAbsoluteTime at;
     int outliers;    // số mẫu bất thường liên tiếp (để tự hồi phục)
+    int hpPct;       // 0-100 cho thanh máu, -1 chưa đọc (giữ mẫu cũ giữa các lần đọc thưa)
     BOOL valid;
 } ESPPosHist;
 static ESPPosHist s_posHist[ESP_POS_HIST];
@@ -2156,6 +2180,7 @@ static ESPPosHist *ESPPosHistSlot(uint64_t actor) {
     h->actor = actor;
     h->valid = NO;
     h->outliers = 0;
+    h->hpPct = -1;
     h->pos = (ESPVector){0, 0, 0};
     h->vel = (ESPVector){0, 0, 0};
     h->at = 0;
@@ -2275,6 +2300,9 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                 h->pos = fresh;    // mẫu hợp lệ -> theo vị trí mới
                 pos = fresh;
             }
+            // HP cho thanh máu, cùng nhịp đọc thưa với vị trí (giữa các lần
+            // đọc thì box dùng mẫu HP cũ — máu không cần ngoại suy).
+            h->hpPct = ESPHPPercent(vmMap, tr->actor, tr->kind);
         }
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
@@ -2301,7 +2329,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             topY > screenH + 50.0f || topY + boxH < -50.0f) {
             cW2s++; continue;
         }
-        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, -1, 1, tr->actor };
+        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, h->hpPct, 1, tr->actor };
     }
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,

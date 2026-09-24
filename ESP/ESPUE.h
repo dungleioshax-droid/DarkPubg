@@ -34,7 +34,7 @@ typedef struct {
 typedef struct {
     float x, y, w, h;
     float distance;
-    int health; // -1 chưa đọc
+    int health; // percent 0-100 cho thanh máu kiểu Source Kernel, -1 chưa đọc
     uint8_t visible; // 1 = đang trong tầm nhìn camera (mesh bRecentlyRendered)
     uint64_t actor; // AActor* pointer for stable slot tracking
 } ESPBox2D;

@@ -176,6 +176,19 @@ static uint64_t g_espContainer = 0;
 static uint64_t g_espBorders[ESPOverlayMaxBoxes][4] = {{0}};
 static uint64_t g_espLabels[ESPOverlayMaxBoxes] = {0};
 static BOOL g_espHiddenCache[ESPOverlayMaxBoxes] = {0};
+// Thanh máu + snapline kiểu Source Kernel (mỗi slot 3 views).
+static uint64_t g_espBarBg[ESPOverlayMaxBoxes] = {0};   // nền đen thanh máu
+static uint64_t g_espBarFill[ESPOverlayMaxBoxes] = {0}; // ruột thanh máu theo %
+static uint64_t g_espLines[ESPOverlayMaxBoxes] = {0};   // line đáy màn -> box
+static uint64_t g_espHPColor[3] = {0};                  // 0 đỏ 1 vàng 2 xanh (singletons)
+static int g_espLastBarBucket[ESPOverlayMaxBoxes];      // -2 chưa set, -1 fill ẩn, 0/1/2 màu
+static CGRect g_espLastBarBgF[ESPOverlayMaxBoxes];      // frame bg đã gửi
+static CGRect g_espLastBarFillF[ESPOverlayMaxBoxes];    // frame fill đã gửi
+static BOOL g_espBarHidden[ESPOverlayMaxBoxes];         // bars đang ẩn?
+static CGPoint g_espLastLineC[ESPOverlayMaxBoxes];      // center line đã gửi
+static float g_espLastLineA[ESPOverlayMaxBoxes];        // góc line đã gửi
+static float g_espLastLineL[ESPOverlayMaxBoxes];        // dài line đã gửi
+static CFAbsoluteTime g_espLastBarAt[ESPOverlayMaxBoxes] = {0}; // throttle bar+line 15Hz
 static BOOL g_espWindowHiddenCache = YES;
 // Cache frame/text từng box cho tick 8Hz (đứng yên thì 0 remote call).
 // Reset cùng views ở ds_finish_disable (views mới = địa chỉ mới).
@@ -2014,7 +2027,9 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         for (int i = 0; i < ESPOverlayMaxBoxes && ok; i++) {
             for (int e = 0; e < 4 && ok; e++) ok = g_espBorders[i][e] != 0;
             ok = ok && g_espLabels[i] != 0;
+            ok = ok && g_espBarBg[i] != 0 && g_espBarFill[i] != 0 && g_espLines[i] != 0;
         }
+        ok = ok && g_espHPColor[0] != 0;
         if (ok) return YES;
     }
     // KHÔNG dọn stale trong đường ensure nữa: cleanup quét toàn bộ window của
@@ -2064,7 +2079,11 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     uint64_t clear = ds_remote_get_object_on_main(process, colorClass, "clearColor");
     uint64_t red = ds_remote_get_object_on_main(process, colorClass, "redColor");
     uint64_t white = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
-    if (!clear || !red || !white) return NO;
+    uint64_t black = ds_remote_get_object_on_main(process, colorClass, "blackColor");
+    uint64_t green = ds_remote_get_object_on_main(process, colorClass, "greenColor");
+    uint64_t yellow = ds_remote_get_object_on_main(process, colorClass, "yellowColor");
+    if (!clear || !red || !white || !black || !green || !yellow) return NO;
+    g_espHPColor[0] = red; g_espHPColor[1] = yellow; g_espHPColor[2] = green;
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_remote_set_u64_on_main(process, container, "setTag:", (uint64_t)kDSESPOverlayTag);
@@ -2120,6 +2139,42 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), lb, YES);
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
+
+        // Thanh máu (nền đen + ruột theo %) + snapline trắng, kiểu Source Kernel.
+        uint64_t bb = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+        uint64_t bf = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+        uint64_t ln = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+        if (!bb || !bf || !ln ||
+            !ds_remote_invoke_noarg_on_main(process, bb, "init") ||
+            !ds_remote_invoke_noarg_on_main(process, bf, "init") ||
+            !ds_remote_invoke_noarg_on_main(process, ln, "init")) {
+            ESPLog("esp ensure fail: bar/line i=%d", i);
+            return NO;
+        }
+        ds_perform_on_springboard_main(process, bb, ds_remote_sel(process, "setBackgroundColor:"), black, YES);
+        ds_perform_on_springboard_main(process, bf, ds_remote_sel(process, "setBackgroundColor:"), green, YES);
+        ds_perform_on_springboard_main(process, ln, ds_remote_sel(process, "setBackgroundColor:"), white, YES);
+        ds_remote_set_u64_on_main(process, bb, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, bf, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, ln, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, bb, "setUserInteractionEnabled:", 0);
+        ds_remote_set_u64_on_main(process, bf, "setUserInteractionEnabled:", 0);
+        ds_remote_set_u64_on_main(process, ln, "setUserInteractionEnabled:", 0);
+        uint64_t bbLayer = ds_remote_get_object_on_main(process, bb, "layer");
+        ds_remote_set_double_on_main(process, bbLayer, "setSpeed:", 999.0);
+        uint64_t bfLayer = ds_remote_get_object_on_main(process, bf, "layer");
+        ds_remote_set_double_on_main(process, bfLayer, "setSpeed:", 999.0);
+        uint64_t lnLayer = ds_remote_get_object_on_main(process, ln, "layer");
+        ds_remote_set_double_on_main(process, lnLayer, "setSpeed:", 999.0);
+        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), bb, YES);
+        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), bf, YES);
+        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), ln, YES);
+        g_espBarBg[i] = bb;
+        g_espBarFill[i] = bf;
+        g_espLines[i] = ln;
+        g_espLastBarBucket[i] = -2;
+        g_espBarHidden[i] = YES;
+        g_espLastLineL[i] = 0;
     }
     ds_trace("esp ensure: %d box views built", ESPOverlayMaxBoxes);
 
@@ -2281,8 +2336,16 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         if (hide != g_espHiddenCache[i]) {
             if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
             ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
+            ds_remote_set_u64_on_main(process, g_espBarBg[i], "setHidden:", hide ? 1 : 0);
+            ds_remote_set_u64_on_main(process, g_espBarFill[i], "setHidden:", hide ? 1 : 0);
+            ds_remote_set_u64_on_main(process, g_espLines[i], "setHidden:", hide ? 1 : 0);
             g_espHiddenCache[i] = hide;
-            if (hide) g_espRectValid[i] = NO;
+            if (hide) {
+                g_espRectValid[i] = NO;
+                g_espLastBarBucket[i] = -2;
+                g_espBarHidden[i] = YES;
+                g_espLastLineL[i] = 0;
+            }
         }
         if (hide) continue;
 
@@ -2337,6 +2400,84 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelCenter);
             g_espLastLabelCenter[i] = labelCenter;
             g_espLastLabelAt[i] = nowP;
+        }
+
+        // Thanh máu + snapline kiểu Source Kernel, cùng nhịp 15Hz với label.
+        if (nowP - g_espLastBarAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ)) {
+            g_espLastBarAt[i] = nowP;
+            BOOL wantBarHidden = (b.health < 0);
+            if (wantBarHidden != g_espBarHidden[i]) {
+                g_espBarHidden[i] = wantBarHidden;
+                ds_remote_set_u64_on_main(process, g_espBarBg[i], "setHidden:", wantBarHidden ? 1 : 0);
+                ds_remote_set_u64_on_main(process, g_espBarFill[i], "setHidden:", wantBarHidden ? 1 : 0);
+            }
+            if (!wantBarHidden) {
+                int bucket = (b.health > 50) ? 2 : ((b.health > 25) ? 1 : 0);
+                float frac = b.health / 100.0f;
+                if (frac < 0.0f) frac = 0.0f;
+                if (frac > 1.0f) frac = 1.0f;
+                if (frac <= 0.001f) {
+                    // Máu cạn: ẩn ruột, giữ nền đen.
+                    if (g_espLastBarBucket[i] != -1) {
+                        g_espLastBarBucket[i] = -1;
+                        ds_remote_set_u64_on_main(process, g_espBarFill[i], "setHidden:", 1);
+                    }
+                } else {
+                    if (g_espLastBarBucket[i] == -1) {
+                        ds_remote_set_u64_on_main(process, g_espBarFill[i], "setHidden:", 0);
+                    }
+                    if (bucket != g_espLastBarBucket[i]) {
+                        g_espLastBarBucket[i] = bucket;
+                        ds_perform_on_springboard_main(process, g_espBarFill[i], ds_remote_sel(process, "setBackgroundColor:"), g_espHPColor[bucket], YES);
+                    }
+                    CGRect barGame = CGRectMake(b.x - 6.0f, b.y, 4.0f, b.h);
+                    CGRect fillGame = CGRectMake(b.x - 6.0f, b.y + b.h * (1.0f - frac), 4.0f, b.h * frac);
+                    CGRect barBox = ds_esp_map_rect(barGame, landW, landH, winCenter, mapOrient);
+                    CGRect fillBox = ds_esp_map_rect(fillGame, landW, landH, winCenter, mapOrient);
+                    CGRect pb = g_espRectValid[i] ? g_espLastBarBgF[i] : CGRectMake(1e9f, 0, 0, 0);
+                    CGRect pf = g_espRectValid[i] ? g_espLastBarFillF[i] : CGRectMake(1e9f, 0, 0, 0);
+                    if (fabsf(pb.origin.x - barBox.origin.x) > 0.5f || fabsf(pb.origin.y - barBox.origin.y) > 0.5f ||
+                        fabsf(pb.size.width - barBox.size.width) > 0.5f || fabsf(pb.size.height - barBox.size.height) > 0.5f) {
+                        ds_remote_set_rect_on_main(process, g_espBarBg[i], "setFrame:", barBox);
+                        g_espLastBarBgF[i] = barBox;
+                    }
+                    if (fabsf(pf.origin.x - fillBox.origin.x) > 0.5f || fabsf(pf.origin.y - fillBox.origin.y) > 0.5f ||
+                        fabsf(pf.size.width - fillBox.size.width) > 0.5f || fabsf(pf.size.height - fillBox.size.height) > 0.5f) {
+                        ds_remote_set_rect_on_main(process, g_espBarFill[i], "setFrame:", fillBox);
+                        g_espLastBarFillF[i] = fillBox;
+                    }
+                }
+            }
+            // Line: đáy-giữa màn game -> đáy box. Map 2 đầu rồi xoay view mảnh.
+            CGPoint g0 = CGPointMake(landW * 0.5f, landH);
+            CGPoint g1 = CGPointMake(b.x + b.w * 0.5f, b.y + b.h);
+            CGPoint c0 = ds_esp_map_point(g0, landW, landH, winCenter, mapOrient);
+            CGPoint c1 = ds_esp_map_point(g1, landW, landH, winCenter, mapOrient);
+            float ldx = (float)(c1.x - c0.x), ldy = (float)(c1.y - c0.y);
+            float llen = sqrtf(ldx * ldx + ldy * ldy);
+            if (llen > 2.0f && isfinite(llen)) {
+                if (g_espLastLineL[i] == 0.0f) {
+                    ds_remote_set_u64_on_main(process, g_espLines[i], "setHidden:", 0);
+                }
+                float lang = atan2f(-ldx, ldy);
+                CGPoint lc = CGPointMake((c0.x + c1.x) * 0.5, (c0.y + c1.y) * 0.5);
+                if (!g_espRectValid[i] ||
+                    fabsf((float)(lc.x - g_espLastLineC[i].x)) > 0.5f ||
+                    fabsf((float)(lc.y - g_espLastLineC[i].y)) > 0.5f ||
+                    fabsf(lang - g_espLastLineA[i]) > 0.01f ||
+                    fabsf(llen - g_espLastLineL[i]) > 1.0f) {
+                    ds_remote_set_rect_on_main(process, g_espLines[i], "setBounds:", CGRectMake(0, 0, 2.0, llen));
+                    ds_remote_set_point_on_main(process, g_espLines[i], "setCenter:", lc);
+                    CGAffineTransform lt = CGAffineTransformMakeRotation(lang);
+                    ds_remote_set_transform_on_main(process, g_espLines[i], lt);
+                    g_espLastLineC[i] = lc;
+                    g_espLastLineA[i] = lang;
+                    g_espLastLineL[i] = llen;
+                }
+            } else if (g_espLastLineL[i] != 0.0f) {
+                g_espLastLineL[i] = 0.0f;
+                ds_remote_set_u64_on_main(process, g_espLines[i], "setHidden:", 1);
+            }
         }
 
         g_espLastRect[i][0] = fullBox;
@@ -2536,7 +2677,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "nanfix1"
+#define DS_ESP_BUILD_TAG "healthline1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3183,9 +3324,16 @@ static void ds_finish_disable(void) {
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
         for (int e = 0; e < 4; e++) g_espBorders[i][e] = 0;
         g_espLabels[i] = 0;
+        g_espBarBg[i] = 0;
+        g_espBarFill[i] = 0;
+        g_espLines[i] = 0;
         g_espHiddenCache[i] = YES;
         g_espRectValid[i] = NO;
+        g_espLastBarBucket[i] = -2;
+        g_espBarHidden[i] = YES;
+        g_espLastLineL[i] = 0;
     }
+    for (int c = 0; c < 3; c++) g_espHPColor[c] = 0;
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     g_espWindowHiddenCache = YES;
