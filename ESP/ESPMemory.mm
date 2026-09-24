@@ -181,8 +181,9 @@ static BOOL ESPPageCacheGet(uint64_t vmMap, uint64_t pageStart,
     BOOL triedBulk = NO;
     uint64_t chunkStartAligned = pageStart & ~(uint64_t)(ESP_CHUNK_PAGES * PAGE_SIZE - 1);
     // Degraded (đọc kernel đang fail hàng loạt): bỏ bulk-map, chỉ map 1 page
-    // cho an toàn như DarkSwordMemoryProvider.
-    if (ESPProviderShouldBulkMap() && s_liveBytes < ESP_MAX_LIVE_BYTES) {
+    // cho an toàn như DarkSwordMemoryProvider. ESP_BULK_MAP_ENABLED=0: tắt hẳn
+    // để về đúng đường map lẻ của bản respring1.
+    if (ESP_BULK_MAP_ENABLED && ESPProviderShouldBulkMap() && s_liveBytes < ESP_MAX_LIVE_BYTES) {
         uint64_t fit = ESPChunkPageCount(vmMap, chunkStartAligned);
         if (fit > 1) {
             triedBulk = YES;

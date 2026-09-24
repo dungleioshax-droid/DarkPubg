@@ -37,6 +37,11 @@
 // MỖI frame (60Hz, box bám sát, không ngoại suy). Giá trị 15Hz chỉ áp dụng cho
 // đường kernel exploit (map page / đọc từng field).
 
+// BULK-MAP: map nhiều page liền nhau trong 1 lần (nhanh). TẮT (0) để về
+// map từng page như bản respring1 (đã mở HUD được): nghi bulk-map gây
+// respring ở lượt quét đầu sau Open HUD. Bật lại khi đã rõ nguyên nhân.
+#define ESP_BULK_MAP_ENABLED 0
+
 // Ngưỡng degraded của ESPProvider (port DarkSwordMemoryProvider của Fl0rkFF):
 // bao nhiêu lần đọc kernel fail LIÊN TIẾP thì vào degraded (bỏ bulk-map,
 // discover budget nhỏ, reset task port + xả cache héo 1 lần).
