@@ -1521,8 +1521,42 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
                g_espTrackedCount);
     }
 }
+
+static dispatch_queue_t ESPDiscoverQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.huami.darkspeed.esp-discover", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+static std::atomic_bool g_espDiscovering{false};
+
+void ESPEngineRequestDiscover(uint64_t gameBase) {
+    if (!gameBase || !ds_is_ready()) return;
+    static CFAbsoluteTime s_lastReq = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (s_lastReq && now - s_lastReq < ESP_DISCOVER_INTERVAL) return;
+    s_lastReq = now;
+
+    bool expected = false;
+    if (!g_espDiscovering.compare_exchange_strong(expected, true)) return;
+
+    dispatch_async(ESPDiscoverQueue(), ^{
+        @autoreleasepool {
+            ESPProviderBeginRead();
+            ESPEngineDiscoverTick(gameBase);
+            ESPProviderEndRead();
+            g_espDiscovering.store(false);
+        }
+    });
+}
 #else
 void ESPEngineDiscoverTick(uint64_t gameBase) {
+    (void)gameBase;
+}
+void ESPEngineRequestDiscover(uint64_t gameBase) {
     (void)gameBase;
 }
 #endif
@@ -2251,13 +2285,15 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         ESPPosHist *h = ESPPosHistSlot(tr->actor);
         ESPVector pos = {0,0,0};
         if (h->valid && nowF - h->at < kPosReadInterval) {
-            // Còn trong cửa sổ ngoại suy: KHÔNG chạm kernel, chỉ cộng vận tốc.
-            // Chặn dt để một frame trễ (timer dồn) không đẩy box vọt xa.
+            // Còn trong cửa sổ ngoại suy: KHÔNG chạm kernel, cộng vận tốc đã làm mượt.
+            // Chặn dt để một frame trễ không đẩy box vọt xa; áp dụng damping nhẹ.
             float dt = (float)(nowF - h->at);
             if (dt > 0.25f) dt = 0.25f;
-            pos.x = h->pos.x + h->vel.x * dt;
-            pos.y = h->pos.y + h->vel.y * dt;
-            pos.z = h->pos.z + h->vel.z * dt;
+            float damp = 1.0f - dt * 0.8f;
+            if (damp < 0.65f) damp = 0.65f;
+            pos.x = h->pos.x + (h->vel.x * dt) * damp;
+            pos.y = h->pos.y + (h->vel.y * dt) * damp;
+            pos.z = h->pos.z + (h->vel.z * dt) * damp;
         } else {
             // Đến hạn đọc: đọc cả cờ ẩn/chết ở đây (thay vì đọc mỗi frame).
             // bHidden ở 0xE8, bDead ở 0xE7C — cách xa nên không gộp 1 lần đọc;
@@ -2271,16 +2307,15 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             }
             ESPVector fresh = {0,0,0};
             if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
-            // Vận tốc = delta 2 mẫu gần nhất, nhưng phải KIỂM TRA HỢP LÝ trước
-            // khi dùng: 1 mẫu rác (read torn giữa 2 frame game / actor respawn /
-            // mapping héo) nhân với dt sẽ bắn box khỏi màn hình -> W2S fail hết.
-            // Log thực tế bản smooth3: "REFRESH-ZERO: trk=4 pos=0 w2s=4" xen kẽ
-            // BOX-JUMP dx/dy ±100px đúng kiểu vận tốc rác.
+            // Vận tốc = delta 2 mẫu gần nhất với bộ lọc EMA (Exponential Moving Average)
+            // để triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
             BOOL sampleReject = NO;
+            float jumpDist = 0.0f;
             if (h->valid && h->at > 0) {
                 double ddt = nowF - h->at;
                 float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
                 float jump = sqrtf(dx*dx + dy*dy + dz*dz);
+                jumpDist = jump;
                 if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
                     ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
                     float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
@@ -2288,12 +2323,17 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                         float s = ESP_MAX_VEL / sp;
                         v.x *= s; v.y *= s; v.z *= s;
                     }
-                    h->vel = v;
+                    if (h->vel.x != 0 || h->vel.y != 0 || h->vel.z != 0) {
+                        const float alphaVel = 0.45f;
+                        h->vel.x = h->vel.x * (1.0f - alphaVel) + v.x * alphaVel;
+                        h->vel.y = h->vel.y * (1.0f - alphaVel) + v.y * alphaVel;
+                        h->vel.z = h->vel.z * (1.0f - alphaVel) + v.z * alphaVel;
+                    } else {
+                        h->vel = v;
+                    }
                     h->outliers = 0;
                 } else {
-                    // Mẫu bất thường: không ngoại suy. Nếu đúng là nhảy thật
-                    // (respawn/teleport) thì 2 mẫu liên tiếp sẽ được chấp nhận
-                    // (tránh box "đóng băng" ở vị trí cũ mãi).
+                    // Mẫu bất thường: không ngoại suy.
                     h->vel = (ESPVector){0, 0, 0};
                     if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
                         sampleReject = YES;
@@ -2310,8 +2350,16 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             if (sampleReject) {
                 pos = h->pos;      // giữ vị trí cũ cho frame này
             } else {
-                h->pos = fresh;    // mẫu hợp lệ -> theo vị trí mới
-                pos = fresh;
+                if (h->valid && jumpDist > 0.0f && jumpDist < 80.0f) {
+                    // Hòa trộn vị trí mượt (smooth blend) triệt tiêu cú giật tức thì khi đọc mẫu kernel
+                    const float alphaPos = 0.70f;
+                    h->pos.x = h->pos.x * (1.0f - alphaPos) + fresh.x * alphaPos;
+                    h->pos.y = h->pos.y * (1.0f - alphaPos) + fresh.y * alphaPos;
+                    h->pos.z = h->pos.z * (1.0f - alphaPos) + fresh.z * alphaPos;
+                } else {
+                    h->pos = fresh;    // nhảy lớn hoặc mẫu đầu -> theo vị trí mới
+                }
+                pos = h->pos;
             }
             // HP cho thanh máu, cùng nhịp đọc thưa với vị trí (giữa các lần
             // đọc thì box dùng mẫu HP cũ — máu không cần ngoại suy).

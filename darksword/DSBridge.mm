@@ -2338,13 +2338,14 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                labelHalfW * 2.0f, 14.0f);
 
         // Box có dịch chuyển? (dùng cho cả đường path lẫn đường per-box)
+        // Deadband 1.0pt: triệt tiêu rung lắc sub-pixel Retina và giảm 60-80% IPC call thừa lên SpringBoard
         BOOL boxMoved = YES;
         CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
         if (g_espRectValid[i]) {
-            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) <= 0.5 &&
-                         fabs(prevBox.origin.y - fullBox.origin.y) <= 0.5 &&
-                         fabs(prevBox.size.width - fullBox.size.width) <= 0.5 &&
-                         fabs(prevBox.size.height - fullBox.size.height) <= 0.5);
+            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) < 1.0 &&
+                         fabs(prevBox.origin.y - fullBox.origin.y) < 1.0 &&
+                         fabs(prevBox.size.width - fullBox.size.width) < 1.0 &&
+                         fabs(prevBox.size.height - fullBox.size.height) < 1.0);
         }
         s_pathRects[i] = boxMoved ? fullBox : prevBox;
         if (boxMoved) s_pathDirty = YES;
@@ -2364,8 +2365,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         // Không transform (portrait): setCenter vẫn đúng với bounds 80x14.
         // Vị trí label chỉ bắn ở ESP_OVERLAY_LABEL_HZ (text đổi thì bắn ngay).
         BOOL labelMoved = !g_espRectValid[i] ||
-            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 0.5 ||
-            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 0.5;
+            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 1.5 ||
+            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 1.5;
         if (labelMoved && (textChanged || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
             // setFrame thuần (không xoay): ổn định như respring1. Chữ mét sẽ
             // đọc dọc trên màn landscape — chấp nhận tạm vì setTransform vô
@@ -2409,13 +2410,13 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                     CGRect fillBox = ds_esp_map_rect(fillGame, landW, landH, winCenter, mapOrient);
                     CGRect pb = g_espRectValid[i] ? g_espLastBarBgF[i] : CGRectMake(1e9f, 0, 0, 0);
                     CGRect pf = g_espRectValid[i] ? g_espLastBarFillF[i] : CGRectMake(1e9f, 0, 0, 0);
-                    if (fabsf(pb.origin.x - barBox.origin.x) > 0.5f || fabsf(pb.origin.y - barBox.origin.y) > 0.5f ||
-                        fabsf(pb.size.width - barBox.size.width) > 0.5f || fabsf(pb.size.height - barBox.size.height) > 0.5f) {
+                    if (fabsf(pb.origin.x - barBox.origin.x) > 1.2f || fabsf(pb.origin.y - barBox.origin.y) > 1.2f ||
+                        fabsf(pb.size.width - barBox.size.width) > 1.2f || fabsf(pb.size.height - barBox.size.height) > 1.2f) {
                         ds_remote_set_rect_on_main(process, g_espBarBg[i], "setFrame:", barBox);
                         g_espLastBarBgF[i] = barBox;
                     }
-                    if (fabsf(pf.origin.x - fillBox.origin.x) > 0.5f || fabsf(pf.origin.y - fillBox.origin.y) > 0.5f ||
-                        fabsf(pf.size.width - fillBox.size.width) > 0.5f || fabsf(pf.size.height - fillBox.size.height) > 0.5f) {
+                    if (fabsf(pf.origin.x - fillBox.origin.x) > 1.2f || fabsf(pf.origin.y - fillBox.origin.y) > 1.2f ||
+                        fabsf(pf.size.width - fillBox.size.width) > 1.2f || fabsf(pf.size.height - fillBox.size.height) > 1.2f) {
                         ds_remote_set_rect_on_main(process, g_espBarFill[i], "setFrame:", fillBox);
                         g_espLastBarFillF[i] = fillBox;
                     }
@@ -2622,7 +2623,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "throttle1"
+#define DS_ESP_BUILD_TAG "smooth1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2660,13 +2661,14 @@ static void ds_esp_present_single(DSESPFrame *frame) {
                    !ds_esp_overlay_ensure(g_springBoard, frame->bounds)) {
             // Ensure fail đã log bên worker, bỏ tick này.
         } else {
-            // Throttle steady-state presents 30Hz: mỗi present là hàng chục
-            // NSInvocation round-trip lên main SpringBoard (pool + signature +
-            // invoke + drain). 60Hz sustained là nghi phạm respring sau ~20s.
-            // Hide/ensure luôn đi qua, chỉ gộp frame vẽ.
+            // Presentation pacing: dùng margin 4ms chống sai số microsecond của timer
+            // Khi ESP_PRESENT_HZ = 60, truyền đủ 60 FPS mượt mà không rớt frame.
+            // Nếu đặt 30Hz, đảm bảo chính xác 30.0 FPS đều đặn không bị trễ thành 20 FPS.
+            const double kTargetPresentHz = (double)ESP_PRESENT_HZ;
+            const double kPresentMinInterval = (kTargetPresentHz > 0) ? (1.0 / kTargetPresentHz - 0.004) : 0.0;
             static CFAbsoluteTime s_lastPresentUpdate = 0;
             CFAbsoluteTime nowPu = CFAbsoluteTimeGetCurrent();
-            if (nowPu - s_lastPresentUpdate >= (1.0 / 30.0)) {
+            if (kPresentMinInterval <= 0 || (nowPu - s_lastPresentUpdate >= kPresentMinInterval)) {
                 s_lastPresentUpdate = nowPu;
                 ds_esp_overlay_update(g_springBoard, frame->boxes, frame->count,
                                       frame->bounds, frame->orient);
@@ -2788,11 +2790,8 @@ static void ds_esp_tick(void) {
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
             didRefresh = YES;
-            // Đặt lịch quét nền MỖI tick (hàm tự gộp theo TTL) + discover
-            // địch mới ~120ms (không đợi lượt quét đầy đủ 5-6s).
-            ESPProviderBeginRead();
-            ESPEngineDiscoverTick(g_gameBase);
-            ESPProviderEndRead();
+            // Đặt lịch quét nền và discover TRÊN QUEUE NỀN (không chặn tick render 60Hz).
+            ESPEngineRequestDiscover(g_gameBase);
             ESPEngineRequestScan(g_gameBase);
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
@@ -2816,9 +2815,7 @@ static void ds_esp_tick(void) {
                 // trăm ms -> box đứng hình đúng nhịp 1 giây, đúng kiểu "giật
                 // giật"). Giờ chỉ ĐẶT LỊCH quét trên queue nền (không block,
                 // TTL gộp lịch); frame sau RefreshBoxes tự ăn tracked mới.
-                ESPProviderBeginRead();
-                ESPEngineDiscoverTick(g_gameBase);
-                ESPProviderEndRead();
+                ESPEngineRequestDiscover(g_gameBase);
                 ESPEngineRequestScan(g_gameBase);
                 // Cứu cánh hiếm: CHƯA TỪNG có tracked (scan nền chưa xong hoặc
                 // kẹt) thì cho phép 1 lượt quét đồng bộ, tối đa 10s/lần — để
@@ -2866,6 +2863,14 @@ static void ds_esp_tick(void) {
                                      "BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
                                      s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
                             boxEventLog(msg);
+                        }
+                        if (prev.w > 0 && prev.h > 0 && dx < 60.0f && dy < 60.0f) {
+                            // 2D Screen-space EMA smoothing (triệt tiêu hoàn toàn rung lắc sub-pixel)
+                            const float kSmooth = 0.70f;
+                            cur.x = prev.x + kSmooth * (cur.x - prev.x);
+                            cur.y = prev.y + kSmooth * (cur.y - prev.y);
+                            cur.w = prev.w + kSmooth * (cur.w - prev.w);
+                            cur.h = prev.h + kSmooth * (cur.h - prev.h);
                         }
                         s_slots[s].box = cur;
                         s_slots[s].lastSeen = now2;

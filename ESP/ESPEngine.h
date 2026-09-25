@@ -23,6 +23,9 @@ void ESPEngineRequestScan(uint64_t gameBase);
 // vào tracked (vừa unhide). Gọi mỗi tick bridge; hàm tự throttle.
 void ESPEngineDiscoverTick(uint64_t gameBase);
 
+// Đặt lịch phát hiện địch mới TRÊN QUEUE NỀN (không chặn render tick).
+void ESPEngineRequestDiscover(uint64_t gameBase);
+
 // Text ngắn cho HUD SpringBoard, vd: @"ESP: 123 actors / 8 players" hoặc @"ESP: --".
 // KHÔNG quét đồng bộ nữa — chỉ đọc cache + đặt lịch quét nền.
 NSString *ESPEngineStatusText(uint64_t gameBase);
