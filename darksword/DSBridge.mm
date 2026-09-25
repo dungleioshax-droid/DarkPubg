@@ -2622,7 +2622,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "orientfix1"
+#define DS_ESP_BUILD_TAG "throttle1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2656,11 +2656,18 @@ static void ds_esp_present_single(DSESPFrame *frame) {
         if (frame->count < 0) {
             // Lệnh hide từ worker.
             if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        } else if ((!g_espWindow || !g_espContainer) &&
+                   !ds_esp_overlay_ensure(g_springBoard, frame->bounds)) {
+            // Ensure fail đã log bên worker, bỏ tick này.
         } else {
-            if ((!g_espWindow || !g_espContainer) &&
-                !ds_esp_overlay_ensure(g_springBoard, frame->bounds)) {
-                // Ensure fail đã log bên worker, bỏ tick này.
-            } else {
+            // Throttle steady-state presents 30Hz: mỗi present là hàng chục
+            // NSInvocation round-trip lên main SpringBoard (pool + signature +
+            // invoke + drain). 60Hz sustained là nghi phạm respring sau ~20s.
+            // Hide/ensure luôn đi qua, chỉ gộp frame vẽ.
+            static CFAbsoluteTime s_lastPresentUpdate = 0;
+            CFAbsoluteTime nowPu = CFAbsoluteTimeGetCurrent();
+            if (nowPu - s_lastPresentUpdate >= (1.0 / 30.0)) {
+                s_lastPresentUpdate = nowPu;
                 ds_esp_overlay_update(g_springBoard, frame->boxes, frame->count,
                                       frame->bounds, frame->orient);
             }
@@ -2971,9 +2978,10 @@ static void ds_esp_tick(void) {
                        (double)landW, (double)landH, ESPEngineLastBoxDiag());
                 for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
                     if (s_slots[s].active) {
-                        ESPLog("  slot[%d]: act=0x%llx d=%.0fm box=[%.0f,%.0f,%.0f,%.0f] age=%.2fs",
+                        ESPLog("  slot[%d]: act=0x%llx d=%.0fm box=[%.0f,%.0f,%.0f,%.0f] hp=%d age=%.2fs",
                                s, (unsigned long long)s_slots[s].actor, s_slots[s].box.distance,
                                s_slots[s].box.x, s_slots[s].box.y, s_slots[s].box.w, s_slots[s].box.h,
+                               s_slots[s].box.health,
                                now2 - s_slots[s].lastSeen);
                     }
                 }
