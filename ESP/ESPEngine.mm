@@ -194,8 +194,9 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
     } else {
         f->team = INT_MIN;
     }
-    f->hasHp = ESPReadF32(vmMap, actor + ESPOff_Char_Health, &f->hp);
-    (void)ESPReadF32(vmMap, actor + ESPOff_Char_HealthMax, &f->hpMax);
+    BOOL okhp = ESPReadF32(vmMap, actor + ESPOff_Char_Health, &f->hp);
+    BOOL okhpMax = ESPReadF32(vmMap, actor + ESPOff_Char_HealthMax, &f->hpMax);
+    f->hasHp = (okhp && okhpMax);
     f->tMesh = ESPReadU64(vmMap, actor + ESPOff_Target_Mesh, &ok);
     if (ok && ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &f->tMax) &&
         ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &f->tCur)) {
@@ -221,7 +222,9 @@ static uint64_t g_espVMProc = 0; // cache proc/vmMap cho box refresh 8Hz
 static uint64_t g_espVMMap = 0;
 static CFAbsoluteTime g_espVMAt = 0;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
-static uint64_t g_espPlayerVTable = 0; // VTable class player đã học
+static uint64_t g_espPlayerVTable = 0; // VTable class player đã học (primary)
+static std::unordered_set<uint64_t> g_espPlayerVTables; // Mọi VTable player/bot đã biết
+static int s_unameTries = 0; // Số lần thử giải mã GNames per-world
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
 static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
@@ -269,6 +272,7 @@ const char *ESPEngineLastBoxDiag(void) {
 static const char *ESPCameraResolveDiag(void); // định nghĩa ở cụm camera bên dưới
 static BOOL ESPCameraIsResolved(void);
 static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBase);
+static void ESPCamPCClear(void);
 
 // Cooldown Pass 1 discover — file-scope để ESPVerdictResetIfWorldChanged xả
 // theo world (addr tái dùng giữa match không bị kẹt cooldown cũ).
@@ -287,6 +291,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdictVt.clear();
         g_espVerdictWorld = world;
         g_espPlayerVTable = 0; // học lại VTable cho world mới
+        g_espPlayerVTables.clear();
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
@@ -296,6 +301,8 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;
+        if (!g_espUName) s_unameTries = 0; // thử resolve lại UName cho world mới
+        ESPCamPCClear();
         ESPDiscoverResetCooldowns();
     }
 }
@@ -310,6 +317,9 @@ static BOOL ESPMyTeamAndPawn(uint64_t vmMap, uint64_t world, uint64_t *outPawn, 
     uint64_t pc = ESPReadU64(vmMap, conn + ESPOff_Conn_LocalPC, &ok);
     if (!ok || !ESPIsUserPtr(pc)) return NO;
     uint64_t pawn = ESPReadU64(vmMap, pc + ESPOff_PC_LocalPawn, &ok);
+    if (!ok || !ESPIsUserPtr(pawn)) {
+        pawn = ESPReadU64(vmMap, pc + 0x528, &ok); // Fallback: AcknowledgedPawn
+    }
     if (!ok || !ESPIsUserPtr(pawn)) return NO;
     int team = (int)ESPReadU32(vmMap, pawn + ESPOff_Char_Team, &ok);
     if (!ok) return NO;
@@ -402,7 +412,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             diag->team = f.team;
         }
         // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
-        if (f.hasVtable && g_espPlayerVTable && f.vtable == g_espPlayerVTable) {
+        if (f.hasVtable && (f.vtable == g_espPlayerVTable || (g_espPlayerVTables.count(f.vtable) > 0))) {
             if (diag) diag->rule = 1;
             ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
             goto check_live;
@@ -412,8 +422,9 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             char nm[64] = {0};
             if (ESPActorNameByID(vmMap, g_espUName, f.nameID, nm)) {
                 if (ESPIsPlayerCharacterName(nm)) {
-                    if (f.hasVtable && f.vtable && !g_espPlayerVTable) {
-                        g_espPlayerVTable = f.vtable;
+                    if (f.hasVtable && f.vtable) {
+                        if (!g_espPlayerVTable) g_espPlayerVTable = f.vtable;
+                        g_espPlayerVTables.insert(f.vtable);
                         ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
                     }
                     if (diag) diag->rule = 2;
@@ -432,24 +443,23 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             }
         }
         // 2) Heuristic Mesh/Health/Team (dự phòng khi GNames fail)
-        // Yêu cầu: SkeletalMesh hợp lệ, HealthMax 50..2000, Health 0..hpMax,
-        // và nếu đã biết player VTable thì VTable PHẢI khớp (như Kernel sameClass).
+        // Yêu cầu: SkeletalMesh hợp lệ (0x510), RootComponent hợp lệ (0x208),
+        // HealthMax 50..2000, Health 0..hpMax+50,
+        // TeamID 0..200000000.
+        // Không ép trùng 1 VTable: bot (BP_PlayerPawn_TPlanAI_C) và người chơi
+        // giới tính/skin khác nhau có VTable khác nhau!
         if (f.hasMesh && ESPIsUserPtr(f.mesh) &&
+            f.hasRoot && ESPIsUserPtr(f.root) &&
             f.hasHp && f.hp >= 0 && f.hpMax >= 50 && f.hpMax <= 2000 && f.hp <= f.hpMax + 50 &&
             f.hasTeam && f.team >= 0 && f.team <= 200000000) {
-            bool sameClass = YES;
-            if (g_espPlayerVTable) {
-                sameClass = (f.hasVtable && f.vtable == g_espPlayerVTable);
+            if (f.hasVtable && f.vtable) {
+                if (!g_espPlayerVTable) g_espPlayerVTable = f.vtable;
+                g_espPlayerVTables.insert(f.vtable);
+                ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
             }
-            if (sameClass) {
-                if (!g_espPlayerVTable && f.hasVtable && f.vtable) {
-                    g_espPlayerVTable = f.vtable;
-                    ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
-                }
-                if (diag) diag->rule = 4;
-                ESPVerdictSetLocked(actor, 1, f.team);
-                goto check_live;
-            }
+            if (diag) diag->rule = 4;
+            ESPVerdictSetLocked(actor, 1, f.team);
+            goto check_live;
         }
         if (diag && f.hasMesh && ESPIsUserPtr(f.mesh)) diag->nearChar = 1;
         // 3) Hình nhân huấn luyện (ShootingPracticeTarget) theo field — dự phòng khi GNames hỏng.
@@ -508,8 +518,7 @@ check_live:;
         if (diag) diag->rule = -4;
         return NO;
     }
-    // Đồng đội: hạ verdict 1 -> 2 ngay (check_live path).
-    // (Pass ở trên đã set khi team đọc được — đây là safety nếu vào từ nhánh khác.)
+    // Đồng đội:
     int team = INT_MIN;
     if (f.hasTeam && f.team >= 0 && f.team <= 200000000) {
         team = f.team;
@@ -520,13 +529,11 @@ check_live:;
     }
     // Không lọc theo hp: người/hình nhân bị bắn gục (hp 0) vẫn tính như Kernel
     // (chỉ loại theo bHidden/bDead).
-    if (myTeam != INT_MIN && team != INT_MIN && team == myTeam && team != ESPTeam_Dummy) {
+    // Đồng đội: chỉ lọc khi CẢ HAI đều có team > 0 và BẰNG NHAU.
+    // Nếu team == 0 hoặc myTeam <= 0 (đảo chờ / solo / chưa chia team) -> KHÔNG lọc!
+    // KHÔNG hạ verdict 1 -> 2 để tránh mất vĩnh viễn actor khi game chia lại team.
+    if (myTeam > 0 && team > 0 && team == myTeam && team != ESPTeam_Dummy) {
         if (diag) diag->rule = -4; // đồng đội
-        // Hạ verdict 1 -> 2: teammate không bao giờ là địch. Giữ verdict 1 làm
-        // discover Pass 1 (enemyVerdict) gọi ESPIsEnemy lại mỗi 120ms (log cls=17).
-        // Vẫn ghi VTable để address-reuse (pool tái dùng) bắt được nếu ô đổi class.
-        ESPVerdictSetLocked(actor, 2, INT_MIN);
-        if (f.hasVtable) g_espVerdictVt[actor] = f.vtable;
         return NO;
     }
     if (outTeam) *outTeam = team;
@@ -777,20 +784,20 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     // game base. VTable vẫn là đường nhận diện chính khi GNames không có.
     {
         static uint64_t s_unameBase = 0;
-        static int s_unameTries = 0;
+        // s_unameTries: dùng biến file-scope (reset được khi đổi world).
         if (s_unameBase != gameBase) {
             s_unameBase = gameBase;
             s_unameTries = 0;
         }
         if (g_espUName) {
             // đã có, không đọc lại
-        } else if (s_unameTries >= 2) {
-            // đã fail 2 lượt cho base này: bỏ qua, không read/log lại
+        } else if (s_unameTries >= 4) {
+            // đã fail 4 lượt cho base này: bỏ qua, không read/log lại
         } else {
             s_unameTries++;
             g_espUName = ESPResolveUName(vmMap, gameBase);
             std::lock_guard<std::mutex> lk(g_espClassifyMutex);
-            ESPLog("uname=0x%llx vtableKnown=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0);
+            ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
         }
     }
 
@@ -831,12 +838,15 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             // Học VTable player ngay từ pawn của mình (như Kernel)
             {
                 std::lock_guard<std::mutex> lk(g_espClassifyMutex);
-                if (lp && !g_espPlayerVTable) {
+                if (lp) {
                     BOOL okv = NO;
                     uint64_t vt = ESPReadU64(vmMap, lp, &okv);
                     if (okv && ESPIsUserPtr(vt)) {
-                        g_espPlayerVTable = vt;
-                        ESPLog("learned player VTable=0x%llx from local pawn", (unsigned long long)vt);
+                        if (!g_espPlayerVTable) {
+                            g_espPlayerVTable = vt;
+                            ESPLog("learned player VTable=0x%llx from local pawn", (unsigned long long)vt);
+                        }
+                        g_espPlayerVTables.insert(vt);
                     }
                 }
             }
