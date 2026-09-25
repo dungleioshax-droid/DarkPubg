@@ -1926,10 +1926,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
     uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
     if (!path) return NO;
     DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0, g_espRectsAddr, (uint64_t)count);
-    if (!remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, 0, 0, 0)) {
-        if (releaseSym) DSRemoteArbCallWithTimeout(1, process, releaseSym, path);
-        return NO;
-    }
+    remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, 0, 0, 0);
     if (g_espPathObj && releaseSym) {
         DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
     }
