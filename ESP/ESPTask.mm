@@ -247,8 +247,7 @@ static uint32_t s_fakeOrigBits = 0;
 static uint64_t s_fakeOrigKobj = 0;
 static CFAbsoluteTime s_procAliveAt = 0;
 static BOOL s_procAlive = NO;
-static int s_tfpFails = 0;
-static BOOL s_tfpSkip = NO;
+
 
 static mach_port_t g_taskPort = MACH_PORT_NULL;
 static pid_t g_taskPid = 0;
@@ -465,31 +464,12 @@ BOOL ESPGameTaskEnsure(void) {
             return NO;
         }
         g_taskProc = proc;
-        // Proc mới (game restart): cho task_for_pid thử lại từ đầu — rẻ
-        // (1 syscall) và chắc chắn nếu install có entitlement.
-        s_tfpFails = 0;
-        s_tfpSkip = NO;
     }
-    // 4) Thử lấy port TRƯỚC khi patch: nếu app có entitlement (TrollStore /
-    //    ldid) thì không cần ghi kernel lần nào. Esign/không entitlement:
-    //    fail là vĩnh viễn (không đổi theo install) — 3 lần liên tiếp thì
-    //    bỏ qua hẳn, đỡ 1 syscall fail mỗi retry. Reset khi gặp proc mới.
+    // 4) BỎ HẲN task_for_pid: Esign không entitlement nên luôn fail (kr=0x5),
+    //    log dòng fail chỉ gây nhầm lẫn. Đi THẲNG sang fabrication.
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = KERN_FAILURE;
-    if (!s_tfpSkip) {
-        kr = task_for_pid(mach_task_self(), pid, &task);
-        if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-            task = MACH_PORT_NULL;
-            if (++s_tfpFails >= 3 && !s_tfpSkip) {
-                s_tfpSkip = YES;
-                ESPLog("gametask: task_for_pid unavailable (Esign?), fabricated port only");
-            }
-        } else {
-            s_tfpFails = 0;
-        }
-    }
-    if ((kr != KERN_SUCCESS || task == MACH_PORT_NULL) && ds_is_ready() &&
-        kFabricateTaskPortEnabled) {
+    if (ds_is_ready() && kFabricateTaskPortEnabled) {
         // 4b) Dựng fake task port qua kernel — không cần patch csflags nên
         // chạy cả khi proc_ro read-only (iOS 16+). Thử TRƯỚC khi patch vì
         // nhẹ và chắc chắn hơn (patch vùng read-only vừa vô ích vừa rủi ro).
@@ -497,47 +477,10 @@ BOOL ESPGameTaskEnsure(void) {
         task = ESPFabricateTaskPort(proc, pid);
         kr = (task == MACH_PORT_NULL) ? KERN_FAILURE : KERN_SUCCESS;
     }
+    // (5) Patch csflags ĐÃ XOÁ: proc_ro read-only (iOS 16+) nên chẳng bao giờ
+    // chạy, ghi vào còn rủi ro panic. Không port thì fail sạch.
     if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        // 5) Chưa được -> patch csflags của proc GAME rồi thử lại. Đây là chỗ
-        //    trước đây luôn fail ("no p_csflags offset") nên box phải map page.
-        uint64_t csAddr = ESPTaskCSFlagsAddr(proc);
-        if (!csAddr) {
-            ESPLog("gametask: no p_csflags offset (keep exploit reads)");
-            g_taskRetryAt = now + 30.0;
-            return NO;
-        }
-        uint32_t cs = ds_kread32(csAddr);
-        if (!(cs & kCSGetTaskAllow)) {
-            if (g_csInRO) {
-                // proc_ro là READ-ONLY (KTRR): ghi không dính + có thể gây
-                // panic/respring -> TUYỆT ĐỐI không ghi. Chỉ thử task_for_pid
-                // trực tiếp bên dưới (có entitlement thì vẫn qua).
-                ESPLog("gametask: csflags in proc_ro (read-only), skip patch");
-            } else {
-                uint32_t patched = (cs | kCSGetTaskAllow | kCSDebugged) &
-                                   ~(kCSHard | kCSKill | kCSRestrict | kCSRequireLV);
-                ds_kwrite32(csAddr, patched);
-                uint32_t cs2 = ds_kread32(csAddr);
-                ESPLog("gametask: csflags 0x%x -> 0x%x @0x%llx", cs, cs2,
-                       (unsigned long long)csAddr);
-                if (!(cs2 & kCSGetTaskAllow)) {
-                    // Ghi không dính (vùng bị bảo vệ / sai chỗ) -> lần sau tìm lại.
-                    ESPLog("gametask: csflags write did not stick, forgetting offset");
-                    ESPTaskForgetCSFlags();
-                    g_taskRetryAt = now + 30.0;
-                    return NO;
-                }
-            }
-        }
-        task = MACH_PORT_NULL;
-        kr = task_for_pid(mach_task_self(), pid, &task);
-    }
-    if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
-        ESPLog("gametask: task_for_pid pid=%d kr=0x%x (%s) cs=0x%x", pid, kr,
-               mach_error_string(kr), g_csOff);
-        // Offset mới chỉ SUY từ layout mà vẫn không lấy được port -> lần sau
-        // tìm lại bằng csops thay vì ghi lại đúng chỗ đó mãi.
-        if (g_csOff && !g_csVerified) ESPTaskForgetCSFlags();
+        ESPLog("gametask: no usable port pid=%d", pid);
         g_taskRetryAt = now + 10.0;
         return NO;
     }
