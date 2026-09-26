@@ -217,7 +217,7 @@ static std::atomic_int g_espProgressTotal{0};
 // (1Hz). Trước đây 2 luồng đọc/ghi unordered_map + vector cùng lúc (UB):
 // scan vừa clear/push tracked + set verdict, box path vừa iterate/read —
 // kết quả là box path ra 0 (hoặc crash ngầm) dù scan đếm đúng players.
-static std::mutex g_espClassifyMutex;
+static std::recursive_mutex g_espClassifyMutex;
 static uint64_t g_espVMProc = 0; // cache proc/vmMap cho box refresh 8Hz
 static uint64_t g_espVMMap = 0;
 static CFAbsoluteTime g_espVMAt = 0;
@@ -225,6 +225,19 @@ static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học (primary)
 static std::unordered_set<uint64_t> g_espPlayerVTables; // Mọi VTable player/bot đã biết
 static int s_unameTries = 0; // Số lần thử giải mã GNames per-world
+static uint64_t s_camPC = 0;
+static uint64_t s_camWorld = 0;
+static uint64_t s_camMgr = 0;
+
+static void ESPCamPCClearLocked(void) {
+    s_camPC = 0;
+    s_camWorld = 0;
+    s_camMgr = 0;
+}
+static void ESPCamPCClear(void) {
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+    ESPCamPCClearLocked();
+}
 static std::unordered_map<uint64_t, char> g_espVerdict; // 1=character, 3=target, 2=other
 static std::unordered_map<uint64_t, int> g_espTeamCache;
 static std::unordered_map<uint64_t, int> g_espVerdictFrame; // frame lúc kết luận, để hết hạn
@@ -251,7 +264,7 @@ static std::vector<ESPTrackedActor> g_espTracked;
 // được theo index, khác thì snap).
 static uint64_t g_espTrackGen = 0;
 uint64_t ESPEngineTrackedGen(void) {
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     return g_espTrackGen;
 }
 
@@ -272,7 +285,6 @@ const char *ESPEngineLastBoxDiag(void) {
 static const char *ESPCameraResolveDiag(void); // định nghĩa ở cụm camera bên dưới
 static BOOL ESPCameraIsResolved(void);
 static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBase);
-static void ESPCamPCClear(void);
 
 // Cooldown Pass 1 discover — file-scope để ESPVerdictResetIfWorldChanged xả
 // theo world (addr tái dùng giữa match không bị kẹt cooldown cũ).
@@ -283,7 +295,7 @@ static void ESPDiscoverResetCooldowns(void) {
 }
 
 static void ESPVerdictResetIfWorldChanged(uint64_t world) {
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     if (g_espVerdictWorld != world) {
         g_espVerdict.clear();
         g_espTeamCache.clear();
@@ -302,7 +314,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVMMap = 0;
         g_espVMAt = 0;
         if (!g_espUName) s_unameTries = 0; // thử resolve lại UName cho world mới
-        ESPCamPCClear();
+        ESPCamPCClearLocked();
         ESPDiscoverResetCooldowns();
     }
 }
@@ -349,7 +361,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
     // Giữ mutex suốt lần phân loại: map verdict/team/frame + VTable được đọc
     // và ghi từ cả scan queue lẫn timer bridge. Mỗi lần giữ chỉ ~vài lần đọc
     // kernel của 1 actor nên contention không đáng kể.
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     if (diag) {
         memset(diag, 0, sizeof(*diag));
         diag->rule = -2;
@@ -412,7 +424,7 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             diag->team = f.team;
         }
         // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
-        if (f.hasVtable && (f.vtable == g_espPlayerVTable || (g_espPlayerVTables.count(f.vtable) > 0))) {
+        if (f.hasVtable && f.vtable && ((g_espPlayerVTable && f.vtable == g_espPlayerVTable) || (g_espPlayerVTables.count(f.vtable) > 0))) {
             if (diag) diag->rule = 1;
             ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
             goto check_live;
@@ -424,8 +436,9 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
                 if (ESPIsPlayerCharacterName(nm)) {
                     if (f.hasVtable && f.vtable) {
                         if (!g_espPlayerVTable) g_espPlayerVTable = f.vtable;
-                        g_espPlayerVTables.insert(f.vtable);
-                        ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
+                        if (g_espPlayerVTables.insert(f.vtable).second) {
+                            ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
+                        }
                     }
                     if (diag) diag->rule = 2;
                     ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
@@ -454,8 +467,9 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             f.hasTeam && f.team >= 0 && f.team <= 200000000) {
             if (f.hasVtable && f.vtable) {
                 if (!g_espPlayerVTable) g_espPlayerVTable = f.vtable;
-                g_espPlayerVTables.insert(f.vtable);
-                ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
+                if (g_espPlayerVTables.insert(f.vtable).second) {
+                    ESPLog("learned player VTable=0x%llx from heuristic", (unsigned long long)f.vtable);
+                }
             }
             if (diag) diag->rule = 4;
             ESPVerdictSetLocked(actor, 1, f.team);
@@ -741,7 +755,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPScanReentryGuard reentryGuard; (void)reentryGuard;
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
-    { std::lock_guard<std::mutex> lk(g_espClassifyMutex); g_espFrame++; } // frame để verdict 2 hết hạn rồi đánh giá lại
+    { std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex); g_espFrame++; } // frame để verdict 2 hết hạn rồi đánh giá lại
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) {
         proc = procbyname("ShadowTrackerE");
@@ -796,7 +810,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         } else {
             s_unameTries++;
             g_espUName = ESPResolveUName(vmMap, gameBase);
-            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
             ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
         }
     }
@@ -837,7 +851,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             myPawn = lp;
             // Học VTable player ngay từ pawn của mình (như Kernel)
             {
-                std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+                std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
                 if (lp) {
                     BOOL okv = NO;
                     uint64_t vt = ESPReadU64(vmMap, lp, &okv);
@@ -995,7 +1009,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         // read fail, actor chưa spawn) mà xoá là refresh 60Hz trả 0 box cho tới
         // lượt quét sau (TTL 2s) — nhìn như box tắt/bật giật. Xoá tracked là
         // việc của ESPVerdictResetIfWorldChanged khi ĐỔI world.
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (!localTracked.empty()) {
             g_espTracked.swap(localTracked);
             g_espTrackGen++;
@@ -1030,14 +1044,14 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         uint64_t pawnVtCopy = 0;
         int verboseLeftCopy = 0;
         {
-            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
             pawnVtCopy = g_espPlayerVTable;
             verboseLeftCopy = g_espVerboseLeft;
         }
         ESPLog("diag vtHist(%zu)%s pawnVt=0x%llx", vts.size(), buf,
                (unsigned long long)pawnVtCopy);
         if (verboseLeftCopy > 0) {
-            std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
             if (g_espVerboseLeft > 0) g_espVerboseLeft--;
         }
     }
@@ -1342,7 +1356,7 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
     std::unordered_set<uint64_t> enemyVerdict;
     std::unordered_map<uint64_t, uint64_t> verdictVt;
     {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         trackedSet.reserve(g_espTracked.size());
         for (const auto &t : g_espTracked) trackedSet.insert(t.actor);
         hasVerdict.reserve(g_espVerdict.size());
@@ -1441,7 +1455,7 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         if (enemyVerdict.count(actor)) {
             BOOL pass1Skip = NO;
             {
-                std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+                std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
                 auto p1 = g_espPass1At.find(actor);
                 if (p1 != g_espPass1At.end() && now - p1->second < pass1Cd) {
                     pass1Skip = YES;
@@ -1504,7 +1518,7 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
     }
 
     if (!newTracked.empty()) {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         for (const auto &nt : newTracked) {
             bool exists = false;
             for (const auto &t : g_espTracked) {
@@ -1629,7 +1643,7 @@ static uint64_t ESPTryLPOff(uint64_t vmMap, uint64_t gameInst, uint32_t off,
 
 static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
     if (!ESPIsUserPtr(gameInst)) return 0;
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     // 1) Cache dương: re-validate nhanh (gameInst đổi/world mới thì tự rớt).
     if (g_espLPInstFound == gameInst && g_espLPOffFound) {
         char st[64] = {0};
@@ -1688,7 +1702,7 @@ static const char *ESPCameraResolveDiag(void) {
 }
 
 static BOOL ESPCameraIsResolved(void) {
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     return g_espLPInstFound != 0;
 }
 
@@ -1799,17 +1813,11 @@ const char *ESPEngineBoxPerfText(void) {
     return g_perfBuf;
 }
 
-// PC cache theo world: PC (controller) ổn định cả trận, resolve lại khi đổi
-// world hoặc khi CamMgr read fail. Tiết kiệm 3 kernel reads mỗi refresh.
-static uint64_t s_camPC = 0;
-static uint64_t s_camWorld = 0;
-static uint64_t s_camMgr = 0; // PC ổn định cả trận -> cammgr cũng ổn định, cache luôn
-
 static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
     // Không giữ lock ngoài suốt quá trình (ESPResolvePC tự lock trong —
     // mutex non-recursive). 2 threads cùng resolve 1 lúc là benign.
     {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (s_camWorld == world && s_camPC) return s_camPC;
     }
     BOOL ok = NO;
@@ -1828,7 +1836,7 @@ static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
         if (ok && ESPIsUserPtr(gameInst)) pc = ESPResolvePC(vmMap, gameInst);
     }
     if (pc) {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (s_camWorld != world) ESPLog("camPC pc=0x%llx", (unsigned long long)pc);
         s_camPC = pc;
         s_camWorld = world;
@@ -1836,17 +1844,10 @@ static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
     return pc;
 }
 
-static void ESPCamPCClear(void) {
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
-    s_camPC = 0;
-    s_camWorld = 0;
-    s_camMgr = 0;
-}
-
 // CamMgr cache theo (world, pc): đọc 1 lần rồi dùng lại, xả khi read fail.
 static uint64_t ESPCamMgrCached(uint64_t vmMap, uint64_t world, uint64_t pc) {
     {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (s_camWorld == world && s_camPC == pc && s_camMgr) return s_camMgr;
     }
     BOOL ok = NO;
@@ -1855,7 +1856,7 @@ static uint64_t ESPCamMgrCached(uint64_t vmMap, uint64_t world, uint64_t pc) {
         ESPCamPCClear();
         return 0;
     }
-    std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
     if (s_camWorld == world && s_camPC == pc) s_camMgr = cm;
     return cm;
 }
@@ -1869,16 +1870,10 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     if (!gameBase || !ds_is_ready()) return NO;
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) return NO;
-    // Reuse world từ cache nếu có để đỡ scan lại. TUYỆT ĐỐI không tự kick scan:
-    // ESPEngineScan gọi hàm này (diag probe) và HUD tick gọi nó 4Hz — tự kick
-    // scan ở đây là đệ quy vô hạn (bug: log 'scan start' spam, không scan nào
-    // kết thúc). Scan nền do ESPEngineRequestScan lo; camera chỉ ăn theo cache.
-    uint64_t world = g_espCache.world;
-    if (!world || t_espInScan) {
-        // Đang scan hoặc chưa có world: tự đi tìm world qua viewport, rẻ.
-        world = ESPWorldViaViewport(vmMap, gameBase);
-        if (!world) return NO;
-    }
+    // Viewport world luôn trỏ map/world đang active. Fallback về cache.
+    uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
+    if (!world) world = g_espCache.world;
+    if (!world) return NO;
     uint64_t pc = ESPResolvePCCached(vmMap, world);
     if (!pc) return NO;
     uint64_t camMgr = ESPCamMgrCached(vmMap, world, pc);
@@ -2139,7 +2134,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
     if (!foundTracked.empty()) {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (g_espTracked.empty()) {
             g_espTracked = foundTracked;
             g_espTrackGen++;
@@ -2258,7 +2253,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     // thread_local: refresh chạy 60Hz nên giữ capacity, không cấp phát mỗi frame.
     static thread_local std::vector<ESPTrackedActor> tracked;
     {
-        std::lock_guard<std::mutex> lk(g_espClassifyMutex);
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         tracked = g_espTracked;
         if (outGen) *outGen = g_espTrackGen;
     }
@@ -2311,8 +2306,10 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             uint8_t flags[2] = {0, 0};
             if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
                 if (flags[0] & 0x1) { cHid++; h->valid = NO; continue; }
-                if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
-                    if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
+                if (tr->kind != 3) {
+                    if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
+                        if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
+                    }
                 }
             }
             ESPVector fresh = {0,0,0};
