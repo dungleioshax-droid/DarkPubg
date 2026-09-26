@@ -1,10 +1,9 @@
 //
 //  ESPMemory.h
-//  Đọc memory của game qua kernel, KHÔNG dùng task_for_pid.
-//  Cơ chế: map 1 LẦN cả vùng của vm_map_entry (vmmapremoterange) rồi giữ vĩnh
-//  viễn — các lần đọc sau chỉ còn memcpy. Không LRU, không dealloc trên đường
-//  nóng (tránh ghi/hạ refcount vm_object liên tục -> giật/respring).
-//  Chạy trong app process đã có DarkSword KRW.
+//  Đọc memory game DUY NHẤT qua task port (mach_vm_read_overwrite, syscall
+//  thuần như aovcheat). Kernel Read (region map / vmmapremotepage) đã xoá sạch.
+//  vmMap trong tham số chỉ còn để validate/callers cũ — đường đọc không dùng.
+//  Không port -> read fail (không fallback). Chạy trong app đã dựng port.
 //
 
 #ifndef ESPMemory_h

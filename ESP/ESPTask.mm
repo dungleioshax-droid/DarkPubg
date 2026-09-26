@@ -498,7 +498,7 @@ BOOL ESPTaskRead(uint64_t remoteAddr, void *buf, uint64_t len) {
 #else
     mach_port_t task = g_taskPort;
     if (task == MACH_PORT_NULL || !remoteAddr || !buf || !len) return NO;
-    if (len > 0x10000) return NO;
+    if (len > 0x40000) return NO;
     if (remoteAddr < 0x100000000ULL || remoteAddr > 0x300000000000ULL - len) return NO;
     // Port giả không giữ ref lên task game: game chết giữa 2 lần verify (2s)
     // mà vẫn đọc vào port là UAF -> panic. Chặn bằng proc pid cache 0.5s
@@ -516,10 +516,21 @@ BOOL ESPTaskRead(uint64_t remoteAddr, void *buf, uint64_t len) {
     }
     // vm_read_overwrite (không phải mach_vm_read_overwrite — SDK iOS không khai
     // báo tiền tố mach_vm_*; trên arm64 vm_size_t đã là 64-bit nên tương đương).
-    vm_size_t outSize = 0;
-    kern_return_t kr = vm_read_overwrite(task, (vm_address_t)remoteAddr,
-                                         (vm_size_t)len, (vm_address_t)buf, &outSize);
-    if (kr == KERN_SUCCESS && outSize == (vm_size_t)len) {
+    // Đọc lớn thì chia khúc (syscall vẫn rẻ) — không còn đường kernel nào khác.
+    uint8_t *out = (uint8_t *)buf;
+    uint64_t left = len;
+    uint64_t cur = remoteAddr;
+    while (left > 0) {
+        uint64_t step = left > 0x10000 ? 0x10000 : left;
+        vm_size_t outSize = 0;
+        kern_return_t kr = vm_read_overwrite(task, (vm_address_t)cur,
+                                             (vm_size_t)step, (vm_address_t)out, &outSize);
+        if (kr != KERN_SUCCESS || outSize != (vm_size_t)step) break;
+        out += step;
+        cur += step;
+        left -= step;
+    }
+    if (left == 0) {
         g_taskReadFails = 0;
         return YES;
     }

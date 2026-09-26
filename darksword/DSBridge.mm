@@ -131,19 +131,7 @@ extern "C" {
 #import "utils.h"
 }
 
-// Forward declarations from TaskRop/vm.m (avoid pulling the full RemoteCall.h
-// which clashes with our DSRemoteCall.h shim). Layout must match
-// `struct vmshmem` in Vendor/darksword-kexploit/TaskRop/RemoteCall.h.
-struct vmshmem {
-    uint64_t port;
-    uint64_t remoteAddress;
-    uint64_t localAddress;
-    bool used;
-};
-extern "C" void vmmapiterateentries(uint64_t vmmapptr,
-    void (^itblock)(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop));
-extern "C" struct vmshmem vmmapremotepage(uint64_t vmMap, uint64_t address);
-extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
+// (Forward declarations vmmap*/vmshmem/mach_vm_deallocate đã xoá cùng Kernel Read.)
 
 static const NSInteger kDSSpringBoardHUDTag = 0x54534844; // "TSHD"
 static const CGFloat kDSHUDMinFontSize = 9.0;
@@ -654,35 +642,8 @@ static uint64_t ds_find_game_proc(const char *wanted, pid_t *outPid, NSString **
     return best;
 }
 
-static uint64_t ds_scan_process_base(uint64_t vmMap) {
-    if (!vmMap) return 0;
-    __block uint64_t found = 0;
-    // Pass 1: entries that look like a file-backed __TEXT (alias == 0), like decrypt.m.
-    // Pass 2: any mapping with MH_MAGIC_64.
-    for (int pass = 0; pass < 2 && !found; pass++) {
-        vmmapiterateentries(vmMap, ^(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop) {
-            if (found) return;
-            if (start < 0x100000000ULL) return;
-            if (start >= 0xFFFFFF8000000000ULL) return;
-            if (end <= start || (end - start) < 0x4000) return;
-            if (pass == 0 && off_vm_map_entry_vme_alias) {
-                uint64_t raw = ds_kread64(entry + off_vm_map_entry_vme_alias);
-                if ((raw >> 12) != 0) return;
-            }
-            struct vmshmem shmem = vmmapremotepage(vmMap, start);
-            if (!shmem.used || !shmem.localAddress) return;
-            uint32_t magic = *(volatile uint32_t *)(uintptr_t)shmem.localAddress;
-            mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)shmem.localAddress, PAGE_SIZE);
-            if (shmem.port) mach_port_deallocate(mach_task_self_, (mach_port_t)shmem.port);
-            if (magic == MH_MAGIC_64 || magic == MH_MAGIC) {
-                found = start;
-                *stop = YES;
-            }
-        });
-    }
-    return found;
-}
-
+// ds_scan_process_base (kernel-walk map từng entry) đã XOÁ — tìm base duy
+// nhất qua TASK_DYLD_INFO (ds_game_base_via_dyld, syscall thuần kiểu aovcheat).
 static uint64_t ds_dyld_read(mach_port_t task, uint64_t remote, void *buf, uint64_t len) {
     if (task == MACH_PORT_NULL || !remote || !buf || !len || len > 0x1000) return 0;
     vm_size_t out = 0;
@@ -744,8 +705,9 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
         }
         uint64_t task = taskbyproc(proc);
         uint64_t vmMap = task ? task_get_vm_map(task) : 0;
-        // Đường nhanh kiểu aovcheat: base qua TASK_DYLD_INFO (syscall thuần).
-        // Chỉ rớt về kernel-walk khi chưa có task port.
+        (void)vmMap; // chỉ còn để validate proc/task, không walk/map gì nữa
+        // DUY NHẤT đường này (kiểu aovcheat): base qua TASK_DYLD_INFO.
+        // Không port -> base=0 (mù tới khi có port), không kernel-walk nữa.
         uint64_t base = 0;
         ESPGameTaskEnsure();
         mach_port_t pt = ESPGameTaskPort();
@@ -753,7 +715,6 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
             base = ds_game_base_via_dyld(pt, cname);
             if (!base) base = ds_game_base_via_dyld(pt, "Shadow");
         }
-        if (!base) base = ds_scan_process_base(vmMap);
         if (base) {
             g_gameBase = base;
             g_gamePid = pid;
@@ -2602,7 +2563,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "dyldbase1"
+#define DS_ESP_BUILD_TAG "taskonly1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
