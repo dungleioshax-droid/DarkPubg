@@ -191,7 +191,7 @@ static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
 static int g_espRectsCap = 0;            // số CGRect buffer chứa được
-static BOOL g_espPathDisabled = YES;     // CAShapeLayer batching crashes SpringBoard; default to stable per-box views
+static BOOL g_espPathDisabled = NO;      // Bật CAShapeLayer batching để vẽ tất cả box chỉ trong 1 call, triệt tiêu hoàn toàn giật lag và respring
 static unsigned long g_espPathCalls = 0;
 static unsigned long g_espPathBoxes = 0;
 static unsigned long g_espPathFails = 0;
@@ -1899,22 +1899,31 @@ static void ds_esp_path_clear(RemoteCall *process) {
         g_espPathObj = 0;
     }
     if (g_espPathLayer && process && process.trojanMem) {
-        remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), 0, 0, 0, 0);
+        ds_perform_on_springboard_main(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), 0, YES);
     }
 }
 
 static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
-    if (!process || !process.trojanMem || !g_espPathLayer || !rects || count <= 0) return NO;
+    if (!process || !process.trojanMem || !g_espPathLayer) return NO;
+    if (!rects || count <= 0) {
+        ds_esp_path_clear(process);
+        return YES;
+    }
     size_t bytes = (size_t)count * sizeof(CGRect);
     if (!g_espRectsAddr || g_espRectsCap < count) {
-        g_espRectsAddr = 0;
-        g_espRectsCap = 0;
+        if (g_espRectsAddr) {
+            void *freeSym = ds_remote_system_symbol("free");
+            if (freeSym) DSRemoteArbCallWithTimeout(1, process, freeSym, g_espRectsAddr);
+            g_espRectsAddr = 0;
+            g_espRectsCap = 0;
+        }
         void *mallocSym = ds_remote_system_symbol("malloc");
         if (!mallocSym) return NO;
-        uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)bytes);
+        int allocCap = count > 32 ? count : 32;
+        uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)(allocCap * sizeof(CGRect)));
         if (!addr) return NO;
         g_espRectsAddr = addr;
-        g_espRectsCap = count;
+        g_espRectsCap = allocCap;
     }
     if (![process remote_write:g_espRectsAddr from:rects size:(uint64_t)bytes]) return NO;
     void *createSym = ds_remote_system_symbol("CGPathCreateMutable");
@@ -1926,7 +1935,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
     uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
     if (!path) return NO;
     DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0, g_espRectsAddr, (uint64_t)count);
-    remote_msg(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, 0, 0, 0);
+    ds_perform_on_springboard_main(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, YES);
     if (g_espPathObj && releaseSym) {
         DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
     }
@@ -1998,7 +2007,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_trace("esp ensure: start bounds=%.0fx%.0f", portraitBounds.size.width,
              portraitBounds.size.height);
     // Session/process mới: địa chỉ path layer + buffer CGRect cũ không còn dùng
-    // được (object cũ leak như policy HUD).
+    g_espPathDisabled = NO;
     g_espPathLayer = 0;
     g_espPathObj = 0;
     g_espRectsAddr = 0;
@@ -2130,6 +2139,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
             if (clearLayer) ds_perform_on_springboard_main(process, pl, ds_remote_sel(process, "setFillColor:"), clearLayer, YES);
             ds_remote_set_double_on_main(process, pl, "setLineWidth:", kDSESPBorder);
             ds_remote_set_double_on_main(process, pl, "setSpeed:", 999.0);
+            ds_remote_set_rect_on_main(process, pl, "setFrame:", portraitBounds);
             uint64_t containerLayer = ds_remote_get_object_on_main(process, container, "layer");
             if (containerLayer) ds_perform_on_springboard_main(process, containerLayer, ds_remote_sel(process, "addSublayer:"), pl, YES);
             g_espPathLayer = pl;
@@ -2210,6 +2220,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         g_espWindowHiddenCache = wantHidden;
     }
     if (wantHidden) {
+        ds_esp_path_clear(process);
         // Hide stale boxes once
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
             if (!g_espHiddenCache[i]) {
@@ -2240,6 +2251,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     if (!CGRectEqualToRect(g_espLastContainerBounds, portraitBounds)) {
         ds_remote_set_rect_on_main(process, g_espWindow, "setFrame:", portraitBounds);
         ds_remote_set_rect_on_main(process, g_espContainer, "setFrame:", portraitBounds);
+        if (g_espPathLayer) {
+            ds_remote_set_rect_on_main(process, g_espPathLayer, "setFrame:", portraitBounds);
+        }
         g_espLastContainerBounds = portraitBounds;
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
@@ -2251,9 +2265,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
 
-    // Rect đã map cho path layer (0 = box ẩn -> không vẽ).
+    // Rect đã map cho path layer (chỉ chứa các box visible).
     CGRect s_pathRects[ESPOverlayMaxBoxes];
-    memset(s_pathRects, 0, sizeof(s_pathRects));
+    int s_pathCount = 0;
     BOOL s_pathDirty = NO;
     static int s_pathFailStreak = 0;
 
@@ -2292,18 +2306,30 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         CGRect lf = CGRectMake(labelCenter.x - labelHalfW, labelCenter.y - 7.0f,
                                labelHalfW * 2.0f, 14.0f);
 
-        // Box có dịch chuyển? (dùng cho cả đường path lẫn đường per-box)
-        // Ngưỡng 0.25pt: bám mượt chuyển động từng pixel, triệt tiêu hiện tượng giật bậc thang
+        // Box có dịch chuyển?
+        // Khi dùng path layer: ngưỡng 0.25pt cực nhạy và mượt (chỉ 1 remote call/frame).
+        // Khi fallback per-box: ngưỡng 2.0pt để chống bão NSInvocation gây respring.
         BOOL boxMoved = YES;
         CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
         if (g_espRectValid[i]) {
-            boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
-                        fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
-                        fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
-                        fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
+            if (g_espPathLayer) {
+                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
+                            fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
+                            fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
+                            fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
+            } else {
+                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
+                            fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
+                            fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
+                            fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
+            }
         }
-        s_pathRects[i] = boxMoved ? fullBox : prevBox;
         if (boxMoved) s_pathDirty = YES;
+
+        if (fullBox.size.width >= 1.0f && fullBox.size.height >= 1.0f) {
+            s_pathRects[s_pathCount++] = fullBox;
+        }
+
         if (!g_espPathLayer && boxMoved && g_espBorders[i][0]) {
             // Fallback: 1 setFrame cho view viền của box này.
             ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
@@ -2335,9 +2361,11 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         g_espRectValid[i] = YES;
     }
 
-    // Batch: dựng lại toàn bộ path một lần cho MỌI box (5 remote call).
-    if (g_espPathLayer && s_pathDirty) {
-        if (!ds_esp_path_update(process, s_pathRects, (int)ESPOverlayMaxBoxes)) {
+    // Batch: dựng lại toàn bộ path một lần cho MỌI box (chỉ 1 remote call setPath, ~2ms).
+    static int s_lastPathCount = -1;
+    if (g_espPathLayer && (s_pathDirty || s_lastPathCount != s_pathCount)) {
+        s_lastPathCount = s_pathCount;
+        if (!ds_esp_path_update(process, s_pathRects, s_pathCount)) {
             g_espPathFails++;
             if (++s_pathFailStreak >= 3) {
                 // Hỏng liên tục -> trả về đường vẽ từng box (an toàn, không để
@@ -2526,7 +2554,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "smooth1"
+#define DS_ESP_BUILD_TAG "pathlayer1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
