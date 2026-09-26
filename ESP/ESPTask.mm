@@ -197,6 +197,11 @@ static const int kTaskReadFailLimit = 64;
 // Nhịp kiểm tra proc game còn sống (chống UAF fake port, xem dưới).
 static const CFAbsoluteTime kTaskProcAliveInterval = 0.5;
 
+// KILL SWITCH bisect: TẮT ghi kernel ip_kobject (nghi là nguyên nhân respring
+// lúc mở HUD — panic ngay trước khi ESP hiện). Khi NO: y hệt đường đọc
+// exploit- từng trang như bản orientfix1 đã chạy 21s ổn định.
+static const BOOL kFabricateTaskPortEnabled = NO;
+
 // ---- FAKE TASK PORT (cơ chế khác thay Kernel Read) ----
 // task_for_pid chết trên iOS 16+ (proc_ro read-only, không patch được
 // csflags). Thay vì exploit dance từng page, dựng 1 task port GIẢ:
@@ -410,7 +415,8 @@ BOOL ESPGameTaskEnsure(void) {
             s_tfpFails = 0;
         }
     }
-    if ((kr != KERN_SUCCESS || task == MACH_PORT_NULL) && ds_is_ready()) {
+    if ((kr != KERN_SUCCESS || task == MACH_PORT_NULL) && ds_is_ready() &&
+        kFabricateTaskPortEnabled) {
         // 4b) Dựng fake task port qua kernel — không cần patch csflags nên
         // chạy cả khi proc_ro read-only (iOS 16+). Thử TRƯỚC khi patch vì
         // nhẹ và chắc chắn hơn (patch vùng read-only vừa vô ích vừa rủi ro).
