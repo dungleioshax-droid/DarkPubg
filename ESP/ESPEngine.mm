@@ -45,11 +45,11 @@ static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 // -> app bị Jetsam kill giữa lúc quét (scan đứng ~50%). Đọc 1 cửa sổ 0xF00
 // byte chỉ còn 1-2 vòng cho mỗi actor.
 //
-// Cửa sổ này đi qua PAGE CACHE của ESPMemory (không phải ESPReadWindow map-rồi-
-// nhả từng lần): 0xF00 < 1 page nên nó nằm gọn trong page đầu của actor, và
-// page đó sau lần đầu ở lại cache (256 slot, LRU). Log thực tế trước đây:
+// Cửa sổ này đi qua REGION MAP của ESPMemory (không phải ESPReadWindow map-rồi-
+// nhả từng lần): 0xF00 < 1 page nên nó nằm gọn trong page đầu của actor, và cả
+// VÙNG chứa page đó được map 1 lần rồi giữ vĩnh viễn. Log thực tế trước đây:
 // quét đầy đủ mất ~10s (132 actor x 1 vòng map+refcount+dealloc); sau khi dùng
-// cache thì các lượt quét sau chỉ còn memcpy — scan đầy đủ không còn là cú
+// region map thì các lượt quét sau chỉ còn memcpy — quét đầy đủ không còn là cú
 // giật 10s, và kernel cũng bớt hàng nghìn vòng map/refcount mỗi phút.
 #define ESP_ACTOR_WINDOW 0xF00
 // Bound sanity cho tọa độ world (cm): map PUBG origin ở góc nên tọa độ tới
@@ -1888,8 +1888,8 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
     float fov = 0, aspect = 0;
     {
         uint8_t raw[0x38] = {0};
-        // ESPMemoryRead (0x38 < 1 page) đi đường page cache — sau lần đầu là
-        // memcpy thuần; ESPReadWindow luôn map page mới (~20ms). cam rẻ hơn ~10x.
+        // ESPMemoryRead (0x38 < 1 page) đi đường region map — sau lần đầu là
+        // memcpy thuần; trước đây ESPReadWindow map page mới mỗi lần (~20ms).
         if (ESPMemoryRead(vmMap, pov, raw, sizeof(raw))) {
             memcpy(&loc, raw + ESPOff_POV_Location, sizeof(loc));
             memcpy(&rot, raw + ESPOff_POV_Rotation, sizeof(rot));

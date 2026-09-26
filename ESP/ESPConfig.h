@@ -33,10 +33,10 @@
 // chỉ là 1 syscall (~µs) nên ESPEngineRefreshBoxes bỏ qua mốc này và đọc vị trí
 // MỖI frame. Giá trị 20Hz chỉ áp dụng cho đường kernel exploit (map page / đọc từng field).
 
-// BULK-MAP: map nhiều page liền nhau trong 1 lần (nhanh). TẮT (0) để về
-// map từng page như bản respring1 (đã mở HUD được): nghi bulk-map gây
-// respring ở lượt quét đầu sau Open HUD. Bật lại khi đã rõ nguyên nhân.
-#define ESP_BULK_MAP_ENABLED 0
+// BULK-MAP: map nhiều page liền nhau trong 1 lần. Từ bản "region map" (map 1
+// lần cho cả vùng vm_map_entry rồi giữ vĩnh viễn, bỏ LRU/dealloc) ESPMemory
+// LUÔN map theo vùng — cờ này chỉ còn mang tính thông tin, giữ để tương thích.
+#define ESP_BULK_MAP_ENABLED 1
 
 // Ngưỡng degraded của ESPProvider (port DarkSwordMemoryProvider của Fl0rkFF):
 // bao nhiêu lần đọc kernel fail LIÊN TIẾP thì vào degraded (bỏ bulk-map,
