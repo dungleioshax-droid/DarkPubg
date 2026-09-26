@@ -81,7 +81,10 @@ static NSString *const kCSExtraKeyOff = @"esp.cs_off";
 static NSString *const kCSExtraKeyRO = @"esp.cs_in_ro";
 
 static inline BOOL ESPTaskIsKernelPtr(uint64_t v) {
-    return (v >> 48) == 0xffffULL; // con trỏ kernel heap/text
+    // Dùng chung ds_isvalid (0xFFFFFF/0xFFFFFE + chấp nhận PAC variants) như
+    // mọi chỗ khác. Bản cũ check (v>>48)==0xffff strict quá -> rớt oan con trỏ
+    // PAC-signed (log: task->map bail dù map thật) làm mù ESP toàn tập.
+    return ds_isvalid(v);
 }
 
 static BOOL ESPTaskOurCSFlags(uint32_t *out) {
@@ -312,7 +315,7 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
         ESPLog("gametask: fake port task mismatch (proc_ro task != taskbyproc)");
         return MACH_PORT_NULL;
     }
-    uint64_t map = ds_kread64(task + off_task_map);
+    uint64_t map = task_get_vm_map(task); // ds_kreadptr bên trong: strip PAC
     if (!ESPTaskIsKernelPtr(map)) {
         ESPLog("gametask: fab bail task->map not kptr");
         return MACH_PORT_NULL;
