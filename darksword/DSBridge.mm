@@ -2293,39 +2293,37 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                labelHalfW * 2.0f, 14.0f);
 
         // Box có dịch chuyển? (dùng cho cả đường path lẫn đường per-box)
-        // Deadband 1.0pt: triệt tiêu rung lắc sub-pixel Retina và giảm 60-80% IPC call thừa lên SpringBoard
+        // Deadband 1.5pt: triệt tiêu rung lắc sub-pixel Retina và giảm 60-80% IPC call thừa lên SpringBoard
         BOOL boxMoved = YES;
         CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
         if (g_espRectValid[i]) {
-            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) < 1.0 &&
-                         fabs(prevBox.origin.y - fullBox.origin.y) < 1.0 &&
-                         fabs(prevBox.size.width - fullBox.size.width) < 1.0 &&
-                         fabs(prevBox.size.height - fullBox.size.height) < 1.0);
+            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) < 1.5 &&
+                         fabs(prevBox.origin.y - fullBox.origin.y) < 1.5 &&
+                         fabs(prevBox.size.width - fullBox.size.width) < 1.5 &&
+                         fabs(prevBox.size.height - fullBox.size.height) < 1.5);
         }
         s_pathRects[i] = boxMoved ? fullBox : prevBox;
         if (boxMoved) s_pathDirty = YES;
-        if (!g_espPathLayer && boxMoved) {
+        if (!g_espPathLayer && boxMoved && g_espBorders[i][0]) {
             // Fallback: 1 setFrame cho view viền của box này.
             ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
         }
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
+        // Rate-limit setText: tối đa 5Hz (200ms) để không dồn IPC alloc/setText/release vào SpringBoard
+        static CFAbsoluteTime s_lastTextAt[ESPOverlayMaxBoxes] = {0};
         BOOL textChanged = (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0);
-        if (textChanged) {
+        if (textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.2)) {
+            s_lastTextAt[i] = nowP;
             NSString *dist = [NSString stringWithUTF8String:distTxt];
             ds_remote_set_text_on_main(process, g_espLabels[i], dist);
             snprintf(g_espLastDist[i], sizeof(g_espLastDist[i]), "%s", distTxt);
         }
-        // Với transform: setCenter trên bounds đã set ở block mapOrient.
-        // Không transform (portrait): setCenter vẫn đúng với bounds 80x14.
-        // Vị trí label chỉ bắn ở ESP_OVERLAY_LABEL_HZ (text đổi thì bắn ngay).
+        // Vị trí label chỉ bắn ở ESP_OVERLAY_LABEL_HZ (không dồn mỗi frame theo textChanged)
         BOOL labelMoved = !g_espRectValid[i] ||
-            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 1.5 ||
-            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 1.5;
-        if (labelMoved && (textChanged || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
-            // setFrame thuần (không xoay): ổn định như respring1. Chữ mét sẽ
-            // đọc dọc trên màn landscape — chấp nhận tạm vì setTransform vô
-            // tác dụng trên SpringBoard nhà mình.
+            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 2.0 ||
+            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 2.0;
+        if (labelMoved && (!g_espRectValid[i] || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
             ds_remote_set_rect_on_main(process, g_espLabels[i], "setFrame:", lf);
             g_espLastLabelCenter[i] = labelCenter;
             g_espLastLabelAt[i] = nowP;
@@ -2528,7 +2526,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "respringfix1"
+#define DS_ESP_BUILD_TAG "respringfix2"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
