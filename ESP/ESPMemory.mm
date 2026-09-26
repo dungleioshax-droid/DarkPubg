@@ -23,9 +23,11 @@
 #import "ESPConfig.h"
 #import "ESPTask.h"
 #import "ESPProvider.h"
+#import <Foundation/Foundation.h>
 #import <mach/mach.h>
 #include <atomic>
 #include <mutex>
+#include <string.h>
 
 #if USE_DARKSWORD
 extern "C" {
@@ -97,6 +99,19 @@ static uint64_t s_chunkFails = 0;
 // scan queue lẫn timer bridge queue đều đọc.
 static std::atomic<uint64_t> s_taskReads{0};
 static std::atomic<uint64_t> s_kernelReads{0};
+// Last-entry: quét tuần tự (GNames segment scan, mảng actor) chạm các page
+// liền kề trong cùng entry -> kiểm tra entry trước đó trước (2 read), khỏi
+// walk cả map (hàng nghìn kernel read) mỗi miss.
+static uint64_t s_lastEntryStart = 0;
+static uint64_t s_lastEntryEnd = 0;
+// Negative cache: page đã fail toàn tập (walk + map lẻ đều hỏng) -> nhớ lại
+// để lần sau bỏ qua ngay, khỏi walk lại. TTL ngắn (game loading có thể map
+// sau). KHÔNG lock riêng — dùng chung s_espReadMutex như mọi state khác.
+#define ESP_NEG_MAX 512
+#define ESP_NEG_TTL 3.0
+static uint64_t s_negPage[ESP_NEG_MAX] = {0};
+static CFAbsoluteTime s_negAt[ESP_NEG_MAX] = {0};
+static int s_negNext = 0;
 
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = s_cacheHit;
@@ -193,6 +208,15 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
     }
     s_cacheMiss++;
     if (s_regionCount >= ESP_REGION_MAX) return NO;
+    // Negative cache: page này vừa fail -> bỏ qua ngay, khỏi walk lại.
+    {
+        CFAbsoluteTime nowN = CFAbsoluteTimeGetCurrent();
+        for (int i = 0; i < ESP_NEG_MAX; i++) {
+            if (s_negPage[i] == pageStart && nowN - s_negAt[i] < ESP_NEG_TTL) {
+                return NO;
+            }
+        }
+    }
 
     // Vùng lớn chỉ khi còn dưới trần và không degraded. Degraded -> map 1 page
     // (vẫn giữ vĩnh viễn) cho an toàn như DarkSwordMemoryProvider.
@@ -202,10 +226,23 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
     uint64_t base = pageStart;
     uint64_t pages = 1;
     if (allowLarge) {
-        uint64_t entry = vmmapfindentry(vmMap, pageStart);
         uint64_t entryStart = 0, entryEnd = 0;
-        if (entry) vmentrygetrange(entry, &entryStart, &entryEnd);
-        if (entry && entryEnd > pageStart) {
+        if (pageStart >= s_lastEntryStart && pageStart < s_lastEntryEnd) {
+            // Quét tuần tự: trúng entry lần trước -> khỏi walk cả map.
+            entryStart = s_lastEntryStart;
+            entryEnd = s_lastEntryEnd;
+        } else {
+            uint64_t entry = vmmapfindentry(vmMap, pageStart);
+            if (entry) vmentrygetrange(entry, &entryStart, &entryEnd);
+            if (entry && entryEnd > entryStart && entryStart >= 0x1000 &&
+                pageStart >= entryStart && pageStart < entryEnd) {
+                s_lastEntryStart = entryStart;
+                s_lastEntryEnd = entryEnd;
+            } else {
+                entryStart = 0; entryEnd = 0;
+            }
+        }
+        if (entryEnd > pageStart) {
             base = pageStart & ~(ESP_REGION_BYTES - 1);
             if (base < entryStart) base = entryStart; // entryStart đã page-align
             base = ESPRegionAvoidOverlap(base, pageStart);
@@ -231,7 +268,13 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
         base = pageStart;
         pages = 1;
         sh = vmmapremotepage(vmMap, pageStart);
-        if (!sh.used || !sh.localAddress) return NO;
+        if (!sh.used || !sh.localAddress) {
+            // Fail toàn tập: nhớ lại để lần sau khỏi walk vô ích (TTL ngắn).
+            s_negPage[s_negNext] = pageStart;
+            s_negAt[s_negNext] = CFAbsoluteTimeGetCurrent();
+            s_negNext = (s_negNext + 1) % ESP_NEG_MAX;
+            return NO;
+        }
     } else {
         s_chunkMaps++;
         s_chunkPages += pages;
@@ -256,6 +299,11 @@ static void ESPRegionFlushLocked(void) {
     }
     s_regionCount = 0;
     s_liveBytes = 0;
+    s_lastEntryStart = 0;
+    s_lastEntryEnd = 0;
+    memset(s_negPage, 0, sizeof(s_negPage));
+    memset(s_negAt, 0, sizeof(s_negAt));
+    s_negNext = 0;
 }
 
 void ESPMemoryFlushPageCache(void) {

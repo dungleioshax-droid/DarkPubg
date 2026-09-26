@@ -249,12 +249,18 @@ static uint64_t ESPScanSegForGNames(uint64_t vmMap, uint64_t start, uint64_t siz
     if (size > ESP_GN_SCAN_MAX_BYTES) size = ESP_GN_SCAN_MAX_BYTES;
     uint8_t buf[ESP_GN_SCAN_CHUNK];
     int fails = 0;
+    int totalFails = 0;
+    // Ngân sách THỜI GIAN: lobby/địa chỉ xấu làm mỗi chunk fail đắt (walk cả
+    // map) -> từng kẹt scan đầu ~50s (log: scans=0 mãi). Quá 2.5s là bỏ.
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
     for (uint64_t off = 0; off < size; off += ESP_GN_SCAN_CHUNK) {
         uint64_t chunk = ESP_GN_SCAN_CHUNK;
         if (off + chunk > size) chunk = size - off;
         if (chunk < 8) break;
+        if (CFAbsoluteTimeGetCurrent() - t0 > 2.5) return 0;
         if (!ESPMemoryRead(vmMap, start + off, buf, chunk)) {
             if (++fails >= ESP_GN_SCAN_MAX_FAILS) return 0;
+            if (++totalFails >= 256) return 0; // fail rải rác cũng bỏ
             continue;
         }
         fails = 0;
