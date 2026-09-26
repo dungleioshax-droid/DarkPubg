@@ -191,7 +191,7 @@ static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
 static int g_espRectsCap = 0;            // số CGRect buffer chứa được
-static BOOL g_espPathDisabled = NO;      // Bật CAShapeLayer batching để vẽ tất cả box chỉ trong 1 call, triệt tiêu hoàn toàn giật lag và respring
+static BOOL g_espPathDisabled = YES;      // TẮT CAShapeLayer batching để bisect respring: per-box views ổn định đã chạy 21s ở bản orientfix1
 static unsigned long g_espPathCalls = 0;
 static unsigned long g_espPathBoxes = 0;
 static unsigned long g_espPathFails = 0;
@@ -2007,7 +2007,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_trace("esp ensure: start bounds=%.0fx%.0f", portraitBounds.size.width,
              portraitBounds.size.height);
     // Session/process mới: địa chỉ path layer + buffer CGRect cũ không còn dùng
-    g_espPathDisabled = NO;
+    // được. GIỮ batching TẮT (bisect respring) — per-box views đã ổn định.
     g_espPathLayer = 0;
     g_espPathObj = 0;
     g_espRectsAddr = 0;
@@ -2554,7 +2554,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "names1"
+#define DS_ESP_BUILD_TAG "batchoff1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
