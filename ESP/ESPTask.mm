@@ -197,10 +197,12 @@ static const int kTaskReadFailLimit = 64;
 // Nhịp kiểm tra proc game còn sống (chống UAF fake port, xem dưới).
 static const CFAbsoluteTime kTaskProcAliveInterval = 0.5;
 
-// KILL SWITCH bisect: TẮT ghi kernel ip_kobject (nghi là nguyên nhân respring
-// lúc mở HUD — panic ngay trước khi ESP hiện). Khi NO: y hệt đường đọc
-// exploit- từng trang như bản orientfix1 đã chạy 21s ổn định.
-static const BOOL kFabricateTaskPortEnabled = NO;
+// KILL SWITCH: BẬT lại (taskport1). Lý do: respring đã chứng minh do cap RAM
+// 512MB (memcap1 hết respring), không phải do port. Đọc bằng syscall
+// mach_vm_read_overwrite (~µs) thay vì exploit map từng vùng (gây lag).
+// Kernel gốc cũng đọc bằng task port (unity.mm Read<T>(addr, task)).
+// Giữ mọi guard: cross-check, pid_for_task verify, proc-alive gate, restore.
+static const BOOL kFabricateTaskPortEnabled = YES;
 
 // ---- FAKE TASK PORT (cơ chế khác thay Kernel Read) ----
 // task_for_pid chết trên iOS 16+ (proc_ro read-only, không patch được
@@ -277,6 +279,10 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
     if (!off_ipc_port_ip_kobject || !off_task_map || !off_proc_p_proc_ro ||
         !off_proc_ro_pr_task) {
         return MACH_PORT_NULL; // thiếu offsets -> không dám ghi kernel
+    }
+    if (off_ipc_port_ip_kobject > 0x200 || off_task_map > 0x200 ||
+        off_proc_ro_pr_task > 0x200) {
+        return MACH_PORT_NULL; // offset rác (resolve lỗi) -> không ghi
     }
     // Task game + cross-check 2 chiều (proc_ro->task phải khớp taskbyproc,
     // task->map phải là con trỏ kernel) — ghi nhầm task là panic ngay.
