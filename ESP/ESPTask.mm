@@ -276,39 +276,62 @@ static void ESPGameTaskResetLocked(void) {
 // hoặc MACH_PORT_NULL. Chỉ gọi khi đang giữ s_taskEnsureMutex.
 static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
     if (!proc || pid <= 0) return MACH_PORT_NULL;
+    // Chẩn đoán 1 lần/process (attempts đã throttle bởi retry): in offsets để
+    // biết resolve có đủ không — fail câm trước đây làm mù toàn tập.
+    static BOOL s_fabDiagDone = NO;
+    if (!s_fabDiagDone) {
+        s_fabDiagDone = YES;
+        ESPLog("gametask: fab diag ipkobj=0x%x taskmap=0x%x proof=0x%x prot=0x%x pid=%d",
+               off_ipc_port_ip_kobject, off_task_map, off_proc_p_proc_ro,
+               off_proc_ro_pr_task, pid);
+    }
     if (!off_ipc_port_ip_kobject || !off_task_map || !off_proc_p_proc_ro ||
         !off_proc_ro_pr_task) {
+        ESPLog("gametask: fab bail offsets=0 (kernelcache chưa resolve)");
         return MACH_PORT_NULL; // thiếu offsets -> không dám ghi kernel
     }
     if (off_ipc_port_ip_kobject > 0x200 || off_task_map > 0x200 ||
         off_proc_ro_pr_task > 0x200) {
+        ESPLog("gametask: fab bail offsets rác");
         return MACH_PORT_NULL; // offset rác (resolve lỗi) -> không ghi
     }
     // Task game + cross-check 2 chiều (proc_ro->task phải khớp taskbyproc,
     // task->map phải là con trỏ kernel) — ghi nhầm task là panic ngay.
     uint64_t task = taskbyproc(proc);
-    if (!ESPTaskIsKernelPtr(task)) return MACH_PORT_NULL;
+    if (!ESPTaskIsKernelPtr(task)) {
+        ESPLog("gametask: fab bail task not kptr");
+        return MACH_PORT_NULL;
+    }
     uint64_t ro = ds_kread64(proc + off_proc_p_proc_ro);
-    if (!ESPTaskIsKernelPtr(ro)) return MACH_PORT_NULL;
+    if (!ESPTaskIsKernelPtr(ro)) {
+        ESPLog("gametask: fab bail proc_ro not kptr");
+        return MACH_PORT_NULL;
+    }
     uint64_t prTask = ds_kread64(ro + off_proc_ro_pr_task);
     if (prTask != task) {
         ESPLog("gametask: fake port task mismatch (proc_ro task != taskbyproc)");
         return MACH_PORT_NULL;
     }
     uint64_t map = ds_kread64(task + off_task_map);
-    if (!ESPTaskIsKernelPtr(map)) return MACH_PORT_NULL;
+    if (!ESPTaskIsKernelPtr(map)) {
+        ESPLog("gametask: fab bail task->map not kptr");
+        return MACH_PORT_NULL;
+    }
     // Cấp port của mình (receive + send).
     mach_port_t name = MACH_PORT_NULL;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &name) != KERN_SUCCESS) {
+        ESPLog("gametask: fab bail port allocate fail");
         return MACH_PORT_NULL;
     }
     if (mach_port_insert_right(mach_task_self(), name, name, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
         mach_port_destroy(mach_task_self(), name);
+        ESPLog("gametask: fab bail insert_right fail");
         return MACH_PORT_NULL;
     }
     uint64_t kobj = task_get_ipc_port_kobject(task_self(), name);
     if (!ESPTaskIsKernelPtr(kobj)) {
         mach_port_destroy(mach_task_self(), name);
+        ESPLog("gametask: fab bail port kobj not kptr");
         return MACH_PORT_NULL;
     }
     // Chưa ai khác biết port này nên 2 ghi này an toàn tuyệt đối.
