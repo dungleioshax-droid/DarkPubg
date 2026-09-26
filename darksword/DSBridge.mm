@@ -2554,7 +2554,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "vmmapfix1"
+#define DS_ESP_BUILD_TAG "tornfix1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3328,6 +3328,7 @@ static void ds_finish_enable(void) {
     ds_start_rate_timer();
     ds_register_hud_notifications();
     ds_trace("enable: DONE (hud active, ESP settle %.1fs)", kDSESPSettleDelay);
+    ESPLog("build tag=%s", DS_ESP_BUILD_TAG); // biết chắc user đang chạy bản nào
     notify_post(NOTIFY_LAUNCHED_HUD);
     ds_post_progress();
     os_log(OS_LOG_DEFAULT, "[DSBridge] SpringBoard HUD active (SpringBoard pid=%d)", g_springBoard.pid);

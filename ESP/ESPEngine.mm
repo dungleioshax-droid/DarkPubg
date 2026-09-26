@@ -813,8 +813,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.level = level;
     r.actorCluster = 0;
     r.actorCount = actorsCount;
-    ESPLog("scan start actors=%u level=0x%llx base=0x%llx",
-           (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase);
+    ESPLog("scan start actors=%u level=0x%llx base=0x%llx adata=0x%llx",
+           (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase,
+           (unsigned long long)actorsData);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
     // Giải mã GNames 1 lần cho cả scan (để đọc tên class).
