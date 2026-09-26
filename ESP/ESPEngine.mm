@@ -2357,9 +2357,11 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             if (sampleReject) {
                 pos = h->pos;      // giữ vị trí cũ cho frame này
             } else {
-                if (h->valid && jumpDist > 0.0f && jumpDist < 80.0f) {
+                if (ESPGameTaskPort() != MACH_PORT_NULL) {
+                    h->pos = fresh;
+                } else if (h->valid && jumpDist > 0.0f && jumpDist < 80.0f) {
                     // Hòa trộn vị trí mượt (smooth blend) triệt tiêu cú giật tức thì khi đọc mẫu kernel
-                    const float alphaPos = 0.70f;
+                    const float alphaPos = 0.85f;
                     h->pos.x = h->pos.x * (1.0f - alphaPos) + fresh.x * alphaPos;
                     h->pos.y = h->pos.y * (1.0f - alphaPos) + fresh.y * alphaPos;
                     h->pos.z = h->pos.z * (1.0f - alphaPos) + fresh.z * alphaPos;

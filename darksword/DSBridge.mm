@@ -2293,14 +2293,14 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                labelHalfW * 2.0f, 14.0f);
 
         // Box có dịch chuyển? (dùng cho cả đường path lẫn đường per-box)
-        // Deadband 1.5pt: triệt tiêu rung lắc sub-pixel Retina và giảm 60-80% IPC call thừa lên SpringBoard
+        // Ngưỡng 0.25pt: bám mượt chuyển động từng pixel, triệt tiêu hiện tượng giật bậc thang
         BOOL boxMoved = YES;
         CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
         if (g_espRectValid[i]) {
-            boxMoved = !(fabs(prevBox.origin.x - fullBox.origin.x) < 1.5 &&
-                         fabs(prevBox.origin.y - fullBox.origin.y) < 1.5 &&
-                         fabs(prevBox.size.width - fullBox.size.width) < 1.5 &&
-                         fabs(prevBox.size.height - fullBox.size.height) < 1.5);
+            boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
+                        fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
+                        fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
+                        fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
         }
         s_pathRects[i] = boxMoved ? fullBox : prevBox;
         if (boxMoved) s_pathDirty = YES;
@@ -2526,7 +2526,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "respringfix2"
+#define DS_ESP_BUILD_TAG "smooth1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2767,14 +2767,8 @@ static void ds_esp_tick(void) {
                                      s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
                             boxEventLog(msg);
                         }
-                        if (prev.w > 0 && prev.h > 0 && dx < 60.0f && dy < 60.0f) {
-                            // 2D Screen-space EMA smoothing (triệt tiêu hoàn toàn rung lắc sub-pixel)
-                            const float kSmooth = 0.70f;
-                            cur.x = prev.x + kSmooth * (cur.x - prev.x);
-                            cur.y = prev.y + kSmooth * (cur.y - prev.y);
-                            cur.w = prev.w + kSmooth * (cur.w - prev.w);
-                            cur.h = prev.h + kSmooth * (cur.h - prev.h);
-                        }
+                        // Vị trí 3D và phép chiếu W2S đã được xử lý mượt và ngoại suy ở ESPEngineRefreshBoxes.
+                        // Gán cur trực tiếp để box bám dính 1:1 theo camera rotation, không bị trôi/chậm pha.
                         s_slots[s].box = cur;
                         s_slots[s].lastSeen = now2;
                         break;
