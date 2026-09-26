@@ -353,7 +353,7 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
     // version, đã gãy trên máy này). Fallback đường 2 (chain cũ) nếu fail.
     {
         natural_t otype = 0;
-        vm_address_t oaddr = 0;
+        mach_vm_address_t oaddr = 0;
         if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
             kobj = (uint64_t)oaddr;
         }
