@@ -347,20 +347,10 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
         ESPLog("gametask: fab bail insert_right fail");
         return MACH_PORT_NULL;
     }
-    uint64_t kobj = 0;
-    // Đường 1 (syscall thuần): mach_port_kobject trả thẳng địa chỉ kobject
-    // của port mình — không đụng itk_space/ip_table chain (mấy offset đó theo
-    // version, đã gãy trên máy này). Fallback đường 2 (chain cũ) nếu fail.
-    {
-        natural_t otype = 0;
-        mach_vm_address_t oaddr = 0;
-        if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
-            kobj = (uint64_t)oaddr;
-        }
-    }
-    if (!kobj) {
-        kobj = task_get_ipc_port_kobject(task_self(), name);
-    }
+    // Kobject cần ghi = ĐỊA CHỈ port object (P), rồi ghi field P+0x48.
+    // LƯU Ý: task_get_ipc_port_kobject đọc GIÁ TRỊ field (=0 với port mới,
+    // đúng chứ không sai!) nên không dùng được ở đây — phải dùng _object.
+    uint64_t kobj = task_get_ipc_port_object(task_self(), name);
     kobj = ESPStripPAC(kobj);
     if (!ESPTaskIsKernelPtr(kobj)) {
         mach_port_destroy(mach_task_self(), name);
