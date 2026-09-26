@@ -214,6 +214,8 @@ static uint32_t s_fakeOrigBits = 0;
 static uint64_t s_fakeOrigKobj = 0;
 static CFAbsoluteTime s_procAliveAt = 0;
 static BOOL s_procAlive = NO;
+static int s_tfpFails = 0;
+static BOOL s_tfpSkip = NO;
 
 static mach_port_t g_taskPort = MACH_PORT_NULL;
 static pid_t g_taskPid = 0;
@@ -385,11 +387,29 @@ BOOL ESPGameTaskEnsure(void) {
             return NO;
         }
         g_taskProc = proc;
+        // Proc mới (game restart): cho task_for_pid thử lại từ đầu — rẻ
+        // (1 syscall) và chắc chắn nếu install có entitlement.
+        s_tfpFails = 0;
+        s_tfpSkip = NO;
     }
     // 4) Thử lấy port TRƯỚC khi patch: nếu app có entitlement (TrollStore /
-    //    ldid) thì không cần ghi kernel lần nào.
+    //    ldid) thì không cần ghi kernel lần nào. Esign/không entitlement:
+    //    fail là vĩnh viễn (không đổi theo install) — 3 lần liên tiếp thì
+    //    bỏ qua hẳn, đỡ 1 syscall fail mỗi retry. Reset khi gặp proc mới.
     mach_port_t task = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    kern_return_t kr = KERN_FAILURE;
+    if (!s_tfpSkip) {
+        kr = task_for_pid(mach_task_self(), pid, &task);
+        if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
+            task = MACH_PORT_NULL;
+            if (++s_tfpFails >= 3 && !s_tfpSkip) {
+                s_tfpSkip = YES;
+                ESPLog("gametask: task_for_pid unavailable (Esign?), fabricated port only");
+            }
+        } else {
+            s_tfpFails = 0;
+        }
+    }
     if ((kr != KERN_SUCCESS || task == MACH_PORT_NULL) && ds_is_ready()) {
         // 4b) Dựng fake task port qua kernel — không cần patch csflags nên
         // chạy cả khi proc_ro read-only (iOS 16+). Thử TRƯỚC khi patch vì
