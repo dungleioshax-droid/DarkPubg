@@ -225,7 +225,10 @@ static const CFAbsoluteTime kTaskProcAliveInterval = 0.5;
 // task_get_ipc_port_object (SMR/port-table) và cả ghi kobject đều đọc/ghi
 // địa chỉ lệch → kernel panic. Tới khi đối chiếu được đúng trình tự từ
 // DSGames thì không bật lại.
-static const BOOL kFabricateTaskPortEnabled = NO;
+// BẬT (kobjfix4): chỉ còn đường mach_port_kobject syscall (không SMR, không
+// port-table) — đường duy nhất chưa reboot máy. Guard bits + verify pid_for_task
+// vẫn giữ. Nếu syscall trả dữ liệu lạ thì bail sạch (log fab bail).
+static const BOOL kFabricateTaskPortEnabled = YES;
 
 // ---- FAKE TASK PORT (cơ chế khác thay Kernel Read) ----
 // task_for_pid chết trên iOS 16+ (proc_ro read-only, không patch được
