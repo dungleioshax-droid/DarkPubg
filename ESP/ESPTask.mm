@@ -221,7 +221,11 @@ static const CFAbsoluteTime kTaskProcAliveInterval = 0.5;
 // mach_vm_read_overwrite (~µs) thay vì exploit map từng vùng (gây lag).
 // Kernel gốc cũng đọc bằng task port (unity.mm Read<T>(addr, task)).
 // Giữ mọi guard: cross-check, pid_for_task verify, proc-alive gate, restore.
-static const BOOL kFabricateTaskPortEnabled = YES;
+// KILL SWITCH: TẮT lại (stable3) — hai bản gần nhất REBOOT máy: đường
+// task_get_ipc_port_object (SMR/port-table) và cả ghi kobject đều đọc/ghi
+// địa chỉ lệch → kernel panic. Tới khi đối chiếu được đúng trình tự từ
+// DSGames thì không bật lại.
+static const BOOL kFabricateTaskPortEnabled = NO;
 
 // ---- FAKE TASK PORT (cơ chế khác thay Kernel Read) ----
 // task_for_pid chết trên iOS 16+ (proc_ro read-only, không patch được
@@ -347,11 +351,15 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
         ESPLog("gametask: fab bail insert_right fail");
         return MACH_PORT_NULL;
     }
-    // Kobject cần ghi = ĐỊA CHỈ port object (P), rồi ghi field P+0x48.
-    // LƯU Ý: task_get_ipc_port_kobject đọc GIÁ TRỊ field (=0 với port mới,
-    // đúng chứ không sai!) nên không dùng được ở đây — phải dùng _object.
-    uint64_t kobj = task_get_ipc_port_object(task_self(), name);
-    kobj = ESPStripPAC(kobj);
+    // Kobject = ĐỊA CHỈ port object, lấy bằng syscall mach_port_kobject (thuần
+    // syscall, KHÔNG đọc port-table/SMR — đường SMR task_get_ipc_port_object
+    // đã gây REBOOT máy). Hết syscall là BAIL sạch, không fallback đọc kernel.
+    mach_vm_address_t oaddr = 0;
+    natural_t otype = 0;
+    uint64_t kobj = 0;
+    if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
+        kobj = ESPStripPAC((uint64_t)oaddr);
+    }
     if (!ESPTaskIsKernelPtr(kobj)) {
         mach_port_destroy(mach_task_self(), name);
         ESPLog("gametask: fab bail port kobj not kptr");
