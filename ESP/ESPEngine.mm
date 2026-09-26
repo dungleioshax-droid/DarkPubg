@@ -220,6 +220,7 @@ static std::atomic_int g_espProgressTotal{0};
 static std::recursive_mutex g_espClassifyMutex;
 static uint64_t g_espVMProc = 0; // cache proc/vmMap cho box refresh 8Hz
 static uint64_t g_espVMMap = 0;
+static pid_t g_espVMPid = 0; // pid validate kèm cache (chống proc stale/UAF)
 static CFAbsoluteTime g_espVMAt = 0;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học (primary)
@@ -312,6 +313,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         ESPProviderShutdown(); // world mới => trạng thái provider mới
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
+        g_espVMPid = 0;
         g_espVMAt = 0;
         // KHÔNG reset s_unameTries theo world: base không đổi thì kết quả resolve
         // cũng không đổi, reset ở đây làm ESPResolveUName (kèm diag nặng) chạy lại
@@ -766,7 +768,27 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     }
     uint64_t task = taskbyproc(proc);
     uint64_t vmMap = task ? task_get_vm_map(task) : 0;
-    if (!vmMap) { g_espStep = 2; return r; }
+    pid_t scanPid = (off_proc_p_pid && proc) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
+    if (!ds_isvalid(task) || !ds_isvalid(vmMap) || scanPid <= 0) {
+        g_espStep = 2;
+        return r; // task/map rác (proc đang teardown) -> bỏ lượt, không walk
+    }
+    {   // Game restart (pid/base đổi): xả region map + task của game cũ để
+        // không đọc dữ liệu cũ lẫn walk map cũ.
+        static uint64_t s_scanPid = 0;
+        static uint64_t s_scanBase = 0;
+        if (s_scanPid != (uint64_t)scanPid || s_scanBase != gameBase) {
+            if (s_scanPid || s_scanBase) {
+                ESPLog("game restart: pid=%llu->%d base=0x%llx->0x%llx (flush)",
+                       (unsigned long long)s_scanPid, scanPid,
+                       (unsigned long long)s_scanBase, (unsigned long long)gameBase);
+                ESPMemoryFlushPageCache();
+                ESPGameTaskReset();
+            }
+            s_scanPid = (uint64_t)scanPid;
+            s_scanBase = gameBase;
+        }
+    }
 
     // Task port game (như aovcheat): lấy NGAY ĐẦU lượt quét để lượt quét đầu
     // tiên đã đọc bulk bằng vm_read_overwrite — trước đây port chưa bật nên
@@ -1305,26 +1327,46 @@ static BOOL ESPReadVec(uint64_t vmMap, uint64_t addr, ESPVector *out) {
     return ESPMemoryRead(vmMap, addr, out, sizeof(ESPVector));
 }
 static uint64_t ESPProcVMMap(uint64_t *outProc) {
-    // procbyname duyệt proclist qua kernel (đắt) — box refresh gọi 8Hz nên
-    // cache proc/vmMap 30s (globals g_espVM* khai báo ở trên, flush khi đổi
-    // world). u64/double đọc-ghi benign cross-thread; stale thì fail-safe.
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (g_espVMMap && now - g_espVMAt < 30.0) {
-        if (outProc) *outProc = g_espVMProc;
-        return g_espVMMap;
+    // Cache proc/vmMap cho box refresh 8Hz NHƯNG validate mỗi lần dùng:
+    // proc cũ sau game restart là UAF — walk vm_map stale = kernel panic
+    // (log: respring rồi reboot, SpringBoard pid 5162->34). Không bao giờ
+    // trả stale khi resolve fail.
+    uint64_t oldProc = g_espVMProc; // proc đang cache (để so sánh khi đổi)
+    if (g_espVMMap && g_espVMProc) {
+        // 1 kernel read rẻ: pid của proc cache còn khớp?
+        pid_t p = (off_proc_p_pid) ? (pid_t)ds_kread32(g_espVMProc + off_proc_p_pid) : 0;
+        if (p > 0 && p == g_espVMPid && ds_isvalid(g_espVMMap)) {
+            if (outProc) *outProc = g_espVMProc;
+            return g_espVMMap;
+        }
+        // Proc chết/đổi (game restart) hoặc đọc lỗi: bỏ cache.
+        g_espVMProc = 0; g_espVMMap = 0; g_espVMPid = 0;
+    } else {
+        // Không cache: throttle procbyname đắt (full proclist walk).
+        CFAbsoluteTime now0 = CFAbsoluteTimeGetCurrent();
+        if (g_espVMAt > 0 && now0 - g_espVMAt < 3.0) return 0;
     }
+    uint64_t oldProcCached = oldProc;
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) proc = procbyname("ShadowTrackerE");
-    if (!proc) return g_espVMMap; // giữ stale còn hơn 0 (reads fail-safe)
+    g_espVMAt = CFAbsoluteTimeGetCurrent();
+    if (!proc || !ds_isvalid(proc)) return 0; // KHÔNG trả stale
+    pid_t pid = (off_proc_p_pid) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
+    if (pid <= 0) return 0;
     if (outProc) *outProc = proc;
     uint64_t task = taskbyproc(proc);
-    uint64_t vmMap = task ? task_get_vm_map(task) : 0;
-    if (vmMap) {
-        g_espVMProc = proc;
-        g_espVMMap = vmMap;
-        g_espVMAt = now;
+    if (!ds_isvalid(task)) return 0;
+    uint64_t vmMap = task_get_vm_map(task);
+    if (!ds_isvalid(vmMap)) return 0;
+    if (oldProcCached && oldProcCached != proc) {
+        // Proc khác (game restart): vùng region map của game cũ sai hết.
+        // IfIdle (try-lock) để không bao giờ deadlock với scan nền.
+        ESPMemoryFlushPageCacheIfIdle();
     }
-    return vmMap ? vmMap : g_espVMMap;
+    g_espVMProc = proc;
+    g_espVMPid = pid;
+    g_espVMMap = vmMap;
+    return vmMap;
 }
 #endif
 

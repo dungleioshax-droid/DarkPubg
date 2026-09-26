@@ -180,6 +180,9 @@ static uint64_t ESPRegionAvoidOverlap(uint64_t base, uint64_t pageStart) {
 // Lấy mapping live cho pageStart: hit thì memcpy, miss thì map CẢ VÙNG 1 lần
 // rồi giữ vĩnh viễn. KHÔNG lock — caller giữ mutex.
 static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *outLocal) {
+    // vmMap stale (game restart -> map freed, UAF): walk vào kernel rác =
+    // panic. Chặn ngay đây, mọi đường đọc đều qua hàm này.
+    if (!ds_isvalid(vmMap)) return NO;
     uint64_t pageOff = 0;
     ESPRegion *hit = ESPRegionFind(pageStart, &pageOff);
     if (hit) {
@@ -292,7 +295,7 @@ static BOOL ESPReadCachedLocked(uint64_t vmMap, uint64_t remoteAddr, void *buf, 
 }
 
 BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
-    if (!vmMap || !remoteAddr || !buf || !len) return NO;
+    if (!vmMap || !ds_isvalid(vmMap) || !remoteAddr || !buf || !len) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     // Task port có thì dùng luôn (còn rẻ hơn cache).
@@ -322,13 +325,14 @@ uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc) {
     if (!proc) return 0;
     if (!ds_is_ready()) return 0;
     uint64_t task = taskbyproc(proc);
-    if (!task) return 0;
+    if (!ds_isvalid(task)) return 0;
     uint64_t vmMap = task_get_vm_map(task);
+    if (!ds_isvalid(vmMap)) return 0;
     return vmMap;
 }
 
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
-    if (!vmMap || !remoteAddr || !buf || !len) return NO;
+    if (!vmMap || !ds_isvalid(vmMap) || !remoteAddr || !buf || !len) return NO;
     if (len > 0x10000) return NO; // chặn đọc quá lớn 1 lần
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
@@ -345,7 +349,7 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 // 1 page là 4K hoặc 16K tuỳ build — chặn trên cho buffer trên stack.
 #define ESP_MAX_PAGE 0x4000ULL
 BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
-    if (!vmMap || !remoteAddr || !buf || !len) return NO;
+    if (!vmMap || !ds_isvalid(vmMap) || !remoteAddr || !buf || !len) return NO;
     if (len > 0x40000) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
