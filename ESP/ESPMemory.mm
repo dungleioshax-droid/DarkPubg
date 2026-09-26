@@ -62,9 +62,11 @@ static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
 // ---- REGION MAP: 1 vùng = 1 lần map, giữ vĩnh viễn ----
 // Mỗi vùng phủ tối đa ESP_REGION_PAGES page liên tiếp; vùng căn theo
 // ESP_REGION_BYTES để các địa chỉ gần nhau rơi vào CÙNG vùng (không map chồng).
-// 256 page: 1MB trên máy 4K page, 4MB trên máy 16K page — đủ phủ cụm actor/
-// statics lân cận trong 1 lần gọi.
-#define ESP_REGION_PAGES 256
+// Thực tế vm_map_entry của game khá nhỏ (~vài chục page) nên cỡ vùng bị BIÊN
+// ENTRY chặn, không phải hằng số này; đặt lớn (1024 page) để entry lớn cũng
+// được phủ trọn trong 1 lần map. Đây là lý do tăng hằng số không làm box lên
+// nhanh hơn: nút thắt là số vm_map_entry, không phải kích thước tối đa.
+#define ESP_REGION_PAGES 1024
 #define ESP_REGION_BYTES ((uint64_t)ESP_REGION_PAGES * PAGE_SIZE)
 // Trần số vùng giữ sống (mỗi vùng 1 mapping + 1 port). 512 vùng là quá đủ cho
 // 1 trận; vượt thì ngừng map vùng mới (đọc mới sẽ không thành vùng lớn nữa).
@@ -98,6 +100,11 @@ static std::atomic<uint64_t> s_kernelReads{0};
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = s_cacheHit;
     if (miss) *miss = s_cacheMiss;
+}
+
+uint64_t ESPMemoryRegionCount(void) {
+    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    return (uint64_t)s_regionCount;
 }
 
 void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads) {
@@ -379,6 +386,9 @@ BOOL ESPMemoryFlushPageCacheIfIdle(void) {
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (hit) *hit = 0;
     if (miss) *miss = 0;
+}
+uint64_t ESPMemoryRegionCount(void) {
+    return 0;
 }
 void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads) {
     if (taskReads) *taskReads = 0;

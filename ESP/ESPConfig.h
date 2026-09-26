@@ -25,13 +25,10 @@
 // 40Hz: mượt mà, bám sát nhịp chuyển động mà không gây nghẽn runloop SpringBoard.
 #define ESP_REFRESH_HZ 40
 
-// Nhịp ĐỌC KERNEL vị trí actor (Hz). Refresh ở trên chạy ESP_REFRESH_HZ nhưng
-// giữa 2 lần đọc thì box được NGOẠI SUY từ vận tốc, nên box vẫn mượt kể
-// cả khi đường đọc memory chỉ kịp vài chục lần/giây. 20Hz là điểm cân bằng tốt.
+// Vị trí actor giờ được đọc lại MỖI frame refresh: region map giữ sẵn mapping
+// nên mỗi lần đọc chỉ là memcpy (~µs) — không còn đọc thưa + ngoại suy, nhờ đó
+// box không còn "đứng im rồi nhảy". ESP_POS_READ_HZ chỉ giữ để tham chiếu.
 #define ESP_POS_READ_HZ 20
-// Khi TASK PORT của game bật được (patch CS_GET_TASK_ALLOW), mỗi lần đọc vị trí
-// chỉ là 1 syscall (~µs) nên ESPEngineRefreshBoxes bỏ qua mốc này và đọc vị trí
-// MỖI frame. Giá trị 20Hz chỉ áp dụng cho đường kernel exploit (map page / đọc từng field).
 
 // BULK-MAP: map nhiều page liền nhau trong 1 lần. Từ bản "region map" (map 1
 // lần cho cả vùng vm_map_entry rồi giữ vĩnh viễn, bỏ LRU/dealloc) ESPMemory

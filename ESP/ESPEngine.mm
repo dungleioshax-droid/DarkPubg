@@ -224,7 +224,7 @@ static CFAbsoluteTime g_espVMAt = 0;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học (primary)
 static std::unordered_set<uint64_t> g_espPlayerVTables; // Mọi VTable player/bot đã biết
-static int s_unameTries = 0; // Số lần thử giải mã GNames per-world
+static int s_unameTries = 0; // Số lần thử giải mã GNames per game base
 static uint64_t s_camPC = 0;
 static uint64_t s_camWorld = 0;
 static uint64_t s_camMgr = 0;
@@ -313,7 +313,10 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVMProc = 0; // match mới có thể task mới => resolve lại proc/vmMap
         g_espVMMap = 0;
         g_espVMAt = 0;
-        if (!g_espUName) s_unameTries = 0; // thử resolve lại UName cho world mới
+        // KHÔNG reset s_unameTries theo world: base không đổi thì kết quả resolve
+        // cũng không đổi, reset ở đây làm ESPResolveUName (kèm diag nặng) chạy lại
+        // MỖI lượt quét -> scan chậm, box lên trễ. Reset chỉ khi game base đổi
+        // (đã xử lý trong ESPEngineScan).
         ESPCamPCClearLocked();
         ESPDiscoverResetCooldowns();
     }
@@ -793,12 +796,13 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
     // Giải mã GNames 1 lần cho cả scan (để đọc tên class).
-    // Resolve FAIL tốn cả khối diag (~30 kernel read + ~8 dòng log) và lặp lại
-    // MỖI lượt quét (TTL 2s) mà kết quả không đổi -> chỉ thử 2 lượt đầu cho mỗi
-    // game base. VTable vẫn là đường nhận diện chính khi GNames không có.
+    // Resolve FAIL tốn cả khối diag + scan dữ liệu (~hàng chục ms) và lặp lại
+    // MỖI lượt quét mà kết quả không đổi -> chỉ thử tối đa 4 lượt cho mỗi game
+    // base (s_unameTries KHÔNG còn bị reset khi đổi world). VTable vẫn là đường
+    // nhận diện chính khi GNames không có.
     {
         static uint64_t s_unameBase = 0;
-        // s_unameTries: dùng biến file-scope (reset được khi đổi world).
+        // s_unameTries: dùng biến file-scope, chỉ reset khi game base đổi.
         if (s_unameBase != gameBase) {
             s_unameBase = gameBase;
             s_unameTries = 0;
@@ -2278,12 +2282,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    // Có task port thì đọc vị trí mỗi frame (một syscall, ~µs) — box bám sát,
-    // không cần ngoại suy. Chưa có port thì vẫn đọc thưa + ngoại suy như cũ
-    // (đường kernel ~ms/lần đọc cho mỗi actor).
-    const double kPosReadInterval = (ESPGameTaskPort() != MACH_PORT_NULL)
-                                        ? 0.0
-                                        : 1.0 / (double)ESP_POS_READ_HZ;
+    // Region map giữ mapping vĩnh viễn: đọc vị trí sau lần map đầu chỉ là memcpy
+    // (~µs) nên đọc MỖI frame, bỏ hẳn đọc thưa + ngoại suy.
+    // Region map: sau lần map đầu, đọc vị trí chỉ là memcpy từ mapping giữ sẵn
+    // (~µs) — KHÔNG cần đọc thưa + ngoại suy nữa. 0 = đọc lại MỖI frame, nhờ đó
+    // bỏ được ngoại suy/blend (thứ làm box "đứng im rồi nhảy").
+    const double kPosReadInterval = 0.0;
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();
@@ -2317,12 +2321,10 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             // Vận tốc = delta 2 mẫu gần nhất với bộ lọc EMA (Exponential Moving Average)
             // để triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
             BOOL sampleReject = NO;
-            float jumpDist = 0.0f;
             if (h->valid && h->at > 0) {
                 double ddt = nowF - h->at;
                 float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
                 float jump = sqrtf(dx*dx + dy*dy + dz*dz);
-                jumpDist = jump;
                 if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
                     ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
                     float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
@@ -2357,21 +2359,12 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             if (sampleReject) {
                 pos = h->pos;      // giữ vị trí cũ cho frame này
             } else {
-                if (ESPGameTaskPort() != MACH_PORT_NULL) {
-                    h->pos = fresh;
-                } else if (h->valid && jumpDist > 0.0f && jumpDist < 80.0f) {
-                    // Hòa trộn vị trí mượt (smooth blend) triệt tiêu cú giật tức thì khi đọc mẫu kernel
-                    const float alphaPos = 0.85f;
-                    h->pos.x = h->pos.x * (1.0f - alphaPos) + fresh.x * alphaPos;
-                    h->pos.y = h->pos.y * (1.0f - alphaPos) + fresh.y * alphaPos;
-                    h->pos.z = h->pos.z * (1.0f - alphaPos) + fresh.z * alphaPos;
-                } else {
-                    h->pos = fresh;    // nhảy lớn hoặc mẫu đầu -> theo vị trí mới
-                }
+                // Đọc mỗi frame nên mẫu luôn tươi: theo thẳng vị trí mới.
+                // (Blend EMA trước đây tạo trễ pha -> box đứng im rồi nhảy.)
+                h->pos = fresh;
                 pos = h->pos;
             }
-            // HP cho thanh máu, cùng nhịp đọc thưa với vị trí (giữa các lần
-            // đọc thì box dùng mẫu HP cũ — máu không cần ngoại suy).
+            // HP cho thanh máu, cùng nhịp với vị trí (máu không cần ngoại suy).
             h->hpPct = ESPHPPercent(vmMap, tr->actor, tr->kind);
         }
         float sx = 0, sy = 0, dist = 0;

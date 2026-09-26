@@ -11,6 +11,7 @@
 #import "ESPLog.h"
 #include <string>
 #include <map>
+#include <mach-o/loader.h>
 
 extern "C" {
 #import "darksword.h"
@@ -215,6 +216,92 @@ static void ESPNameDiag(uint64_t vmMap, uint64_t gnamesStatic, uint64_t dec) {
     }
 }
 
+// ---- Dò GNames bằng scan có ngân sách ----
+// Offset GNames ghi trong dump có thể lệch giữa các bản game (log thực tế:
+// u32 tại static là mã ARM64 -> static trỏ vào __TEXT). Thay vì đoán, quét
+// __DATA_CONST/__DATA của chính binary game tìm con trỏ P thoả chữ ký
+// TNameEntryArray: P -> chunk0; chunk0[0] chuỗi "None"; chunk0[1] "ByteProperty".
+// Có trần byte + trần region để không phình mapping và không treo scan.
+#define ESP_GN_SCAN_MAX_BYTES   (8ULL * 1024 * 1024)
+#define ESP_GN_SCAN_REGION_CAP  256   // chừa >=256 slot region cho actor
+#define ESP_GN_SCAN_CHUNK       4096
+#define ESP_GN_SCAN_MAX_FAILS   64    // fail liên tiếp -> vùng này không đọc được, bỏ
+
+static BOOL ESPIsNameArrayPtr(uint64_t vmMap, uint64_t p) {
+    if (p < 0x100000000ULL || p >= 0x300000000000ULL || (p & 7)) return NO;
+    BOOL ok = NO;
+    uint64_t chunk0 = ESPReadU64(vmMap, p, &ok);
+    if (!ok || chunk0 < 0x100000000ULL || (chunk0 & 7)) return NO;
+    uint64_t e0 = ESPReadU64(vmMap, chunk0, &ok);
+    if (!ok || e0 < 0x100000000ULL) return NO;
+    char n0[16] = {0};
+    if (!ESPReadCString(vmMap, e0 + 0xC, n0, (int)sizeof(n0))) return NO;
+    if (strcmp(n0, "None") != 0) return NO;
+    uint64_t e1 = ESPReadU64(vmMap, chunk0 + 8, &ok);
+    if (!ok || e1 < 0x100000000ULL) return NO;
+    char n1[16] = {0};
+    if (!ESPReadCString(vmMap, e1 + 0xC, n1, (int)sizeof(n1))) return NO;
+    return strcmp(n1, "ByteProperty") == 0;
+}
+
+static uint64_t ESPScanSegForGNames(uint64_t vmMap, uint64_t start, uint64_t size) {
+    if (!start || !size) return 0;
+    if (size > ESP_GN_SCAN_MAX_BYTES) size = ESP_GN_SCAN_MAX_BYTES;
+    uint8_t buf[ESP_GN_SCAN_CHUNK];
+    int fails = 0;
+    for (uint64_t off = 0; off < size; off += ESP_GN_SCAN_CHUNK) {
+        uint64_t chunk = ESP_GN_SCAN_CHUNK;
+        if (off + chunk > size) chunk = size - off;
+        if (chunk < 8) break;
+        if (!ESPMemoryRead(vmMap, start + off, buf, chunk)) {
+            if (++fails >= ESP_GN_SCAN_MAX_FAILS) return 0;
+            continue;
+        }
+        fails = 0;
+        for (uint64_t k = 0; k + 8 <= chunk; k += 8) {
+            uint64_t cand = 0;
+            memcpy(&cand, buf + k, 8);
+            if (ESPIsNameArrayPtr(vmMap, cand)) return cand;
+        }
+        // Đủ ngân sách region thì dừng (không chiếm hết chỗ của actor).
+        if (ESPMemoryRegionCount() > ESP_GN_SCAN_REGION_CAP) break;
+    }
+    return 0;
+}
+
+// Trả về con trỏ TNameEntryArray tìm được (0 = không thấy).
+static uint64_t ESPFindGNamesByScan(uint64_t vmMap, uint64_t gameBase) {
+    // gameBase là mốc map dump (0x100000000 + slide) chứ không chắc là đầu file
+    // Mach-O, nên thử cả hai vị trí header rồi nhận cái có magic đúng.
+    uint64_t hdrAddrs[2] = { gameBase, gameBase + (ESPDumpBaseText - ESPDumpBaseZero) };
+    for (int h = 0; h < 2; h++) {
+        struct mach_header_64 hdr;
+        if (!ESPMemoryRead(vmMap, hdrAddrs[h], &hdr, sizeof(hdr))) continue;
+        if (hdr.magic != MH_MAGIC_64 || hdr.ncmds == 0) continue;
+        uint64_t execOff = sizeof(struct mach_header_64);
+        for (uint32_t i = 0; i < hdr.ncmds; i++) {
+            struct load_command lc;
+            if (!ESPMemoryRead(vmMap, hdrAddrs[h] + execOff, &lc, sizeof(lc))) break;
+            if (lc.cmdsize < sizeof(lc)) break;
+            if (lc.cmd == LC_SEGMENT_64) {
+                struct segment_command_64 seg;
+                if (ESPMemoryRead(vmMap, hdrAddrs[h] + execOff, &seg, sizeof(seg))) {
+                    BOOL isData = (strncmp(seg.segname, "__DATA_CONST", 16) == 0) ||
+                                  (strncmp(seg.segname, "__DATA", 16) == 0);
+                    if (isData && seg.vmaddr >= ESPDumpBaseZero && seg.vmsize > 0) {
+                        uint64_t segStart = gameBase + (seg.vmaddr - ESPDumpBaseZero);
+                        uint64_t found = ESPScanSegForGNames(vmMap, segStart, seg.vmsize);
+                        if (found) return found;
+                    }
+                }
+            }
+            execOff += lc.cmdsize;
+        }
+        return 0; // tìm thấy header đúng rồi thì thôi
+    }
+    return 0;
+}
+
 uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase) {
     if (s_uname && s_unameBase == gameBase) return s_uname;
     ESPNameReset(gameBase);
@@ -269,6 +356,25 @@ uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase) {
         if (cands[i] && ESPIsValidUName(vmMap, cands[i], "direct")) {
             s_uname = cands[i];
             return s_uname;
+        }
+    }
+    // 3) Offset dump lệch bản: quét __DATA/__DATA_CONST tìm chữ ký TNameEntryArray.
+    //    Chỉ chạy 1 lần cho mỗi game base (scan tốn ~vài chục ms).
+    {
+        static uint64_t s_scannedBase = 0;
+        if (s_scannedBase != gameBase) {
+            s_scannedBase = gameBase;
+            uint64_t found = ESPFindGNamesByScan(vmMap, gameBase);
+            if (found) {
+                if (ESPIsValidUName(vmMap, found, "scan")) {
+                    s_uname = found;
+                    ESPLog("UName via scan: 0x%llx", (unsigned long long)found);
+                    return s_uname;
+                }
+                ESPLog("UName scan: 0x%llx nhung khong validate", (unsigned long long)found);
+            } else {
+                ESPLog("UName scan: khong thay TNameEntryArray trong __DATA/__DATA_CONST");
+            }
         }
     }
     {

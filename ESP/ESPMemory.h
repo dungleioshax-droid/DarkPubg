@@ -45,6 +45,9 @@ BOOL ESPMemoryFlushPageCacheIfIdle(void);
 // Đếm region hit/miss tích luỹ (chẩn đoán perf refresh).
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss);
 
+// Số vùng đang giữ mapping (dùng cho scan có ngân sách — vd dò GNames).
+uint64_t ESPMemoryRegionCount(void);
+
 // Đếm số lần đọc đi đường NHANH (task port + mach_vm_read_overwrite) so với
 // đường kernel (vmmapremotepage). Log box perf in ra 2 số này để biết bản
 // đang chạy có thật sự dùng được task port hay rớt về exploit read.
