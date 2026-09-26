@@ -2554,7 +2554,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "tornfix1"
+#define DS_ESP_BUILD_TAG "memcap1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2923,13 +2923,21 @@ static void ds_esp_tick(void) {
                 s_lastPerfLog = now2;
                 float hpCur = 0, hpMax = 0; int hpPct = -1, hpFails = 0;
                 ESPEngineHPSample(&hpCur, &hpMax, &hpPct, &hpFails);
-                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d",
+                uint64_t rssMB = 0;
+                {
+                    task_basic_info_data_t binfo;
+                    mach_msg_type_number_t bc = TASK_BASIC_INFO_COUNT;
+                    if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&binfo, &bc) == KERN_SUCCESS) {
+                        rssMB = binfo.resident_size / (1024 * 1024);
+                    }
+                }
+                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb",
                        ESPEngineBoxPerfText(), count, g_espPathLayer ? 1 : 0,
                        g_espPathCalls, g_espPathBoxes, g_espPathFails,
                        ESPProviderIsDegraded() ? 1 : 0,
                        (unsigned long long)ESPProviderFailureCount(),
                        (unsigned long long)ESPProviderFullScanCount(),
-                       hpCur, hpMax, hpPct, hpFails);
+                       hpCur, hpMax, hpPct, hpFails, (unsigned long long)rssMB);
             }
         }
 
@@ -3287,6 +3295,17 @@ static void ds_finish_enable(void) {
         // Mốc 0 của TRACE: từ đây tới lúc HUD hiện là cửa sổ hay respring.
         g_hudEnabledAt = CFAbsoluteTimeGetCurrent();
         ds_trace("enable: rc init start");
+        // Chẩn đoán respring: pid app mình + RSS (xem app có phình RAM không),
+        // so với `rc ok pid=` (SpringBoard) ở session sau để biết ai chết.
+        {
+            task_basic_info_data_t binfo;
+            mach_msg_type_number_t bc = TASK_BASIC_INFO_COUNT;
+            uint64_t rssMB = 0;
+            if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&binfo, &bc) == KERN_SUCCESS) {
+                rssMB = binfo.resident_size / (1024 * 1024);
+            }
+            ESPLog("enable self pid=%d rss=%llumb", getpid(), (unsigned long long)rssMB);
+        }
         g_springBoard = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
         if (!g_springBoard || !g_springBoard.trojanMem || g_springBoard.pid <= 1) {
             NSString *remoteError = [RemoteCall lastInitError];

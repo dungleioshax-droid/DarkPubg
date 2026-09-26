@@ -66,14 +66,15 @@ static inline BOOL ESPRemoteAddrUsable(uint64_t addr) {
 // ENTRY chặn, không phải hằng số này; đặt lớn (1024 page) để entry lớn cũng
 // được phủ trọn trong 1 lần map. Đây là lý do tăng hằng số không làm box lên
 // nhanh hơn: nút thắt là số vm_map_entry, không phải kích thước tối đa.
-#define ESP_REGION_PAGES 1024
+#define ESP_REGION_PAGES 64 // 64*16K=1MB/vùng: phủ entry actor/__DATA, không ôm object GBs
 #define ESP_REGION_BYTES ((uint64_t)ESP_REGION_PAGES * PAGE_SIZE)
 // Trần số vùng giữ sống (mỗi vùng 1 mapping + 1 port). 512 vùng là quá đủ cho
 // 1 trận; vượt thì ngừng map vùng mới (đọc mới sẽ không thành vùng lớn nữa).
-#define ESP_REGION_MAX 512
-// Trần byte mapping giữ sống. Mapping SHARE page vật lý của game nên không tốn
-// RAM, nhưng chặn trên để không phình địa chỉ ảo/port vô hạn.
-#define ESP_MAX_LIVE_BYTES (512ULL * 1024 * 1024)
+#define ESP_REGION_MAX 192
+// Trần byte mapping giữ sống. Mapping SHARE page vật lý của game nhưng vẫn
+// tính vào footprint của APP -> jetsam giết app (user tưởng respring), áp lực
+// RAM toàn máy còn có thể kéo SpringBoard theo. Vượt -> map 1 page rồi giữ.
+#define ESP_MAX_LIVE_BYTES (96ULL * 1024 * 1024)
 
 struct ESPRegion {
     uint64_t base;         // page-align, mốc bắt đầu mapping
