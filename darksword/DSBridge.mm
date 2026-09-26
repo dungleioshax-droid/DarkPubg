@@ -683,6 +683,45 @@ static uint64_t ds_scan_process_base(uint64_t vmMap) {
     return found;
 }
 
+static uint64_t ds_dyld_read(mach_port_t task, uint64_t remote, void *buf, uint64_t len) {
+    if (task == MACH_PORT_NULL || !remote || !buf || !len || len > 0x1000) return 0;
+    vm_size_t out = 0;
+    if (vm_read_overwrite(task, (vm_address_t)remote, (vm_size_t)len,
+                           (vm_address_t)buf, &out) != KERN_SUCCESS) return 0;
+    return (uint64_t)out;
+}
+
+// Tìm game base kiểu aovcheat: task_info(TASK_DYLD_INFO) -> all_image_info_addr
+// -> duyệt infoArray (mỗi entry 0x18 bytes) -> đọc path -> strstr tên game.
+// Toàn syscall, KHÔNG kernel walk/map từng entry như ds_scan_process_base.
+static uint64_t ds_game_base_via_dyld(mach_port_t task, const char *wantSub) {
+    if (task == MACH_PORT_NULL || !wantSub || !wantSub[0]) return 0;
+    struct task_dyld_info di;
+    mach_msg_type_number_t n = TASK_DYLD_INFO_COUNT;
+    memset(&di, 0, sizeof(di));
+    if (task_info(task, TASK_DYLD_INFO, (task_info_t)&di, &n) != KERN_SUCCESS) return 0;
+    uint64_t infoAddr = (uint64_t)di.all_image_info_addr;
+    if (infoAddr < 0x100000000ULL) return 0;
+    uint32_t hdr[2] = {0, 0}; // version + infoArrayCount
+    if (ds_dyld_read(task, infoAddr, hdr, sizeof(hdr)) != sizeof(hdr)) return 0;
+    uint32_t imgCount = hdr[1];
+    if (imgCount == 0 || imgCount > 0x400) return 0; // cap như aovcheat
+    uint64_t array = 0;
+    if (ds_dyld_read(task, infoAddr + 8, &array, 8) != 8) return 0;
+    if (array < 0x100000000ULL) return 0;
+    char path[256];
+    for (uint32_t i = 0; i < imgCount; i++) {
+        uint64_t ent[3] = {0, 0, 0}; // loadAddress, filePath, modDate
+        if (ds_dyld_read(task, array + (uint64_t)i * 24, ent, sizeof(ent)) != sizeof(ent)) continue;
+        if (ent[0] < 0x100000000ULL || !ent[1]) continue;
+        memset(path, 0, sizeof(path));
+        if (ds_dyld_read(task, ent[1], path, sizeof(path) - 1) == 0) continue;
+        path[sizeof(path) - 1] = '\0';
+        if (strstr(path, wantSub)) return ent[0];
+    }
+    return 0;
+}
+
 static void ds_refresh_game_base_locked(NSString *wantedName) {
     if (g_gameBaseChecking) return;
     g_gameBaseChecking = YES;
@@ -705,7 +744,16 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
         }
         uint64_t task = taskbyproc(proc);
         uint64_t vmMap = task ? task_get_vm_map(task) : 0;
-        uint64_t base = ds_scan_process_base(vmMap);
+        // Đường nhanh kiểu aovcheat: base qua TASK_DYLD_INFO (syscall thuần).
+        // Chỉ rớt về kernel-walk khi chưa có task port.
+        uint64_t base = 0;
+        ESPGameTaskEnsure();
+        mach_port_t pt = ESPGameTaskPort();
+        if (pt != MACH_PORT_NULL) {
+            base = ds_game_base_via_dyld(pt, cname);
+            if (!base) base = ds_game_base_via_dyld(pt, "Shadow");
+        }
+        if (!base) base = ds_scan_process_base(vmMap);
         if (base) {
             g_gameBase = base;
             g_gamePid = pid;
@@ -2554,7 +2602,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "taskport1"
+#define DS_ESP_BUILD_TAG "dyldbase1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
