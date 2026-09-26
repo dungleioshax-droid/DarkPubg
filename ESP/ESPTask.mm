@@ -297,6 +297,52 @@ static void ESPGameTaskResetLocked(void) {
     g_csProc = 0;
 }
 
+// Lookup port object của port MÌNH, kiểu DSGames: tính cả 3 diễn giải
+// (raw / SMR-decode / strip-PAC) cho is_table rồi chọn cái nằm trong range
+// kernel hợp lệ — KHÔNG đọc bừa để validate (đọc unmapped là panic).
+// Trả về 0 nếu không có ứng viên nào sane.
+static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
+    if (outMode) *outMode = "none";
+    if (!off_task_itk_space || !off_ipc_space_is_table ||
+        !off_ipc_entry_ie_object || !sizeof_ipc_entry) return 0;
+    uint64_t selfTask = task_self();
+    if (!ESPTaskIsKernelPtr(selfTask)) return 0;
+    uint64_t space = ESPStripPAC(ds_kread64(selfTask + off_task_itk_space));
+    if (!ESPTaskIsKernelPtr(space)) return 0;
+    uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
+    // 3 diễn giải như log DSGames (raw/smr/pac).
+    uint64_t candRaw = ESPStripPAC(raw);
+    uint64_t candSmr = ds_kreadsmrptr(space + off_ipc_space_is_table);
+    // Range chặt (nếu resolver có) thay vì chỉ prefix — tránh chọn rác.
+    uint64_t lo = VM_MIN_KERNEL_ADDRESS, hi = VM_MAX_KERNEL_ADDRESS;
+    BOOL haveRange = (lo && hi && hi > lo);
+    uint64_t table = 0;
+    const char *mode = "none";
+    uint64_t cands[3] = {candRaw, candSmr, raw};
+    const char *names[3] = {"raw", "smr", "rawbin"};
+    for (int i = 0; i < 3; i++) {
+        uint64_t c = cands[i];
+        if (!c) continue;
+        if (haveRange) {
+            if (c < lo || c >= hi) continue;
+        } else if (!ESPTaskIsKernelPtr(c)) {
+            continue;
+        }
+        table = c;
+        mode = names[i];
+        break;
+    }
+    if (!table) return 0;
+    if (outMode) *outMode = mode;
+    uint64_t entry = table + (uint64_t)sizeof_ipc_entry * (uint64_t)((uint32_t)name >> 8);
+    uint64_t obj = ESPStripPAC(ds_kread64(entry + off_ipc_entry_ie_object));
+    if (haveRange) {
+        if (obj < lo || obj >= hi) return 0;
+    } else if (!ESPTaskIsKernelPtr(obj)) {
+        return 0;
+    }
+    return obj;
+}
 // Dựng fake task port cho proc/pid game (xem chú thích ở trên). Trả về port
 // hoặc MACH_PORT_NULL. Chỉ gọi khi đang giữ s_taskEnsureMutex.
 static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
@@ -306,9 +352,12 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
     static BOOL s_fabDiagDone = NO;
     if (!s_fabDiagDone) {
         s_fabDiagDone = YES;
-        ESPLog("gametask: fab diag ipkobj=0x%x taskmap=0x%x proof=0x%x prot=0x%x pid=%d",
+        ESPLog("gametask: fab diag ipkobj=0x%x taskmap=0x%x proof=0x%x prot=0x%x pid=%d smr=0x%llx t1sz=%llu minmax=0x%llx/0x%llx",
                off_ipc_port_ip_kobject, off_task_map, off_proc_p_proc_ro,
-               off_proc_ro_pr_task, pid);
+               off_proc_ro_pr_task, pid, (unsigned long long)smr_base,
+               (unsigned long long)t1sz_boot,
+               (unsigned long long)VM_MIN_KERNEL_ADDRESS,
+               (unsigned long long)VM_MAX_KERNEL_ADDRESS);
     }
     if (!off_ipc_port_ip_kobject || !off_task_map || !off_proc_p_proc_ro ||
         !off_proc_ro_pr_task) {
@@ -353,18 +402,22 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
         ESPLog("gametask: fab bail insert_right fail");
         return MACH_PORT_NULL;
     }
-    // Kobject = ĐỊA CHỈ port object, lấy bằng syscall mach_port_kobject (thuần
-    // syscall, KHÔNG đọc port-table/SMR — đường SMR task_get_ipc_port_object
-    // đã gây REBOOT máy). Hết syscall là BAIL sạch, không fallback đọc kernel.
+    // Kobject = ĐỊA CHỈ port object. Đường 1: mach_port_kobject (syscall thuần).
+    // Đường 2: table-walk multi-decode kiểu DSGames (raw/smr/pac + chọn theo
+    // range, không đọc bừa). Cả hai đều không ghi kernel nên thử là an toàn.
     mach_vm_address_t oaddr = 0;
     natural_t otype = 0;
     uint64_t kobj = 0;
     if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
         kobj = ESPStripPAC((uint64_t)oaddr);
     }
+    const char *tblMode = "none";
+    if (!ESPTaskIsKernelPtr(kobj)) {
+        kobj = ESPOwnPortObject(name, &tblMode);
+    }
     if (!ESPTaskIsKernelPtr(kobj)) {
         mach_port_destroy(mach_task_self(), name);
-        ESPLog("gametask: fab bail port kobj not kptr");
+        ESPLog("gametask: fab bail port kobj not kptr (tbl=%s)", tblMode);
         return MACH_PORT_NULL;
     }
     // Sanity: io_bits của port vừa cấp phải là ACTIVE (bit31) + type nhỏ.
