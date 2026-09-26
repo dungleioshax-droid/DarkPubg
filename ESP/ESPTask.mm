@@ -194,6 +194,26 @@ static uint64_t ESPTaskCSFlagsAddr(uint64_t proc) {
 static const CFAbsoluteTime kTaskVerifyInterval = 2.0;
 // Read fail liên tiếp bao nhiêu lần thì coi port héo (game restart) và xả.
 static const int kTaskReadFailLimit = 64;
+// Nhịp kiểm tra proc game còn sống (chống UAF fake port, xem dưới).
+static const CFAbsoluteTime kTaskProcAliveInterval = 0.5;
+
+// ---- FAKE TASK PORT (cơ chế khác thay Kernel Read) ----
+// task_for_pid chết trên iOS 16+ (proc_ro read-only, không patch được
+// csflags). Thay vì exploit dance từng page, dựng 1 task port GIẢ:
+// cấp port của mình rồi ghi đè ip_kobject = task game + ip_bits =
+// ACTIVE|TASK. Sau đó mach_vm_read_overwrite là syscall thuần (~µs).
+// Khác task port thật ở 1 điểm: port giả KHÔNG giữ ref lên task game —
+// game chết mà còn gọi vào port là UAF -> panic. Chống bằng 2 lớp:
+//  (1) verify/đọc đều check proc pid trước (đọc kernel thuần, không panic);
+//  (2) reset LUÔN khôi phục ip_kobject/bits gốc trước khi huỷ port.
+static const uint32_t kIPCPortIPBitsOff = 0; // io_bits là field đầu ipc_object
+static const uint32_t kIOBitsActiveTask = 0x80000002; // IO_BITS_ACTIVE | IKOT_TASK
+static mach_port_t s_fakePort = MACH_PORT_NULL;
+static uint64_t s_fakeKobj = 0;
+static uint32_t s_fakeOrigBits = 0;
+static uint64_t s_fakeOrigKobj = 0;
+static CFAbsoluteTime s_procAliveAt = 0;
+static BOOL s_procAlive = NO;
 
 static mach_port_t g_taskPort = MACH_PORT_NULL;
 static pid_t g_taskPid = 0;
@@ -212,6 +232,20 @@ mach_port_t ESPGameTaskPort(void) {
 }
 
 static void ESPGameTaskResetLocked(void) {
+    if (s_fakePort != MACH_PORT_NULL) {
+        // Port giả: khôi phục ip_kobject/bits gốc TRƯỚC khi huỷ — nếu không
+        // kernel đi theo kobject giả lúc GC port -> panic.
+        if (s_fakeKobj && ESPTaskIsKernelPtr(s_fakeKobj)) {
+            ds_kwrite32(s_fakeKobj + kIPCPortIPBitsOff, s_fakeOrigBits);
+            if (off_ipc_port_ip_kobject) {
+                ds_kwrite64(s_fakeKobj + off_ipc_port_ip_kobject, s_fakeOrigKobj);
+            }
+        }
+        mach_port_destroy(mach_task_self(), s_fakePort);
+        if (g_taskPort == s_fakePort) g_taskPort = MACH_PORT_NULL;
+        s_fakePort = MACH_PORT_NULL;
+        s_fakeKobj = 0;
+    }
     if (g_taskPort != MACH_PORT_NULL) {
         mach_port_deallocate(mach_task_self(), g_taskPort);
         g_taskPort = MACH_PORT_NULL;
@@ -221,10 +255,69 @@ static void ESPGameTaskResetLocked(void) {
     g_taskRetryAt = 0;
     g_taskVerifyAt = 0;
     g_taskReadFails = 0;
+    s_procAliveAt = 0;
+    s_procAlive = NO;
     // Proc game đổi (restart) -> địa chỉ csflags cache không còn đúng; offset
     // đã tìm được vẫn giữ (lần sau chỉ cần đọc lại proc_ro của proc mới).
     g_csAddr = 0;
     g_csProc = 0;
+}
+
+// Dựng fake task port cho proc/pid game (xem chú thích ở trên). Trả về port
+// hoặc MACH_PORT_NULL. Chỉ gọi khi đang giữ s_taskEnsureMutex.
+static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
+    if (!proc || pid <= 0) return MACH_PORT_NULL;
+    if (!off_ipc_port_ip_kobject || !off_task_map || !off_proc_p_proc_ro ||
+        !off_proc_ro_pr_task) {
+        return MACH_PORT_NULL; // thiếu offsets -> không dám ghi kernel
+    }
+    // Task game + cross-check 2 chiều (proc_ro->task phải khớp taskbyproc,
+    // task->map phải là con trỏ kernel) — ghi nhầm task là panic ngay.
+    uint64_t task = taskbyproc(proc);
+    if (!ESPTaskIsKernelPtr(task)) return MACH_PORT_NULL;
+    uint64_t ro = ds_kread64(proc + off_proc_p_proc_ro);
+    if (!ESPTaskIsKernelPtr(ro)) return MACH_PORT_NULL;
+    uint64_t prTask = ds_kread64(ro + off_proc_ro_pr_task);
+    if (prTask != task) {
+        ESPLog("gametask: fake port task mismatch (proc_ro task != taskbyproc)");
+        return MACH_PORT_NULL;
+    }
+    uint64_t map = ds_kread64(task + off_task_map);
+    if (!ESPTaskIsKernelPtr(map)) return MACH_PORT_NULL;
+    // Cấp port của mình (receive + send).
+    mach_port_t name = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &name) != KERN_SUCCESS) {
+        return MACH_PORT_NULL;
+    }
+    if (mach_port_insert_right(mach_task_self(), name, name, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+        mach_port_destroy(mach_task_self(), name);
+        return MACH_PORT_NULL;
+    }
+    uint64_t kobj = task_get_ipc_port_kobject(task_self(), name);
+    if (!ESPTaskIsKernelPtr(kobj)) {
+        mach_port_destroy(mach_task_self(), name);
+        return MACH_PORT_NULL;
+    }
+    // Chưa ai khác biết port này nên 2 ghi này an toàn tuyệt đối.
+    uint32_t origBits = ds_kread32(kobj + kIPCPortIPBitsOff);
+    uint64_t origKobj = ds_kread64(kobj + off_ipc_port_ip_kobject);
+    ds_kwrite32(kobj + kIPCPortIPBitsOff, kIOBitsActiveTask);
+    ds_kwrite64(kobj + off_ipc_port_ip_kobject, task);
+    // Xác nhận cổng thật sự trỏ đúng task (syscall, không panic).
+    pid_t check = 0;
+    if (pid_for_task(name, &check) != KERN_SUCCESS || check != pid) {
+        ds_kwrite32(kobj + kIPCPortIPBitsOff, origBits);
+        ds_kwrite64(kobj + off_ipc_port_ip_kobject, origKobj);
+        mach_port_destroy(mach_task_self(), name);
+        ESPLog("gametask: fake port verify fail pid=%d", pid);
+        return MACH_PORT_NULL;
+    }
+    s_fakePort = name;
+    s_fakeKobj = kobj;
+    s_fakeOrigBits = origBits;
+    s_fakeOrigKobj = origKobj;
+    ESPLog("gametask: fake task port OK pid=%d port=0x%x", pid, name);
+    return name;
 }
 
 void ESPGameTaskReset(void) {
@@ -249,15 +342,28 @@ BOOL ESPGameTaskEnsure(void) {
     // 1) Đường nhanh: port đã verify trong `kTaskVerifyInterval` giây qua.
     //    Không procbyname, không kernel read — đây là thứ khiến tick 60Hz rẻ.
     if (g_taskPort != MACH_PORT_NULL && now < g_taskVerifyAt) return YES;
-    // 2) Verify port cũ (pid_for_task là syscall rẻ, không phải kernel read).
+    // 2) Verify port cũ. Port THẬT: pid_for_task (syscall rẻ). Port GIẢ:
+    // KHÔNG được pid_for_task khi nghi game chết (task không giữ ref, UAF) —
+    // check proc pid bằng đọc kernel thuần trước, khác là xả ngay.
     if (g_taskPort != MACH_PORT_NULL) {
-        pid_t check = 0;
-        if (pid_for_task(g_taskPort, &check) == KERN_SUCCESS && check == g_taskPid) {
-            g_taskVerifyAt = now + kTaskVerifyInterval;
-            g_taskReadFails = 0;
-            return YES;
+        if (s_fakePort == g_taskPort) {
+            pid_t p = (g_taskProc && off_proc_p_pid)
+                ? (pid_t)ds_kread32(g_taskProc + off_proc_p_pid) : 0;
+            if (p == g_taskPid && p > 0) {
+                g_taskVerifyAt = now + kTaskVerifyInterval;
+                g_taskReadFails = 0;
+                return YES;
+            }
+            ESPGameTaskResetLocked();
+        } else {
+            pid_t check = 0;
+            if (pid_for_task(g_taskPort, &check) == KERN_SUCCESS && check == g_taskPid) {
+                g_taskVerifyAt = now + kTaskVerifyInterval;
+                g_taskReadFails = 0;
+                return YES;
+            }
+            ESPGameTaskResetLocked();
         }
-        ESPGameTaskResetLocked();
     }
     if (now < g_taskRetryAt) return NO;
     // 3) Cần lấy port: chỉ dùng proc cache, chỉ resolve proclist nếu chưa có.
@@ -284,6 +390,14 @@ BOOL ESPGameTaskEnsure(void) {
     //    ldid) thì không cần ghi kernel lần nào.
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = task_for_pid(mach_task_self(), pid, &task);
+    if ((kr != KERN_SUCCESS || task == MACH_PORT_NULL) && ds_is_ready()) {
+        // 4b) Dựng fake task port qua kernel — không cần patch csflags nên
+        // chạy cả khi proc_ro read-only (iOS 16+). Thử TRƯỚC khi patch vì
+        // nhẹ và chắc chắn hơn (patch vùng read-only vừa vô ích vừa rủi ro).
+        // Throttle theo g_taskRetryAt như mọi đường fail khác.
+        task = ESPFabricateTaskPort(proc, pid);
+        kr = (task == MACH_PORT_NULL) ? KERN_FAILURE : KERN_SUCCESS;
+    }
     if (kr != KERN_SUCCESS || task == MACH_PORT_NULL) {
         // 5) Chưa được -> patch csflags của proc GAME rồi thử lại. Đây là chỗ
         //    trước đây luôn fail ("no p_csflags offset") nên box phải map page.
@@ -354,6 +468,20 @@ BOOL ESPTaskRead(uint64_t remoteAddr, void *buf, uint64_t len) {
     if (task == MACH_PORT_NULL || !remoteAddr || !buf || !len) return NO;
     if (len > 0x10000) return NO;
     if (remoteAddr < 0x100000000ULL || remoteAddr > 0x300000000000ULL - len) return NO;
+    // Port giả không giữ ref lên task game: game chết giữa 2 lần verify (2s)
+    // mà vẫn đọc vào port là UAF -> panic. Chặn bằng proc pid cache 0.5s
+    // (1 kernel read rẻ cho cả chùm read, chỉ khi dùng fake port).
+    if (task == s_fakePort && s_fakePort != MACH_PORT_NULL) {
+        CFAbsoluteTime nowR = CFAbsoluteTimeGetCurrent();
+        if (nowR - s_procAliveAt >= kTaskProcAliveInterval) {
+            s_procAliveAt = nowR;
+            pid_t p = (g_taskProc && off_proc_p_pid)
+                ? (pid_t)ds_kread32(g_taskProc + off_proc_p_pid) : 0;
+            s_procAlive = (p == g_taskPid && p > 0);
+            if (!s_procAlive) ESPGameTaskReset();
+        }
+        if (!s_procAlive) return NO;
+    }
     // vm_read_overwrite (không phải mach_vm_read_overwrite — SDK iOS không khai
     // báo tiền tố mach_vm_*; trên arm64 vm_size_t đã là 64-bit nên tương đương).
     vm_size_t outSize = 0;

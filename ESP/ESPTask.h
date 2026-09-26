@@ -1,9 +1,11 @@
 //
 //  ESPTask.h
-//  Task port của game qua task_for_pid (như aovcheat): patch CS_GET_TASK_ALLOW
-//  lên proc game bằng kernel rồi lấy port — đọc bulk bằng mach_vm_read_overwrite
-//  nhanh hơn exploit-read từng field hàng trăm lần. Không cần entitlement đặc
-//  biệt trên app (Esign vẫn qua) vì patch ở phía target.
+//  Task port của game: thử task_for_pid trực tiếp, nếu không được thì DỰNG
+//  port giả từ kernel (ghi ip_kobject của port mình thành task game) —
+//  không cần patch CS_GET_TASK_ALLOW nên chạy cả khi proc_ro read-only
+//  (iOS 16+). Đọc bulk bằng mach_vm_read_overwrite: syscall thuần, không còn
+//  exploit dance từng page. Không cần entitlement đặc biệt trên app (Esign
+//  vẫn qua) vì mọi thứ làm ở phía target/kernel đã có KRW.
 //
 
 #ifndef ESPTask_h
