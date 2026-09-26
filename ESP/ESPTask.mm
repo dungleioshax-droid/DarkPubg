@@ -19,6 +19,9 @@
 #include <mutex>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <sys/sysctl.h>
+#include <mach/machine.h>
+#include <mach/mach_port.h>
 
 extern "C" {
 #import "darksword.h"
@@ -85,6 +88,19 @@ static inline BOOL ESPTaskIsKernelPtr(uint64_t v) {
     // mọi chỗ khác. Bản cũ check (v>>48)==0xffff strict quá -> rớt oan con trỏ
     // PAC-signed (log: task->map bail dù map thật) làm mù ESP toàn tập.
     return ds_isvalid(v);
+}
+
+// Strip PAC (arm64e) cho địa chỉ kernel syscall trả về (vd mach_port_kobject).
+// Đã canonical thì giữ nguyên (identity) nên gọi luôn luôn an toàn.
+static uint64_t ESPStripPAC(uint64_t a) {
+    if ((a & 0xFFFFFF0000000000ULL) == 0xFFFFFF0000000000ULL) return a;
+    cpu_subtype_t st = 0;
+    size_t sz = sizeof(st);
+    if (sysctlbyname("hw.cpusubtype", &st, &sz, NULL, 0) != 0) return a;
+    if (st != CPU_SUBTYPE_ARM64E) return a;
+    uint64_t out = a;
+    __asm__ volatile(".long 0xDAC143E0" : "+r"(out)); // XPACI X0
+    return out;
 }
 
 static BOOL ESPTaskOurCSFlags(uint32_t *out) {
@@ -331,11 +347,35 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
         ESPLog("gametask: fab bail insert_right fail");
         return MACH_PORT_NULL;
     }
-    uint64_t kobj = task_get_ipc_port_kobject(task_self(), name);
+    uint64_t kobj = 0;
+    // Đường 1 (syscall thuần): mach_port_kobject trả thẳng địa chỉ kobject
+    // của port mình — không đụng itk_space/ip_table chain (mấy offset đó theo
+    // version, đã gãy trên máy này). Fallback đường 2 (chain cũ) nếu fail.
+    {
+        natural_t otype = 0;
+        vm_address_t oaddr = 0;
+        if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
+            kobj = (uint64_t)oaddr;
+        }
+    }
+    if (!kobj) {
+        kobj = task_get_ipc_port_kobject(task_self(), name);
+    }
+    kobj = ESPStripPAC(kobj);
     if (!ESPTaskIsKernelPtr(kobj)) {
         mach_port_destroy(mach_task_self(), name);
         ESPLog("gametask: fab bail port kobj not kptr");
         return MACH_PORT_NULL;
+    }
+    // Sanity: io_bits của port vừa cấp phải là ACTIVE (bit31) + type nhỏ.
+    // K sai (PAC chưa strip / offset lệch) thì dừng TRƯỚC khi ghi.
+    {
+        uint32_t bits = ds_kread32(kobj + kIPCPortIPBitsOff);
+        if (!(bits & 0x80000000) || (bits & 0xFFFF) >= 0x20) {
+            mach_port_destroy(mach_task_self(), name);
+            ESPLog("gametask: fab bail kobj bits insane 0x%x", bits);
+            return MACH_PORT_NULL;
+        }
     }
     // Chưa ai khác biết port này nên 2 ghi này an toàn tuyệt đối.
     uint32_t origBits = ds_kread32(kobj + kIPCPortIPBitsOff);
