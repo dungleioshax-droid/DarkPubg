@@ -40,6 +40,9 @@ fi
 
 mkdir -p "$temporary_dir/Payload" "$package_dir"
 cp -R "$application_path" "$temporary_dir/Payload/DarkSpeed.app"
+# XPC helper (DSPortHelper): build bằng clang trực tiếp + nhúng vào app.
+# Fail ở đây là fail cả build — helper hỏng thì không ship.
+./Helper/build-helper.sh "$temporary_dir/Payload"
 (cd "$temporary_dir" && /usr/bin/zip -qry "$package_path" Payload)
 
 if [ "${DARKSPEED_UNSIGNED:-0}" = "1" ]; then
