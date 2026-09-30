@@ -22,7 +22,6 @@
 #include <sys/sysctl.h>
 #include <mach/machine.h>
 #include <mach/mach_port.h>
-#include <xpc/xpc.h>
 
 extern "C" {
 #import "darksword.h"
@@ -465,81 +464,6 @@ static uint64_t ESPGameProcResolve(void) {
     return proc;
 }
 
-// ---- XPC helper client (kiểu DSGames ExternalESPReader) ----
-// Xin port game từ helper process. Helper làm kernel writes, main app chỉ
-// nhận send right rồi syscall — main app không bao giờ panic vì kernel.
-// Timeout 5s: helper lần đầu phải chạy exploit (chậm) thì cycle này bỏ qua,
-// cycle sau thử lại; in-process fabrication vẫn là fallback tức thì.
-#define ESP_XPC_HELPER_SERVICE "com.huami.darkspeed.porthelper"
-#define ESP_XPC_KEY_CMD "cmd"
-#define ESP_XPC_CMD_PORT "port"
-#define ESP_XPC_KEY_PID "pid"
-#define ESP_XPC_KEY_PORT "port"
-#define ESP_XPC_KEY_ERROR "error"
-
-static double s_xpcDeadUntil = 0; // helper vắng mặt -> bỏ qua tới T
-
-mach_port_t ESPTaskCopyPortFromHelper(pid_t pid) {
-    if (pid <= 0) return MACH_PORT_NULL;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now < s_xpcDeadUntil) return MACH_PORT_NULL;
-    xpc_connection_t conn =
-        xpc_connection_create_mach_service(ESP_XPC_HELPER_SERVICE, NULL, 0);
-    if (!conn) {
-        s_xpcDeadUntil = now + 120.0;
-        return MACH_PORT_NULL;
-    }
-    xpc_connection_set_event_handler(conn, ^(xpc_object_t ev) { (void)ev; });
-    xpc_connection_resume(conn);
-    xpc_object_t req = xpc_dictionary_create(NULL, NULL, 0);
-    xpc_dictionary_set_string(req, ESP_XPC_KEY_CMD, ESP_XPC_CMD_PORT);
-    xpc_dictionary_set_int64(req, ESP_XPC_KEY_PID, (int64_t)pid);
-    __block xpc_object_t reply = NULL;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    xpc_connection_send_message_with_reply(conn, req, NULL,
-                                           ^(xpc_object_t r) {
-                                               if (r) reply = xpc_retain(r);
-                                               dispatch_semaphore_signal(sem);
-                                           });
-    dispatch_semaphore_wait(sem,
-                            dispatch_time(DISPATCH_TIME_NOW, 5ull * NSEC_PER_SEC));
-    mach_port_t out = MACH_PORT_NULL;
-    if (reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY) {
-        xpc_object_t vp = xpc_dictionary_get_value(reply, ESP_XPC_KEY_PORT);
-        if (vp && xpc_get_type(vp) == XPC_TYPE_MACH_SEND) {
-            out = xpc_mach_send_copy_right((xpc_mach_send_t)vp);
-        } else {
-            const char *err = xpc_dictionary_get_string(reply, ESP_XPC_KEY_ERROR);
-            ESPLog("gametask: helper miss pid=%d (%s)", pid, err ? err : "?");
-        }
-    } else if (reply && xpc_get_type(reply) == XPC_TYPE_ERROR) {
-        if (reply == XPC_ERROR_CONNECTION_INVALID) {
-            // Không có service (chưa nhúng helper / Esign không sign) ->
-            // nghỉ dài, đi in-process.
-            s_xpcDeadUntil = now + 120.0;
-            ESPLog("gametask: helper unavailable, in-process fallback");
-        } else {
-            s_xpcDeadUntil = now + 5.0;
-        }
-    } else {
-        // Timeout: helper đang exploit (lần đầu chậm) -> thử lại cycle sau.
-        s_xpcDeadUntil = now + 5.0;
-    }
-    if (reply) xpc_release(reply);
-    xpc_release(req);
-    xpc_connection_cancel(conn);
-    xpc_release(conn);
-    return out;
-}
-
-uint64_t ESPTaskResolveGameProc(void) {
-    return ESPGameProcResolve();
-}
-
-mach_port_t ESPTaskFabricatePortForProc(uint64_t proc, pid_t pid) {
-    return ESPFabricateTaskPort(proc, pid);
-}
-
 BOOL ESPGameTaskEnsure(void) {
 #if !USE_DARKSWORD
     return NO;
@@ -598,20 +522,7 @@ BOOL ESPGameTaskEnsure(void) {
     //    log dòng fail chỉ gây nhầm lẫn. Đi THẲNG sang fabrication.
     mach_port_t task = MACH_PORT_NULL;
     kern_return_t kr = KERN_FAILURE;
-    // 4a) Helper XPC trước (kernel writes nằm ở process khác). Miss/timeout
-    // thì fabrication tại chỗ như cũ — không bao giờ treo vì helper.
-    if (kFabricateTaskPortEnabled) {
-        task = ESPTaskCopyPortFromHelper(pid);
-        if (task != MACH_PORT_NULL) {
-            kr = KERN_SUCCESS;
-            if (s_fakePort != MACH_PORT_NULL) {
-                mach_port_destroy(mach_task_self(), s_fakePort);
-            }
-            s_fakePort = task; // port helper cũng là fake (không giữ ref)
-            ESPLog("gametask: port from helper pid=%d", pid);
-        }
-    }
-    if (kr != KERN_SUCCESS && ds_is_ready() && kFabricateTaskPortEnabled) {
+    if (ds_is_ready() && kFabricateTaskPortEnabled) {
         // 4b) Dựng fake task port qua kernel — không cần patch csflags nên
         // chạy cả khi proc_ro read-only (iOS 16+). Thử TRƯỚC khi patch vì
         // nhẹ và chắc chắn hơn (patch vùng read-only vừa vô ích vừa rủi ro).

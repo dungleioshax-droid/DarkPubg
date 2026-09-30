@@ -32,16 +32,6 @@ BOOL ESPGameTaskEnsure(void);
 // Xả port cache (game restart / world đổi / read fail liên tục).
 void ESPGameTaskReset(void);
 
-// XPC helper (process tách, kiểu DSGames ExternalESPReader): resolve proc +
-// fabricate port thô, không chạm cache globals. Helper gọi hai hàm này.
-uint64_t ESPTaskResolveGameProc(void);
-mach_port_t ESPTaskFabricatePortForProc(uint64_t proc, pid_t pid);
-
-// Client: xin port game từ helper qua XPC. Trả port (caller sở hữu) hoặc
-// MACH_PORT_NULL nếu helper chưa sẵn/không có. Tự fallback về đường
-// in-process — gọi hàm này trước, fail thì fabrication tại chỗ như cũ.
-mach_port_t ESPTaskCopyPortFromHelper(pid_t pid);
-
 // Đọc bulk qua task port (mach_vm_read_overwrite). NO nếu chưa có port/fail.
 BOOL ESPTaskRead(uint64_t remoteAddr, void *buf, uint64_t len);
 
