@@ -313,6 +313,12 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     // 3 diễn giải như log DSGames (raw/smr/pac).
     uint64_t candRaw = ESPStripPAC(raw);
     uint64_t candSmr = ds_kreadsmrptr(space + off_ipc_space_is_table);
+    ESPLog("gametask: chain task=0x%llx space=0x%llx raw=0x%llx candRaw=0x%llx candSmr=0x%llx itksp=0x%x istbl=0x%x szent=0x%x ieobj=0x%x",
+           (unsigned long long)selfTask, (unsigned long long)space,
+           (unsigned long long)raw, (unsigned long long)candRaw,
+           (unsigned long long)candSmr, off_task_itk_space,
+           off_ipc_space_is_table, sizeof_ipc_entry,
+           off_ipc_entry_ie_object);
     // Range chặt (nếu resolver có) thay vì chỉ prefix — tránh chọn rác.
     uint64_t lo = VM_MIN_KERNEL_ADDRESS, hi = VM_MAX_KERNEL_ADDRESS;
     BOOL haveRange = (lo && hi && hi > lo);
@@ -408,7 +414,10 @@ static mach_port_t ESPFabricateTaskPort(uint64_t proc, pid_t pid) {
     mach_vm_address_t oaddr = 0;
     natural_t otype = 0;
     uint64_t kobj = 0;
-    if (mach_port_kobject(mach_task_self(), name, &otype, &oaddr) == KERN_SUCCESS && oaddr) {
+    kern_return_t kobjKr = mach_port_kobject(mach_task_self(), name, &otype, &oaddr);
+    ESPLog("gametask: kobj syscall kr=0x%x otype=0x%x oaddr=0x%llx",
+           kobjKr, otype, (unsigned long long)oaddr);
+    if (kobjKr == KERN_SUCCESS && oaddr) {
         kobj = ESPStripPAC((uint64_t)oaddr);
     }
     const char *tblMode = "none";
