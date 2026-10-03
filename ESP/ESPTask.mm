@@ -94,13 +94,24 @@ static inline BOOL ESPTaskIsKernelPtr(uint64_t v) {
 // Đã canonical thì giữ nguyên (identity) nên gọi luôn luôn an toàn.
 static uint64_t ESPStripPAC(uint64_t a) {
     if ((a & 0xFFFFFF0000000000ULL) == 0xFFFFFF0000000000ULL) return a;
-    cpu_subtype_t st = 0;
-    size_t sz = sizeof(st);
-    if (sysctlbyname("hw.cpusubtype", &st, &sz, NULL, 0) != 0) return a;
-    if (st != CPU_SUBTYPE_ARM64E) return a;
+    // KHÔNG gate bằng sysctl hw.cpusubtype: sandbox chặn sysctl này nên gate
+    // luôn rớt -> strip thành no-op -> pointer bẩn đi khắp chain. Binary chỉ
+    // ship slice arm64e (mọi CPU chạy được nó đều có PAC) nên XPACI luôn an
+    // toàn; pointer đã sạch thì canonical sẵn, strip là identity.
     uint64_t out = a;
     __asm__ volatile(".long 0xDAC143E0" : "+r"(out)); // XPACI X0
     return out;
+}
+
+// Mirror ds_kreadsmrptr (darksword.m) nhưng decode trên GIÁ TRỊ đã có thay vì
+// tự đọc — vì cần strip PAC trước khi decode SMR, còn bản utils decode trên
+// giá trị bẩn (xpaci của nó cũng no-op khi sysctl bị chặn).
+static uint64_t ESPSmrDecode(uint64_t value) {
+    uint64_t bits = (smr_base << (62 - t1sz_boot));
+    if ((value & bits) == 0) {
+        return ((value & (0xFFFFFFFFFFFFC000ULL & ~bits)) | bits);
+    }
+    return (value & 0xFFFFFFFFFFFFFFE0ULL);
 }
 
 static BOOL ESPTaskOurCSFlags(uint32_t *out) {
@@ -325,9 +336,10 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
         return 0;
     }
     uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
-    // 3 diễn giải như log DSGames (raw/smr/pac).
+    // 3 diễn giải như log DSGames (raw/smr/pac), tính trên giá trị THÔ:
+    // smr decode phải chạy trên raw (không phải trên bản đã strip).
     uint64_t candRaw = ESPStripPAC(raw);
-    uint64_t candSmr = ds_kreadsmrptr(space + off_ipc_space_is_table);
+    uint64_t candSmr = ESPSmrDecode(raw);
     ESPLog("gametask: chain task=0x%llx space=0x%llx raw=0x%llx candRaw=0x%llx candSmr=0x%llx itksp=0x%x istbl=0x%x szent=0x%x ieobj=0x%x",
            (unsigned long long)selfTask, (unsigned long long)space,
            (unsigned long long)raw, (unsigned long long)candRaw,
