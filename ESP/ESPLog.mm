@@ -39,6 +39,16 @@ static NSString *ESPLogPath(void) {
     return [dir stringByAppendingPathComponent:@"ESP.log"];
 }
 
+void ESPLogReset(void) {
+    @try {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *docPath = ESPLogPath();
+        if (docPath) [fm removeItemAtPath:docPath error:nil];
+        [fm removeItemAtPath:@"/tmp/ESP.log" error:nil];
+        [fm removeItemAtPath:@"/var/mobile/Documents/ESP.log" error:nil];
+    } @catch (__unused NSException *e) {}
+}
+
 void ESPLog(const char *fmt, ...) {
     if (!fmt || !fmt[0]) return;
     va_list args;

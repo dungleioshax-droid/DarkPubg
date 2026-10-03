@@ -14,6 +14,10 @@ extern "C" {
 
 void ESPLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+// Xoá sạch log cũ (Documents + /tmp), bắt đầu file mới. Gọi 1 lần khi bật
+// HUD để mỗi lần chạy là 1 log mới, không đè lên log cũ.
+void ESPLogReset(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3303,6 +3303,9 @@ static void ds_finish_enable(void) {
         ds_reset_remote_symbol_cache();
         // Mốc 0 của TRACE: từ đây tới lúc HUD hiện là cửa sổ hay respring.
         g_hudEnabledAt = CFAbsoluteTimeGetCurrent();
+        // Log mới cho mỗi lần bật HUD: xoá log cũ, file sau đây là của
+        // session này (dòng đầu sẽ là "enable self ...").
+        ESPLogReset();
         ds_trace("enable: rc init start");
         // Chẩn đoán respring: pid app mình + RSS (xem app có phình RAM không),
         // so với `rc ok pid=` (SpringBoard) ở session sau để biết ai chết.
