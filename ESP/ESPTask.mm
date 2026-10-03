@@ -303,11 +303,11 @@ static void ESPGameTaskResetLocked(void) {
 // Trả về 0 nếu không có ứng viên nào sane.
 static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     if (outMode) *outMode = "none";
-    if (!off_task_itk_space || !off_ipc_space_is_table ||
-        !off_ipc_entry_ie_object || !sizeof_ipc_entry) {
-        ESPLog("gametask: chain bail off0 itksp=0x%x istbl=0x%x szent=0x%x ieobj=0x%x",
-               off_task_itk_space, off_ipc_space_is_table, sizeof_ipc_entry,
-               off_ipc_entry_ie_object);
+    // LƯU Ý: ie_object KHÔNG check != 0 — nó là field đầu tiên của
+    // ipc_entry nên offset 0 là ĐÚNG trên mọi iOS (resolver để 0 cũng đúng).
+    if (!off_task_itk_space || !off_ipc_space_is_table || !sizeof_ipc_entry) {
+        ESPLog("gametask: chain bail off0 itksp=0x%x istbl=0x%x szent=0x%x",
+               off_task_itk_space, off_ipc_space_is_table, sizeof_ipc_entry);
         return 0;
     }
     // task_self() trả pointer đã re-sign userland (S() trong utils) nên phải
