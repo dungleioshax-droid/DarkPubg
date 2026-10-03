@@ -304,11 +304,26 @@ static void ESPGameTaskResetLocked(void) {
 static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     if (outMode) *outMode = "none";
     if (!off_task_itk_space || !off_ipc_space_is_table ||
-        !off_ipc_entry_ie_object || !sizeof_ipc_entry) return 0;
-    uint64_t selfTask = task_self();
-    if (!ESPTaskIsKernelPtr(selfTask)) return 0;
+        !off_ipc_entry_ie_object || !sizeof_ipc_entry) {
+        ESPLog("gametask: chain bail off0 itksp=0x%x istbl=0x%x szent=0x%x ieobj=0x%x",
+               off_task_itk_space, off_ipc_space_is_table, sizeof_ipc_entry,
+               off_ipc_entry_ie_object);
+        return 0;
+    }
+    // task_self() trả pointer đã re-sign userland (S() trong utils) nên phải
+    // strip lại trước khi check prefix kernel lẫn dùng làm địa chỉ đọc.
+    uint64_t selfTask = ESPStripPAC(task_self());
+    if (!ESPTaskIsKernelPtr(selfTask)) {
+        ESPLog("gametask: chain bail task self=0x%llx",
+               (unsigned long long)selfTask);
+        return 0;
+    }
     uint64_t space = ESPStripPAC(ds_kread64(selfTask + off_task_itk_space));
-    if (!ESPTaskIsKernelPtr(space)) return 0;
+    if (!ESPTaskIsKernelPtr(space)) {
+        ESPLog("gametask: chain bail space=0x%llx",
+               (unsigned long long)space);
+        return 0;
+    }
     uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
     // 3 diễn giải như log DSGames (raw/smr/pac).
     uint64_t candRaw = ESPStripPAC(raw);
