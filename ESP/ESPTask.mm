@@ -342,6 +342,9 @@ static uint64_t ESPTableFromSpace(uint64_t space, const char **outMode,
     if ((space & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) return 0;
     if (!ESPValidKaddr(space + off_ipc_space_is_table)) return 0;
     uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
+    // Sentinel read-fail của primitive là chuỗi 0xFF...: dạng chính xác và
+    // dạng qua ESPSmrDecode (&~0x1F) đều không phải pointer thật.
+    if ((raw & 0xFFFFFFFFFFFFFFE0ULL) == 0xFFFFFFFFFFFFFFE0ULL) return 0;
     uint64_t cands[3] = {ESPStripPAC(raw), ESPSmrDecode(raw), raw};
     const char *names[3] = {"raw", "smr", "rawbin"};
     uint64_t lo = VM_MIN_KERNEL_ADDRESS, hi = VM_MAX_KERNEL_ADDRESS;
@@ -397,6 +400,12 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
             }
             if (!ESPValidKaddr(selfTask + use)) continue;
             uint64_t s = ESPStripPAC(ds_kread64(selfTask + use));
+            if (use == pri) {
+                uint64_t r2 = ESPValidKaddr(s + off_ipc_space_is_table)
+                    ? ds_kread64(s + off_ipc_space_is_table) : 0;
+                ESPLog("gametask: probe pri phase=%d s=0x%llx raw=0x%llx",
+                       phase, (unsigned long long)s, (unsigned long long)r2);
+            }
             if ((s & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) continue;
             const char *m = "none";
             uint64_t t = ESPTableFromSpace(s, &m, phase == 1);
