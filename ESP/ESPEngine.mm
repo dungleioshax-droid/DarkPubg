@@ -40,6 +40,7 @@ struct ESPVmShmem {
     bool used;
 };
 extern "C" struct ESPVmShmem vmmapremotepage(uint64_t vmMap, uint64_t address);
+extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
 // Ép DSBridge quét lại base ngay (bypass TTL 30s), dùng khi engine phát hiện
 // base stale (pid đổi / world fail liên tiếp mà pid/base không đổi).
 extern void DSBridgeRefreshGameBase(void);
