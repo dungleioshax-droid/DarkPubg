@@ -463,13 +463,19 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     if (pid > 0 && (uint64_t)pid == s_basePid && s_base) return s_base;
     uint64_t task = taskbyproc(proc);
     uint64_t map = task ? task_get_vm_map(task) : 0;
-    if (!ds_isvalid(map)) return 0;
+    if (!ds_isvalid(map)) {
+        ESPLog("game base scan FAIL pid=%d map=0x%llx (invalid)", pid,
+               (unsigned long long)map);
+        return 0;
+    }
     __block uint64_t found = 0;
+    __block uint64_t walked = 0;
     for (int pass = 0; pass < 2 && !found; pass++) {
         vmmapiterateentries(map, ^(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop) {
             if (found) return;
             if (start < 0x100000000ULL || start >= 0xFFFFFF8000000000ULL) return;
             if (end <= start || (end - start) < 0x4000) return;
+            walked++;
             if (pass == 0 && off_vm_map_entry_vme_alias) {
                 uint64_t raw = ds_kread64(entry + off_vm_map_entry_vme_alias);
                 if ((raw >> 12) != 0) return;
@@ -491,6 +497,9 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     if (found) {
         ESPLog("game base via kernel: 0x%llx pid=%d", (unsigned long long)found, pid);
         if (pid > 0) { s_basePid = (uint64_t)pid; s_base = found; }
+    } else {
+        ESPLog("game base scan FAIL pid=%d walked=%llu (no MH region)", pid,
+               (unsigned long long)walked);
     }
     return found;
 }

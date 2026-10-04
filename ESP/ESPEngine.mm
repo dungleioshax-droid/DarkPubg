@@ -30,6 +30,9 @@ extern "C" {
 #import "offsets.h"
 #import "utils.h"
 }
+// Ép DSBridge quét lại base ngay (bypass TTL 30s), dùng khi engine phát hiện
+// base stale (pid đổi / world fail liên tiếp mà pid/base không đổi).
+extern void DSBridgeRefreshGameBase(void);
 
 // Chain nhanh GEngine->Viewport->World (không scan 200k objects).
 
@@ -783,6 +786,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                        (unsigned long long)s_scanBase, (unsigned long long)gameBase);
                 ESPMemoryFlushPageCache();
                 ESPGameTaskReset();
+                // Base DSBridge có thể stale (TTL 30s chưa quét lại sau khi
+                // game restart) -> ép quét lại ngay, lần scan sau dùng base mới.
+                DSBridgeRefreshGameBase();
             }
             s_scanPid = (uint64_t)scanPid;
             s_scanBase = gameBase;
@@ -791,7 +797,25 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
 
     g_espStep = 3;
     uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
-    if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx", g_espStep, (unsigned long long)gameBase); return r; }
+    {
+        // World fail liên tiếp mà pid/base không đổi = base sai nhưng DSBridge
+        // tưởng còn đúng (TTL skip) -> ép quét lại, cooldown 15s chống spam.
+        static int s_worldFails = 0;
+        static CFAbsoluteTime s_lastForce = 0;
+        if (!world) {
+            s_worldFails++;
+        } else {
+            s_worldFails = 0;
+        }
+        if (!world && s_worldFails >= 5 &&
+            CFAbsoluteTimeGetCurrent() - s_lastForce > 15.0) {
+            s_lastForce = CFAbsoluteTimeGetCurrent();
+            ESPLog("world fail x%d pid=%d base=0x%llx: force base rescan",
+                   s_worldFails, scanPid, (unsigned long long)gameBase);
+            DSBridgeRefreshGameBase();
+        }
+    }
+    if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx pid=%d", g_espStep, (unsigned long long)gameBase, scanPid); return r; }
     if (!ESPValidateWorld(vmMap, world)) { ESPLog("scan validate FAIL step=%d", g_espStep); return r; }
     g_espStep = 0;
     r.world = world;
