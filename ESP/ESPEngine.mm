@@ -12,6 +12,7 @@
 #import "ESPConfig.h"
 #import "ESPName.h"
 #import "ESPLog.h"
+#import <mach/mach.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -29,8 +30,16 @@ extern "C" {
 #import "darksword.h"
 #import "offsets.h"
 #import "utils.h"
-#import "vm.h"
 }
+// vmmapremotepage khai tay (vm.h kéo RemoteCall.h @import, không compile được
+// ở file này) — layout đồng nhất với struct vmshmem như ESPMemory.mm.
+struct ESPVmShmem {
+    uint64_t port;
+    uint64_t remoteAddress;
+    uint64_t localAddress;
+    bool used;
+};
+extern "C" struct ESPVmShmem vmmapremotepage(uint64_t vmMap, uint64_t address);
 // Ép DSBridge quét lại base ngay (bypass TTL 30s), dùng khi engine phát hiện
 // base stale (pid đổi / world fail liên tiếp mà pid/base không đổi).
 extern void DSBridgeRefreshGameBase(void);
@@ -596,7 +605,7 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
         // đọc — so 3 đường: region-memcpy (engine) vs map-tươi (direct).
         uint64_t direct = 0;
         {
-            struct vmshmem sh = vmmapremotepage(vmMap, geStatic & ~(uint64_t)(PAGE_SIZE - 1));
+            struct ESPVmShmem sh = vmmapremotepage(vmMap, geStatic & ~(uint64_t)(PAGE_SIZE - 1));
             if (sh.used && sh.localAddress) {
                 direct = *(volatile uint64_t *)(uintptr_t)(sh.localAddress + (geStatic & (PAGE_SIZE - 1)));
                 mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
