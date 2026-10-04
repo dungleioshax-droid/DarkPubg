@@ -29,6 +29,7 @@ extern "C" {
 #import "darksword.h"
 #import "offsets.h"
 #import "utils.h"
+#import "vm.h"
 }
 // Ép DSBridge quét lại base ngay (bypass TTL 30s), dùng khi engine phát hiện
 // base stale (pid đổi / world fail liên tiếp mà pid/base không đổi).
@@ -590,8 +591,21 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     uint64_t engine = ESPReadU64(vmMap, geStatic, &ok);
     BOOL okEng = ok;
     if (!okEng || !ESPIsUserPtr(engine)) {
-        ESPLog("world chain geA=0x%llx engOk=%d eng=0x%llx",
-               (unsigned long long)geStatic, okEng, (unsigned long long)engine);
+        // Phân xử divergence: base scan đọc cùng địa chỉ ra pointer đẹp mà
+        // engine ra 0. Map TƯƠI trực tiếp 1 page (không qua region cache) rồi
+        // đọc — so 3 đường: region-memcpy (engine) vs map-tươi (direct).
+        uint64_t direct = 0;
+        {
+            struct vmshmem sh = vmmapremotepage(vmMap, geStatic & ~(uint64_t)(PAGE_SIZE - 1));
+            if (sh.used && sh.localAddress) {
+                direct = *(volatile uint64_t *)(uintptr_t)(sh.localAddress + (geStatic & (PAGE_SIZE - 1)));
+                mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
+                if (sh.port) mach_port_deallocate(mach_task_self(), (mach_port_t)sh.port);
+            }
+        }
+        ESPLog("world chain geA=0x%llx engOk=%d eng=0x%llx direct=0x%llx",
+               (unsigned long long)geStatic, okEng, (unsigned long long)engine,
+               (unsigned long long)direct);
         return 0;
     }
     g_espStep = 4;
