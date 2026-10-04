@@ -28,6 +28,7 @@
 #import <mach-o/loader.h>
 #include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <string.h>
 
 #if USE_DARKSWORD
@@ -54,8 +55,10 @@ extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr,
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
 // (ESP scan ở queue nền + HUD tick ở bridge queue) có thể ghi đè refcount của
 // cùng vm_object -> vm_object bị free sớm -> panic/respring.
-// Mọi đường map/đọc memory game phải đi qua mutex này.
-static std::mutex s_espReadMutex;
+// shared_mutex: READ (memcpy từ vùng đã map) concurrent không chặn nhau —
+// fix refresh đói mutex khi scan nền ôm lock qua hàng nghìn read (box đứng im
+// rồi nhảy = BOX-JUMP). Chỉ MAP/XẢ mới cần độc quyền (hiếm sau warmup).
+static std::shared_mutex s_espReadMutex;
 
 // Chỉ nhận địa chỉ userspace của process game (4GB..0x3000_0000_0000).
 // Pointer rác trong Actor array rơi xuống kernel walk sẽ treo/panic.
@@ -89,9 +92,10 @@ struct ESPRegion {
 static ESPRegion s_regions[ESP_REGION_MAX];
 static int s_regionCount = 0;
 static uint64_t s_liveBytes = 0;
-// Đếm hit/miss để chẩn đoán (log box perf).
-static uint64_t s_cacheHit = 0;
-static uint64_t s_cacheMiss = 0;
+// Đếm hit/miss để chẩn đoán (log box perf). Atomic vì readers concurrent
+// dưới shared_lock đều tăng được.
+static std::atomic<uint64_t> s_cacheHit{0};
+static std::atomic<uint64_t> s_cacheMiss{0};
 // Đếm lần map vùng: maps = số lần map thành công, pages = tổng page phủ,
 // fails = số lần thử vùng lớn phải rơi về vùng nhỏ/map 1 page.
 static uint64_t s_chunkMaps = 0;
@@ -115,12 +119,12 @@ static CFAbsoluteTime s_negAt[ESP_NEG_MAX] = {0};
 static int s_negNext = 0;
 
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
-    if (hit) *hit = s_cacheHit;
-    if (miss) *miss = s_cacheMiss;
+    if (hit) *hit = s_cacheHit.load(std::memory_order_relaxed);
+    if (miss) *miss = s_cacheMiss.load(std::memory_order_relaxed);
 }
 
 uint64_t ESPMemoryRegionCount(void) {
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
     return (uint64_t)s_regionCount;
 }
 
@@ -203,11 +207,11 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
     uint64_t pageOff = 0;
     ESPRegion *hit = ESPRegionFind(pageStart, &pageOff);
     if (hit) {
-        s_cacheHit++;
+        s_cacheHit.fetch_add(1, std::memory_order_relaxed);
         *outLocal = hit->localAddress + pageOff * PAGE_SIZE;
         return YES;
     }
-    s_cacheMiss++;
+    s_cacheMiss.fetch_add(1, std::memory_order_relaxed);
     if (s_regionCount >= ESP_REGION_MAX) return NO;
     // Negative cache: page này vừa fail -> bỏ qua ngay, khỏi walk lại.
     {
@@ -287,6 +291,27 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
     return YES;
 }
 
+// Fast path SHARED (caller giữ shared_lock): chỉ memcpy từ vùng đã map,
+// không map vùng mới. Miss page nào -> NO để caller đi đường độc quyền.
+// Đây là đường refresh 40Hz đi mỗi tick: không bao giờ bị scan nền chặn.
+static BOOL ESPReadSharedLocked(uint64_t remoteAddr, void *buf, uint64_t len) {
+    uint64_t off = 0;
+    uint8_t *out = (uint8_t *)buf;
+    while (off < len) {
+        uint64_t addr = remoteAddr + off;
+        uint64_t pageStart = addr & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t pageOff = addr - pageStart;
+        ESPRegion *r = ESPRegionFind(pageStart, NULL);
+        if (!r) return NO;
+        s_cacheHit.fetch_add(1, std::memory_order_relaxed);
+        uint64_t chunk = len - off;
+        if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
+        memcpy(out + off, (void *)(uintptr_t)(r->localAddress + pageOff), (size_t)chunk);
+        off += chunk;
+    }
+    return YES;
+}
+
 // KHÔNG lock — caller đã giữ s_espReadMutex.
 static void ESPRegionFlushLocked(void) {
     for (int i = 0; i < s_regionCount; i++) {
@@ -308,7 +333,7 @@ static void ESPRegionFlushLocked(void) {
 }
 
 void ESPMemoryFlushPageCache(void) {
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    std::unique_lock<std::shared_mutex> readLock(s_espReadMutex);
     ESPRegionFlushLocked();
 }
 
@@ -316,7 +341,7 @@ BOOL ESPMemoryFlushPageCacheIfIdle(void) {
     // Trong transaction đọc: hoãn xả tới EndRead thay vì xả giữa lượt quét.
     if (ESPProviderDepth() > 0) { ESPProviderDeferFlush(); return NO; }
     (void)ESPProviderTakeFlushRequest(); // xả luôn phần đã hoãn (nếu có)
-    std::unique_lock<std::mutex> readLock(s_espReadMutex, std::try_to_lock);
+    std::unique_lock<std::shared_mutex> readLock(s_espReadMutex, std::try_to_lock);
     if (!readLock.owns_lock()) return NO; // scan nền đang map vùng — để lần sau
     ESPRegionFlushLocked();
     return YES;
@@ -348,7 +373,8 @@ BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_
     if (!vmMap || !ds_isvalid(vmMap) || !remoteAddr || !buf || !len) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    // Peek không map vùng mới: shared_lock là đủ, không chặn reader khác.
+    std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
     uint64_t off = 0;
     uint64_t pageOff = 0;
     uint8_t *out = (uint8_t *)buf;
@@ -360,7 +386,7 @@ BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_
         // phép làm phình số mapping (real match có thể 300+ actor).
         ESPRegion *r = ESPRegionFind(pageStart, NULL);
         if (!r) return NO;
-        s_cacheHit++;
+        s_cacheHit.fetch_add(1, std::memory_order_relaxed);
         uint64_t chunk = len - off;
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
         memcpy(out + off, (void *)(uintptr_t)(r->localAddress + pageOff), (size_t)chunk);
@@ -386,7 +412,17 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
     // Kernel region-map là đường duy nhất (task port đã xoá hẳn).
     s_kernelReads++;
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    // Vòng 1 (shared): vùng đã map thì memcpy, không chặn reader khác —
+    // đường refresh 40Hz đi đây mỗi tick.
+    {
+        std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
+        if (ESPReadSharedLocked(remoteAddr, buf, len)) {
+            ESPProviderNoteKernelRead(YES);
+            return YES;
+        }
+    }
+    // Vòng 2 (độc quyền): map vùng mới khi miss.
+    std::unique_lock<std::shared_mutex> writeLock(s_espReadMutex);
     BOOL okr = ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
     ESPProviderNoteKernelRead(okr);
     return okr;
@@ -403,7 +439,14 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     // Không có task port: đi region map (1 lần/vùng). Cửa sổ 0xF00 của actor
     // trước đây map/lại mỗi lượt quét (~37ms/actor) — giờ lần đầu map cả vùng,
     // các lượt sau là memcpy thuần.
-    std::lock_guard<std::mutex> readLock(s_espReadMutex);
+    {
+        std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
+        if (ESPReadSharedLocked(remoteAddr, buf, len)) {
+            ESPProviderNoteKernelRead(YES);
+            return YES;
+        }
+    }
+    std::unique_lock<std::shared_mutex> writeLock(s_espReadMutex);
     BOOL okr = ESPReadCachedLocked(vmMap, remoteAddr, buf, len);
     ESPProviderNoteKernelRead(okr);
     return okr;
@@ -435,7 +478,7 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
             uint64_t pageStart = start & ~(uint64_t)(PAGE_SIZE - 1);
             uint64_t local = 0;
             {
-                std::lock_guard<std::mutex> readLock(s_espReadMutex);
+                std::unique_lock<std::shared_mutex> writeLock(s_espReadMutex);
                 if (!ESPRegionGetLocked(map, pageStart, &local)) return;
             }
             uint32_t magic = *(volatile uint32_t *)(uintptr_t)(local + (start - pageStart));
