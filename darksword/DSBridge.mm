@@ -799,6 +799,7 @@ NSString *DSBridgeGameCachedStatus(void) {
 void DSBridgeRefreshGameBase(void) {
 #if USE_DARKSWORD
     g_gameBaseCheckedAt = 0;
+    ESPGameBaseInvalidate(); // ép walk lại thật, không trả cache pid cũ
     NSDictionary *prefs = nil;
     @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
     ds_ensure_game_base(prefs ?: @{});
@@ -2566,7 +2567,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw4"
+#define DS_ESP_BUILD_TAG "kernrw5"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

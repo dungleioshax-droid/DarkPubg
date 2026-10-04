@@ -23,6 +23,9 @@ uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc);
 // task port). Cache theo pid. 0 nếu fail.
 uint64_t ESPGameBaseViaKernel(uint64_t proc);
 
+// Xoá cache base theo pid — force-refresh gọi trước khi quét lại.
+void ESPGameBaseInvalidate(void);
+
 // Đọc len bytes từ địa chỉ ảo của game vào buf. Trả về YES nếu đọc đủ.
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
 

@@ -456,12 +456,21 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
 // Tìm __TEXT base của game bằng kernel walk (thay dyld-via-port đã chết theo
 // task port): duyệt vm_map entries, đọc magic Mach-O TRỰC TIẾP qua region-map
 // (không vmmapremotepage lẻ như bản scan cũ). Cache theo pid.
+// Cache base theo pid (file-scope để invalidate được từ force-refresh).
+static uint64_t s_espBasePid = 0;
+static uint64_t s_espBase = 0;
+
+// Xoá cache base — force-refresh gọi trước khi quét lại để lần quét sau
+// walk thật thay vì trả base cũ (base cũ sai thì force vô dụng).
+void ESPGameBaseInvalidate(void) {
+    s_espBasePid = 0;
+    s_espBase = 0;
+}
+
 uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     if (!proc || !ds_is_ready()) return 0;
-    static uint64_t s_basePid = 0;
-    static uint64_t s_base = 0;
     pid_t pid = (off_proc_p_pid && proc) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
-    if (pid > 0 && (uint64_t)pid == s_basePid && s_base) return s_base;
+    if (pid > 0 && (uint64_t)pid == s_espBasePid && s_espBase) return s_espBase;
     uint64_t task = taskbyproc(proc);
     uint64_t map = task ? task_get_vm_map(task) : 0;
     if (!ds_isvalid(map)) {
@@ -511,7 +520,7 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     }
     if (found) {
         ESPLog("game base via kernel: 0x%llx pid=%d", (unsigned long long)found, pid);
-        if (pid > 0) { s_basePid = (uint64_t)pid; s_base = found; }
+        if (pid > 0) { s_espBasePid = (uint64_t)pid; s_espBase = found; }
     } else {
         ESPLog("game base scan FAIL pid=%d walked=%llu (no MH region)", pid,
                (unsigned long long)walked);
