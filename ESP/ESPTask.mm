@@ -100,6 +100,18 @@ static uint64_t ESPStripPAC(uint64_t a) {
     // toàn; pointer đã sạch thì canonical sẵn, strip là identity.
     uint64_t out = a;
     __asm__ volatile(".long 0xDAC143E0" : "+r"(out)); // XPACI X0
+    uint64_t top = out >> 48;
+    if (top != 0xFFFFULL && top != 0x0ULL) {
+        // XPACI không đổi gì (output XPACI thật luôn canonical). Fallback:
+        // reconstruct thủ công — PAC nằm trên bit47, low48 là địa chỉ thật
+        // (đúng với VA 47/48-bit chuẩn). An toàn khi đi kèm validate range
+        // phía sau: garbage thì bị loại, không panic (primitive đọc chịu lỗi).
+        if (out & (1ULL << 47)) {
+            out = (out & 0x0000FFFFFFFFFFFFULL) | 0xFFFF000000000000ULL;
+        } else {
+            out = (out & 0x0000FFFFFFFFFFFFULL);
+        }
+    }
     return out;
 }
 
@@ -329,10 +341,11 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
                (unsigned long long)selfTask);
         return 0;
     }
-    uint64_t space = ESPStripPAC(ds_kread64(selfTask + off_task_itk_space));
+    uint64_t spaceRaw = ds_kread64(selfTask + off_task_itk_space);
+    uint64_t space = ESPStripPAC(spaceRaw);
     if (!ESPTaskIsKernelPtr(space)) {
-        ESPLog("gametask: chain bail space=0x%llx",
-               (unsigned long long)space);
+        ESPLog("gametask: chain bail spaceRaw=0x%llx space=0x%llx",
+               (unsigned long long)spaceRaw, (unsigned long long)space);
         return 0;
     }
     uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
