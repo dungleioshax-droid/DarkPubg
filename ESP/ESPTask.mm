@@ -366,6 +366,26 @@ static uint64_t ESPTableFromSpace(uint64_t space, const char **outMode,
     return 0;
 }
 
+// Dump khu vực task struct quanh itk_space để đọc bản đồ bằng mắt:
+// slot nào là pointer kernel thì đọc tiếp +0x18/+0x20/+0x28 (raw, chưa
+// decode). Chỉ chạy khi sweep miss (throttle theo fabrication).
+static void ESPDumpTaskNeighborhood(uint64_t selfTask) {
+    ESPLog("gametask: dump self=0x%llx", (unsigned long long)selfTask);
+    for (uint32_t slot = 0x280; slot <= 0x380; slot += 8) {
+        if (!ESPValidKaddr(selfTask + slot)) continue;
+        uint64_t v = ds_kread64(selfTask + slot);
+        uint64_t s = ESPStripPAC(v);
+        if ((s & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) continue;
+        uint64_t r18 = ESPValidKaddr(s + 0x18) ? ds_kread64(s + 0x18) : 0;
+        uint64_t r20 = ESPValidKaddr(s + 0x20) ? ds_kread64(s + 0x20) : 0;
+        uint64_t r28 = ESPValidKaddr(s + 0x28) ? ds_kread64(s + 0x28) : 0;
+        ESPLog("gametask: dump slot=0x%x v=0x%llx s=0x%llx +18=0x%llx +20=0x%llx +28=0x%llx",
+               slot, (unsigned long long)v, (unsigned long long)s,
+               (unsigned long long)r18, (unsigned long long)r20,
+               (unsigned long long)r28);
+    }
+}
+
 static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     if (outMode) *outMode = "none";
     // LƯU Ý: ie_object KHÔNG check != 0 — nó là field đầu tiên của
@@ -420,6 +440,11 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     }
     if (!table) {
         ESPLog("gametask: probe miss pri=0x%x", pri);
+        static BOOL s_dumped = NO;
+        if (!s_dumped) {
+            s_dumped = YES;
+            ESPDumpTaskNeighborhood(selfTask);
+        }
         return 0;
     }
     if (outMode) *outMode = mode;
