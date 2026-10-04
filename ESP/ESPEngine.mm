@@ -588,9 +588,15 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     uint64_t geStatic = ESPGEngineRuntime(gameBase);
     BOOL ok = NO;
     uint64_t engine = ESPReadU64(vmMap, geStatic, &ok);
-    if (!ok || !ESPIsUserPtr(engine)) return 0;
+    BOOL okEng = ok;
+    if (!okEng || !ESPIsUserPtr(engine)) {
+        ESPLog("world chain geA=0x%llx engOk=%d eng=0x%llx",
+               (unsigned long long)geStatic, okEng, (unsigned long long)engine);
+        return 0;
+    }
     g_espStep = 4;
     uint64_t viewport = ESPReadU64(vmMap, engine + ESPOff_Engine_GameViewport, &ok);
+    BOOL okVp = ok;
     if (!ok || !ESPIsUserPtr(viewport)) {
         // Fallback: UGameEngine->GameInstance->... không cho World trực tiếp,
         // thử GameInstance->LocalPlayers->PC->Pawn->Outer(Level)->OwningWorld
@@ -614,7 +620,13 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     }
     g_espStep = 5;
     uint64_t world = ESPReadU64(vmMap, viewport + ESPOff_Viewport_World, &ok);
-    if (!ok || !ESPIsUserPtr(world)) return 0;
+    if (!ok || !ESPIsUserPtr(world)) {
+        ESPLog("world chain geA=0x%llx engOk=%d eng=0x%llx vpOk=%d vp=0x%llx wOk=%d w=0x%llx",
+               (unsigned long long)geStatic, okEng, (unsigned long long)engine,
+               okVp, (unsigned long long)viewport, ok,
+               (unsigned long long)(ok ? world : 0));
+        return 0;
+    }
     return world;
 }
 
