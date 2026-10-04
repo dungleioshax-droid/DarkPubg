@@ -22,6 +22,7 @@
 #import "ESPMemory.h"
 #import "ESPConfig.h"
 #import "ESPProvider.h"
+#import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
 #import <mach-o/loader.h>
@@ -45,6 +46,7 @@ struct ESPShmem {
 extern "C" struct ESPShmem vmmapremotepage(uint64_t vmMap, uint64_t address);
 extern "C" struct ESPShmem vmmapremoterange(uint64_t vmMap, uint64_t address, uint64_t pages);
 extern "C" uint64_t vmmapfindentry(uint64_t vmMap, uint64_t address);
+extern "C" void vmmapiterateentries(uint64_t vmmapptr, void (^itblock)(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop));
 extern "C" void vmentrygetrange(uint64_t entry, uint64_t *startout, uint64_t *endout);
 extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
 
