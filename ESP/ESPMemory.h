@@ -19,6 +19,10 @@ NS_ASSUME_NONNULL_BEGIN
 // Gọi từ ds_bridge_queue, sau khi ds_is_ready().
 uint64_t ESPMemoryOpenVMMapForProc(uint64_t proc);
 
+// Tìm __TEXT base của game bằng kernel walk (thay dyld-via-port đã chết theo
+// task port). Cache theo pid. 0 nếu fail.
+uint64_t ESPGameBaseViaKernel(uint64_t proc);
+
 // Đọc len bytes từ địa chỉ ảo của game vào buf. Trả về YES nếu đọc đủ.
 BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len);
 

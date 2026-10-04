@@ -766,12 +766,11 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         proc = procbyname("ShadowTrackerE");
         if (!proc) { g_espStep = 1; return r; }
     }
-    uint64_t task = taskbyproc(proc);
-    uint64_t vmMap = task ? task_get_vm_map(task) : 0;
+    uint64_t vmMap = ESPMemoryOpenVMMapForProc(proc);
     pid_t scanPid = (off_proc_p_pid && proc) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
-    if (!ds_isvalid(task) || !ds_isvalid(vmMap) || scanPid <= 0) {
+    if (!vmMap || scanPid <= 0) {
         g_espStep = 2;
-        return r; // task/map rác (proc đang teardown) -> bỏ lượt, không walk
+        return r; // proc/map rác (proc đang teardown) -> bỏ lượt, không walk
     }
     {   // Game restart (pid/base đổi): xả region map + task của game cũ để
         // không đọc dữ liệu cũ lẫn walk map cũ.
@@ -789,12 +788,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             s_scanBase = gameBase;
         }
     }
-
-    // Task port game (như aovcheat): lấy NGAY ĐẦU lượt quét để lượt quét đầu
-    // tiên đã đọc bulk bằng vm_read_overwrite — trước đây port chưa bật nên
-    // lượt đầu phải map từng page (~5s cho ~130 actor) rồi box mới lên.
-    // Chưa lấy được thì vẫn rơi về đường kernel như cũ (không hỏng gì).
-    ESPGameTaskEnsure();
 
     g_espStep = 3;
     uint64_t world = ESPWorldViaViewport(vmMap, gameBase);
@@ -1196,8 +1189,7 @@ static uint32_t ESPFastActors(uint64_t gameBase, uint64_t *outWorld) {
     uint64_t proc = procbyname(ESP_DEFAULT_PROCESS);
     if (!proc) proc = procbyname("ShadowTrackerE");
     if (!proc) return 0;
-    uint64_t task = taskbyproc(proc);
-    uint64_t vmMap = task ? task_get_vm_map(task) : 0;
+    uint64_t vmMap = ESPMemoryOpenVMMapForProc(proc);
     if (!vmMap) return 0;
     BOOL ok = NO;
     uint64_t geStatic = ESPGEngineRuntime(gameBase);
@@ -1355,10 +1347,8 @@ static uint64_t ESPProcVMMap(uint64_t *outProc) {
     pid_t pid = (off_proc_p_pid) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
     if (pid <= 0) return 0;
     if (outProc) *outProc = proc;
-    uint64_t task = taskbyproc(proc);
-    if (!ds_isvalid(task)) return 0;
-    uint64_t vmMap = task_get_vm_map(task);
-    if (!ds_isvalid(vmMap)) return 0;
+    uint64_t vmMap = ESPMemoryOpenVMMapForProc(proc);
+    if (!vmMap) return 0;
     if (oldProcCached && oldProcCached != proc) {
         // Proc khác (game restart): vùng region map của game cũ sai hết.
         // IfIdle (try-lock) để không bao giờ deadlock với scan nền.

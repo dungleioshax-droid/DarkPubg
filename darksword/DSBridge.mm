@@ -715,6 +715,9 @@ static void ds_refresh_game_base_locked(NSString *wantedName) {
             base = ds_game_base_via_dyld(pt, cname);
             if (!base) base = ds_game_base_via_dyld(pt, "Shadow");
         }
+        // Task port đã xoá hẳn -> dyld luôn fail. Fallback: kernel walk tìm
+        // __TEXT (ESPGameBaseViaKernel, cache theo pid, chỉ chạy khi base=0).
+        if (!base && proc) base = ESPGameBaseViaKernel(proc);
         if (base) {
             g_gameBase = base;
             g_gamePid = pid;
@@ -2563,7 +2566,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kdump1"
+#define DS_ESP_BUILD_TAG "kernrw1"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
