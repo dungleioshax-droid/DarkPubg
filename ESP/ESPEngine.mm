@@ -769,6 +769,18 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         proc = procbyname("ShadowTrackerE");
         if (!proc) { g_espStep = 1; return r; }
     }
+    // Log proc phía engine (so với phía DSBridge trong "ds base refresh"):
+    // hai bên phải cùng pid/name, lệch là resolve nhầm process.
+    {
+        static uint64_t s_loggedProc = 0;
+        if (proc != s_loggedProc) {
+            s_loggedProc = proc;
+            pid_t lp = (off_proc_p_pid && proc) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
+            char nm[33] = {0};
+            if (proc) ds_kread(proc + off_proc_p_name, nm, 32);
+            ESPLog("eng proc=0x%llx pid=%d name=%s", (unsigned long long)proc, lp, nm);
+        }
+    }
     uint64_t vmMap = ESPMemoryOpenVMMapForProc(proc);
     pid_t scanPid = (off_proc_p_pid && proc) ? (pid_t)ds_kread32(proc + off_proc_p_pid) : 0;
     if (!vmMap || scanPid <= 0) {

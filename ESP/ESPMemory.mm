@@ -480,6 +480,8 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     }
     __block uint64_t found = 0;
     __block uint64_t walked = 0;
+    __block int foundPass = -1;
+    __block uint64_t foundGe = 0;
     // 3 pass: 0 = alias + magic + GEngine static hợp lệ (đúng binary chính,
     // loại framework cũng có MH_MAGIC); 1 = alias + magic; 2 = magic.
     for (int pass = 0; pass < 3 && !found; pass++) {
@@ -513,13 +515,17 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
                 }
                 uint64_t ge = *(volatile uint64_t *)(uintptr_t)(geLocal + (geAddr - gePage));
                 if (!ESPRemoteAddrUsable(ge)) return;
+                foundGe = ge;
             }
             found = start;
+            foundPass = pass;
             if (stop) *stop = YES;
         });
     }
     if (found) {
-        ESPLog("game base via kernel: 0x%llx pid=%d", (unsigned long long)found, pid);
+        ESPLog("game base via kernel: 0x%llx pid=%d pass=%d ge=0x%llx",
+               (unsigned long long)found, pid, foundPass,
+               (unsigned long long)foundGe);
         if (pid > 0) { s_espBasePid = (uint64_t)pid; s_espBase = found; }
     } else {
         ESPLog("game base scan FAIL pid=%d walked=%llu (no MH region)", pid,
