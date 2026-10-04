@@ -324,6 +324,32 @@ static void ESPGameTaskResetLocked(void) {
 // (raw / SMR-decode / strip-PAC) cho is_table rồi chọn cái nằm trong range
 // kernel hợp lệ — KHÔNG đọc bừa để validate (đọc unmapped là panic).
 // Trả về 0 nếu không có ứng viên nào sane.
+// Chọn table từ space: 3 diễn giải (strip/smr/raw), nấc chặt (range) hoặc
+// lỏng (prefix). Mọi read ở đây đều đã chứng minh chịu lỗi trên máy này
+// (đọc nhầm chỉ ra rác, không panic) — writes vẫn cổng bits-sanity phía sau.
+static uint64_t ESPTableFromSpace(uint64_t space, const char **outMode,
+                                  BOOL loose) {
+    if (outMode) *outMode = "none";
+    if ((space & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) return 0;
+    uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
+    uint64_t cands[3] = {ESPStripPAC(raw), ESPSmrDecode(raw), raw};
+    const char *names[3] = {"raw", "smr", "rawbin"};
+    uint64_t lo = VM_MIN_KERNEL_ADDRESS, hi = VM_MAX_KERNEL_ADDRESS;
+    BOOL haveRange = (!loose && lo && hi && hi > lo);
+    for (int i = 0; i < 3; i++) {
+        uint64_t c = cands[i];
+        if (!c) continue;
+        if (haveRange) {
+            if (c < lo || c >= hi) continue;
+        } else if (!ESPTaskIsKernelPtr(c)) {
+            continue;
+        }
+        if (outMode) *outMode = names[i];
+        return c;
+    }
+    return 0;
+}
+
 static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     if (outMode) *outMode = "none";
     // LƯU Ý: ie_object KHÔNG check != 0 — nó là field đầu tiên của
@@ -341,51 +367,44 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
                (unsigned long long)selfTask);
         return 0;
     }
-    uint64_t spaceRaw = ds_kread64(selfTask + off_task_itk_space);
-    uint64_t space = ESPStripPAC(spaceRaw);
-    if (!ESPTaskIsKernelPtr(space)) {
-        ESPLog("gametask: chain bail spaceRaw=0x%llx space=0x%llx",
-               (unsigned long long)spaceRaw, (unsigned long long)space);
-        return 0;
-    }
-    uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
-    // 3 diễn giải như log DSGames (raw/smr/pac), tính trên giá trị THÔ:
-    // smr decode phải chạy trên raw (không phải trên bản đã strip).
-    uint64_t candRaw = ESPStripPAC(raw);
-    uint64_t candSmr = ESPSmrDecode(raw);
-    ESPLog("gametask: chain task=0x%llx space=0x%llx raw=0x%llx candRaw=0x%llx candSmr=0x%llx itksp=0x%x istbl=0x%x szent=0x%x ieobj=0x%x",
-           (unsigned long long)selfTask, (unsigned long long)space,
-           (unsigned long long)raw, (unsigned long long)candRaw,
-           (unsigned long long)candSmr, off_task_itk_space,
-           off_ipc_space_is_table, sizeof_ipc_entry,
-           off_ipc_entry_ie_object);
-    // Range chặt (nếu resolver có) thay vì chỉ prefix — tránh chọn rác.
+    // Sweep slot itk_space: resolver nói 0x318 nhưng space strip ra ngoài
+    // range -> thử slot lân cận trong task struct (đọc an toàn, task mapped).
+    // Hai phase: range chặt trước, prefix lỏng sau. Trúng đầu tiên thì dùng.
     uint64_t lo = VM_MIN_KERNEL_ADDRESS, hi = VM_MAX_KERNEL_ADDRESS;
-    BOOL haveRange = (lo && hi && hi > lo);
     uint64_t table = 0;
     const char *mode = "none";
-    uint64_t cands[3] = {candRaw, candSmr, raw};
-    const char *names[3] = {"raw", "smr", "rawbin"};
-    for (int i = 0; i < 3; i++) {
-        uint64_t c = cands[i];
-        if (!c) continue;
-        if (haveRange) {
-            if (c < lo || c >= hi) continue;
-        } else if (!ESPTaskIsKernelPtr(c)) {
-            continue;
+    uint32_t pri = off_task_itk_space;
+    for (int phase = 0; phase < 2 && !table; phase++) {
+        for (uint32_t slot = 0x2E8; slot <= 0x348 && !table; slot += 8) {
+            uint32_t use = (slot == 0x2E8) ? pri : slot;
+            if (slot != 0x2E8) {
+                // Đã thử pri ở vòng đầu; bỏ qua trùng.
+                if (use == pri) continue;
+            }
+            uint64_t s = ESPStripPAC(ds_kread64(selfTask + use));
+            if ((s & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) continue;
+            const char *m = "none";
+            uint64_t t = ESPTableFromSpace(s, &m, phase == 1);
+            if (t) {
+                ESPLog("gametask: probe hit slot=0x%x s=0x%llx t=0x%llx(%s%s)",
+                       use, (unsigned long long)s, (unsigned long long)t, m,
+                       phase == 1 ? "+loose" : "");
+                table = t;
+                mode = m;
+            }
         }
-        table = c;
-        mode = names[i];
-        break;
     }
-    if (!table) return 0;
+    if (!table) {
+        ESPLog("gametask: probe miss pri=0x%x", pri);
+        return 0;
+    }
     if (outMode) *outMode = mode;
     uint64_t entry = table + (uint64_t)sizeof_ipc_entry * (uint64_t)((uint32_t)name >> 8);
     uint64_t obj = ESPStripPAC(ds_kread64(entry + off_ipc_entry_ie_object));
-    if (haveRange) {
-        if (obj < lo || obj >= hi) return 0;
-    } else if (!ESPTaskIsKernelPtr(obj)) {
-        return 0;
+    if (obj < lo || obj >= hi) {
+        // Range có thể sai như VM range — chấp nhận prefix lỏng ở nấc object
+        // (writes vẫn cổng bits-sanity).
+        if (!ESPTaskIsKernelPtr(obj)) return 0;
     }
     return obj;
 }
