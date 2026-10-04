@@ -21,6 +21,7 @@
 
 #import "ESPMemory.h"
 #import "ESPConfig.h"
+#import "ESPOffsets.h"
 #import "ESPProvider.h"
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
@@ -470,13 +471,15 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
     }
     __block uint64_t found = 0;
     __block uint64_t walked = 0;
-    for (int pass = 0; pass < 2 && !found; pass++) {
+    // 3 pass: 0 = alias + magic + GEngine static hợp lệ (đúng binary chính,
+    // loại framework cũng có MH_MAGIC); 1 = alias + magic; 2 = magic.
+    for (int pass = 0; pass < 3 && !found; pass++) {
         vmmapiterateentries(map, ^(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop) {
             if (found) return;
             if (start < 0x100000000ULL || start >= 0xFFFFFF8000000000ULL) return;
             if (end <= start || (end - start) < 0x4000) return;
             walked++;
-            if (pass == 0 && off_vm_map_entry_vme_alias) {
+            if (pass <= 1 && off_vm_map_entry_vme_alias) {
                 uint64_t raw = ds_kread64(entry + off_vm_map_entry_vme_alias);
                 if ((raw >> 12) != 0) return;
             }
@@ -488,10 +491,22 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
                 if (!ESPRegionGetLocked(map, pageStart, &local)) return;
             }
             uint32_t magic = *(volatile uint32_t *)(uintptr_t)(local + (start - pageStart));
-            if (magic == MH_MAGIC_64) {
-                found = start;
-                if (stop) *stop = YES;
+            if (magic != MH_MAGIC_64) return;
+            if (pass == 0) {
+                // Đúng binary chính thì GEngine static (RVA từ dump) phải là
+                // user pointer. Framework nhận nhầm sẽ rớt ở đây.
+                uint64_t geAddr = start + ESPRVA(ESPDump_GEngine);
+                uint64_t gePage = geAddr & ~(uint64_t)(PAGE_SIZE - 1);
+                uint64_t geLocal = 0;
+                {
+                    std::unique_lock<std::shared_mutex> wl2(s_espReadMutex);
+                    if (!ESPRegionGetLocked(map, gePage, &geLocal)) return;
+                }
+                uint64_t ge = *(volatile uint64_t *)(uintptr_t)(geLocal + (geAddr - gePage));
+                if (!ESPRemoteAddrUsable(ge)) return;
             }
+            found = start;
+            if (stop) *stop = YES;
         });
     }
     if (found) {
