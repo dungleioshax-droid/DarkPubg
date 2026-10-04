@@ -348,7 +348,10 @@ static uint64_t ESPTableFromSpace(uint64_t space, const char **outMode,
     BOOL haveRange = (!loose && lo && hi && hi > lo);
     for (int i = 0; i < 3; i++) {
         uint64_t c = cands[i];
-        if (!c) continue;
+        // 0 và all-ones (sentinel read-fail của primitive) không bao giờ là
+        // pointer thật — loại trước mọi check để sweep quét tiếp slot khác
+        // thay vì dừng sớm ở rác.
+        if (!c || c == 0xFFFFFFFFFFFFFFFFULL) continue;
         if (haveRange) {
             if (c < lo || c >= hi) continue;
         } else if (!ESPTaskIsKernelPtr(c)) {
@@ -414,6 +417,7 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     uint64_t entry = table + (uint64_t)sizeof_ipc_entry * (uint64_t)((uint32_t)name >> 8);
     if (!ESPValidKaddr(entry + off_ipc_entry_ie_object)) return 0;
     uint64_t obj = ESPStripPAC(ds_kread64(entry + off_ipc_entry_ie_object));
+    if (obj == 0xFFFFFFFFFFFFFFFFULL) return 0; // sentinel read-fail
     if (obj < lo || obj >= hi) {
         // Range có thể sai như VM range — chấp nhận prefix lỏng ở nấc object
         // (writes vẫn cổng bits-sanity).
