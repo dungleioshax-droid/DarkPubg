@@ -324,6 +324,15 @@ static void ESPGameTaskResetLocked(void) {
 // (raw / SMR-decode / strip-PAC) cho is_table rồi chọn cái nằm trong range
 // kernel hợp lệ — KHÔNG đọc bừa để validate (đọc unmapped là panic).
 // Trả về 0 nếu không có ứng viên nào sane.
+// Check đúng điều kiện set_target_kaddr dùng (darksword.m): rớt là throw
+// NSException. Tự check trước mọi ds_kread trong chain này để sweep không
+// bao giờ throw — bail sạch thay vì nổ dialog enable.
+static BOOL ESPValidKaddr(uint64_t a) {
+    if (!a) return NO;
+    uint64_t prefix = a >> 40;
+    return prefix == 0xFFFFFFULL || prefix == 0xFFFFFEULL;
+}
+
 // Chọn table từ space: 3 diễn giải (strip/smr/raw), nấc chặt (range) hoặc
 // lỏng (prefix). Mọi read ở đây đều đã chứng minh chịu lỗi trên máy này
 // (đọc nhầm chỉ ra rác, không panic) — writes vẫn cổng bits-sanity phía sau.
@@ -331,6 +340,7 @@ static uint64_t ESPTableFromSpace(uint64_t space, const char **outMode,
                                   BOOL loose) {
     if (outMode) *outMode = "none";
     if ((space & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) return 0;
+    if (!ESPValidKaddr(space + off_ipc_space_is_table)) return 0;
     uint64_t raw = ds_kread64(space + off_ipc_space_is_table);
     uint64_t cands[3] = {ESPStripPAC(raw), ESPSmrDecode(raw), raw};
     const char *names[3] = {"raw", "smr", "rawbin"};
@@ -374,6 +384,7 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     uint64_t table = 0;
     const char *mode = "none";
     uint32_t pri = off_task_itk_space;
+    ESPLog("gametask: sweep start pri=0x%x", pri);
     for (int phase = 0; phase < 2 && !table; phase++) {
         for (uint32_t slot = 0x2E8; slot <= 0x348 && !table; slot += 8) {
             uint32_t use = (slot == 0x2E8) ? pri : slot;
@@ -381,6 +392,7 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
                 // Đã thử pri ở vòng đầu; bỏ qua trùng.
                 if (use == pri) continue;
             }
+            if (!ESPValidKaddr(selfTask + use)) continue;
             uint64_t s = ESPStripPAC(ds_kread64(selfTask + use));
             if ((s & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) continue;
             const char *m = "none";
@@ -400,6 +412,7 @@ static uint64_t ESPOwnPortObject(mach_port_t name, const char **outMode) {
     }
     if (outMode) *outMode = mode;
     uint64_t entry = table + (uint64_t)sizeof_ipc_entry * (uint64_t)((uint32_t)name >> 8);
+    if (!ESPValidKaddr(entry + off_ipc_entry_ie_object)) return 0;
     uint64_t obj = ESPStripPAC(ds_kread64(entry + off_ipc_entry_ie_object));
     if (obj < lo || obj >= hi) {
         // Range có thể sai như VM range — chấp nhận prefix lỏng ở nấc object
