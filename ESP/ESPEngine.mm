@@ -96,6 +96,33 @@ typedef struct {
     uint32_t nameID;
 } ESPClassifyDiag;
 
+// Mesh để đọc chiều cao box: theo kind, fallback đọc 0x510 (cache-hit verdict
+// không có diag.mesh -> 1 read/actor/scan là chấp nhận được).
+static uint64_t ESPBoxMesh(uint64_t vmMap, uint64_t actor, const ESPClassifyDiag *dg, int team) {
+    if (dg) {
+        uint64_t m = (team == ESPTeam_Dummy) ? dg->tMesh : dg->mesh;
+        if (ESPIsUserPtr(m)) return m;
+        uint64_t alt = (team == ESPTeam_Dummy) ? dg->mesh : dg->tMesh;
+        if (ESPIsUserPtr(alt)) return alt;
+    }
+    BOOL okm = NO;
+    uint64_t m = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &okm);
+    return (okm && ESPIsUserPtr(m)) ? m : 0;
+}
+
+// Chiều cao box: Mesh.Bounds.BoxExtent.Z * 2 (nguồn Kernel, 30..200cm),
+// không đọc được thì mặc định ESP_CHAR_HEIGHT_CM.
+static float ESPActorBoxHeight(uint64_t vmMap, uint64_t mesh) {
+    if (ESPIsUserPtr(mesh)) {
+        float extZ = 0;
+        if (ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_BoxExtentZ, &extZ, sizeof(extZ)) &&
+            extZ > 30.0f && extZ < 200.0f) {
+            return extZ * 2.0f;
+        }
+    }
+    return ESP_CHAR_HEIGHT_CM;
+}
+
 static inline uint64_t ESPWinU64(const uint8_t *b, uint32_t off) {
     uint64_t v = 0;
     memcpy(&v, b + off, sizeof(v));
@@ -1067,6 +1094,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
             tr.fallback = 0;
             tr.parent = 0;
+            tr.height = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
                 if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
@@ -1555,6 +1583,7 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         tr.root = ESPIsUserPtr(dg.root) ? dg.root : 0;
         tr.fallback = 0;
         tr.parent = 0;
+        tr.height = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
         if (team == ESPTeam_Dummy) {
             tr.kind = 3;
             if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
@@ -2178,6 +2207,8 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         ESPClassifyDiag dg;
         if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) continue;
         cEne++;
+        // Chiều cao box: extent mesh đọc 1 lần/actor/scan, dùng cho cả tracked.
+        float actorH = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
         uint64_t rootComp = ESPIsUserPtr(dg.root) ? dg.root : 0;
         if (foundTracked.size() < 64) {
             ESPTrackedActor tr;
@@ -2185,6 +2216,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             tr.root = rootComp;
             tr.fallback = (team == ESPTeam_Dummy && ESPIsUserPtr(dg.tMesh)) ? dg.tMesh : 0;
             tr.parent = 0;
+            tr.height = actorH;
             if (tr.root) {
                 BOOL okp = NO;
                 uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
@@ -2240,19 +2272,25 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; } // self
-        ESPVector head = pos; head.z += ESP_CHAR_HEIGHT_CM;
-        float hx = 0, hy = 0, hd = 0;
+        // pos = TÂM (capsule/mesh pivot center) — box = pos ± height/2
+        // (nguồn Kernel: TopBox = Pos + H/2, BottomBox = Pos - H/2).
+        float halfH = actorH * 0.5f;
+        ESPVector bot = pos; bot.z -= halfH;
+        ESPVector top = pos; top.z += halfH;
+        float bx = 0, by = 0, bd = 0, tx = 0, ty = 0, td = 0;
+        BOOL okB = ESPCamBasisProject(&basis, bot, &bx, &by, &bd);
+        BOOL okT = ESPCamBasisProject(&basis, top, &tx, &ty, &td);
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
-        if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
-            topY = fminf(sy, hy);
-            bottomY = fmaxf(sy, hy);
+        if (okB && okT) {
+            topY = fminf(ty, by);
+            bottomY = fmaxf(ty, by);
             boxH = bottomY - topY;
-            centerX = (sx + hx) * 0.5f;
+            centerX = (tx + bx) * 0.5f;
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (ESP_CHAR_HEIGHT_CM / tz) * basis.k;
-            topY = sy - boxH;
+            boxH = (actorH / tz) * basis.k;
+            topY = sy - boxH * 0.5f;
             centerX = sx;
         }
         if (boxH < 8.0f) boxH = 8.0f;
@@ -2502,19 +2540,25 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }
-        ESPVector head = pos; head.z += ESP_CHAR_HEIGHT_CM;
-        float hx = 0, hy = 0, hd = 0;
+        // pos = TÂM (capsule center) — box = pos ± height/2 như đường scan.
+        float actorH = (tr->height > 0.0f) ? tr->height : ESP_CHAR_HEIGHT_CM;
+        float halfH = actorH * 0.5f;
+        ESPVector bot = pos; bot.z -= halfH;
+        ESPVector top = pos; top.z += halfH;
+        float bx = 0, by = 0, bd = 0, tx = 0, ty = 0, td = 0;
+        BOOL okB = ESPCamBasisProject(&basis, bot, &bx, &by, &bd);
+        BOOL okT = ESPCamBasisProject(&basis, top, &tx, &ty, &td);
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
-        if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
-            topY = fminf(sy, hy);
-            bottomY = fmaxf(sy, hy);
+        if (okB && okT) {
+            topY = fminf(ty, by);
+            bottomY = fmaxf(ty, by);
             boxH = bottomY - topY;
-            centerX = (sx + hx) * 0.5f;
+            centerX = (tx + bx) * 0.5f;
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (ESP_CHAR_HEIGHT_CM / tz) * basis.k;
-            topY = sy - boxH;
+            boxH = (actorH / tz) * basis.k;
+            topY = sy - boxH * 0.5f;
             centerX = sx;
         }
         if (boxH < 8.0f) boxH = 8.0f;

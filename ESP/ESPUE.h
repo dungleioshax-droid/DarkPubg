@@ -46,6 +46,7 @@ typedef struct {
     uint64_t fallback;  // StaticMeshComp/MoveRoot (ComponentToWorld) cho hình nhân
     uint64_t parent;    // AttachedParent của root lúc scan (0 = không có -> refresh bỏ qua parent read)
     int kind;           // 1 = character, 3 = hình nhân
+    float height;       // chiều cao box (cm) đọc lúc scan (Mesh.Bounds.BoxExtent.Z*2), 0 = mặc định
 } ESPTrackedActor;
 
 // Kết quả scan phase 1

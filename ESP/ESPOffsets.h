@@ -83,6 +83,10 @@ static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
 static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)
 static const uint32_t ESPOff_Comp_ComponentToWorld = 0x1D0; // FTransform
 static const uint32_t ESPOff_Transform_Translation = 0x10;   // FQuat 0x0 + FVector 0x10
+// UPrimitiveComponent::Bounds (FBoxSphereBounds @ 0x134): Origin FVector 0x134,
+// BoxExtent FVector 0x14C -> BoxExtent.Z (float) @ 0x154. Source Kernel đọc
+// Mesh+0x14C (FVector) rồi .Z, nhân 2 = chiều cao địch vẽ box.
+static const uint32_t ESPOff_Mesh_BoxExtentZ = 0x154;
 
 // Camera chain (PUBG UE4 — theo source Kernel ĐANG CHẠY ĐƯỢC, unity_api/offset.h)
 // UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
