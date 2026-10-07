@@ -1321,6 +1321,40 @@ typedef struct {
     uint64_t size;
 } DSRemoteArgument;
 
+// ---- Pool NSAutoreleasePool dùng chung ----
+// Mỗi ds_remote_invoke_on_main_result trước đây TẠO + DRAIN pool REMOTE riêng:
+// alloc + init + drain = 3 remote_msg thừa cho MỖI lời gọi. Một lượt present ESP
+// = 4 box × (setFrame viền + label) × 40Hz ≈ 1600 vòng/giây -> ~30% remote msg
+// chỉ là phí pool, và present chậm hơn 25ms là s_latestFrame.exchange ném frame
+// đi -> box giật. ds_remote_pool_begin/end giữ MỘT pool cho cả lượt; caller khác
+// (HUD, ensure…) không gọi begin nên depth=0 -> chạy y hệt code cũ.
+static thread_local int s_dsPoolDepth = 0;
+static thread_local uint64_t s_dsPool = 0;
+
+static void ds_remote_pool_begin(RemoteCall *process) {
+    if (s_dsPoolDepth != 0) return; // đã có pool outer (lồng nhau)
+    if (!process || !process.trojanMem) return;
+    uint64_t poolClass = ds_remote_class(process, "NSAutoreleasePool");
+    if (!poolClass) return;
+    uint64_t pool = remote_msg(process,
+                               remote_msg(process, poolClass,
+                                          ds_remote_sel(process, "alloc"), 0, 0, 0, 0),
+                               ds_remote_sel(process, "init"), 0, 0, 0, 0);
+    if (!pool) return;
+    s_dsPool = pool;
+    s_dsPoolDepth = 1;
+}
+
+static void ds_remote_pool_end(RemoteCall *process) {
+    if (s_dsPoolDepth == 0) return;
+    s_dsPoolDepth = 0;
+    uint64_t pool = s_dsPool;
+    s_dsPool = 0;
+    if (pool && process && process.trojanMem) {
+        remote_msg(process, pool, ds_remote_sel(process, "drain"), 0, 0, 0, 0);
+    }
+}
+
 // RemoteCall's doRemoteCallSyncOnMainThread assumes task->threads.next is the
 // main thread. On iOS 17 it can be RemoteCall's newly-created pthread instead,
 // which makes UIView initialization abort SpringBoard under
@@ -1334,16 +1368,23 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
                                             NSUInteger resultSize) {
     if (!process || !target || !selector || !process.trojanMem) return NO;
 
-    uint64_t poolClass = ds_remote_class(process, "NSAutoreleasePool");
-    uint64_t allocSelector = ds_remote_sel(process, "alloc");
-    uint64_t initSelector = ds_remote_sel(process, "init");
-    uint64_t drainSelector = ds_remote_sel(process, "drain");
-    uint64_t autoreleasePool = poolClass && allocSelector && initSelector && drainSelector
-        ? remote_msg(process,
-                     remote_msg(process, poolClass, allocSelector, 0, 0, 0, 0),
-                     initSelector, 0, 0, 0, 0)
-        : 0;
-    if (!autoreleasePool) return NO;
+    // depth>0 = caller đang giữ pool (ds_remote_pool_begin) -> dùng chung,
+    // không tạo và không drain. depth==0 = nguyên bản: 1 pool cho đúng 1 lời gọi.
+    BOOL ownPool = (s_dsPoolDepth == 0);
+    uint64_t autoreleasePool = 0;
+    uint64_t drainSelector = 0;
+    if (ownPool) {
+        uint64_t poolClass = ds_remote_class(process, "NSAutoreleasePool");
+        uint64_t allocSelector = ds_remote_sel(process, "alloc");
+        uint64_t initSelector = ds_remote_sel(process, "init");
+        drainSelector = ds_remote_sel(process, "drain");
+        autoreleasePool = poolClass && allocSelector && initSelector && drainSelector
+            ? remote_msg(process,
+                         remote_msg(process, poolClass, allocSelector, 0, 0, 0, 0),
+                         initSelector, 0, 0, 0, 0)
+            : 0;
+        if (!autoreleasePool) return NO;
+    }
 
     @try {
 
@@ -1392,7 +1433,7 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
     }
     return YES;
     } @finally {
-        if (process.trojanMem) {
+        if (ownPool && process.trojanMem) {
             remote_msg(process, autoreleasePool, drainSelector, 0, 0, 0, 0);
         }
     }
@@ -2211,6 +2252,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
     }
+    // 1 pool cho TOÀN BỘ lượt present: mỗi setFrame/setText trước đây tự tạo
+    // + drain pool (3 remote_msg thừa). Bọc @try/@finally để pool LUÔN được
+    // drain kể cả khi return sớm hay ném exception (không rò autoreleased
+    // object vào SpringBoard).
+    ds_remote_pool_begin(process);
+    @try {
     // Diag 1 lần/process: bounds THỰC của container + window trên SpringBoard
     // (biết SpringBoard có tự xoay window overlay theo máy không — quyết định
     // boxes phải map local hay vẽ trực tiếp).
@@ -2396,6 +2443,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             s_pathFailStreak = 0;
         }
     }
+    } @finally {
+        ds_remote_pool_end(process);
+    }
 }
 
 static void ds_remove_springboard_hud(RemoteCall *process) {
@@ -2569,7 +2619,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw11"
+#define DS_ESP_BUILD_TAG "kernrw12"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2595,6 +2645,14 @@ static std::atomic<DSESPFrame *> s_latestFrame{nullptr};
 static std::atomic_bool s_espPresenting{false};
 static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam async), chỉ chạm từ worker
 
+// Chi phí PRESENT (toàn bộ IPC remote vào SpringBoard cho 1 frame box). Trước
+// đây chỉ đo refresh (box perf proc/cam/act) nên không bao giờ biết box giật do
+// đọc kernel hay do IPC. Trung bình > ~20ms nghĩa là present vượt ngân sách
+// 25ms của timer 40Hz -> frame bị s_latestFrame.exchange ném đi -> giật.
+static std::atomic<uint64_t> s_presentUsTotal{0};
+static std::atomic<uint32_t> s_presentN{0};
+static std::atomic<uint32_t> s_presentMaxUs{0};
+
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
 static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
@@ -2616,8 +2674,18 @@ static void ds_esp_present_single(DSESPFrame *frame) {
             CFAbsoluteTime nowPu = CFAbsoluteTimeGetCurrent();
             if (kPresentMinInterval <= 0 || (nowPu - s_lastPresentUpdate >= kPresentMinInterval)) {
                 s_lastPresentUpdate = nowPu;
+                CFAbsoluteTime tPres = CFAbsoluteTimeGetCurrent();
                 ds_esp_overlay_update(g_springBoard, frame->boxes, frame->count,
                                       frame->bounds, frame->orient);
+                double usP = (CFAbsoluteTimeGetCurrent() - tPres) * 1000000.0;
+                if (usP < 0) usP = 0;
+                s_presentN.fetch_add(1, std::memory_order_relaxed);
+                s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
+                uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
+                while (usP > (double)prevMax &&
+                       !s_presentMaxUs.compare_exchange_weak(prevMax, (uint32_t)usP,
+                                                             std::memory_order_relaxed)) {
+                }
             }
         }
     } @catch (NSException *exception) {
@@ -2946,8 +3014,13 @@ static void ds_esp_tick(void) {
                         rssMB = binfo.resident_size / (1024 * 1024);
                     }
                 }
-                ESPLog("box perf: %s count=%d path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb",
-                       ESPEngineBoxPerfText(), count, g_espPathLayer ? 1 : 0,
+                uint32_t presN = s_presentN.exchange(0, std::memory_order_relaxed);
+                uint64_t presUs = s_presentUsTotal.exchange(0, std::memory_order_relaxed);
+                uint32_t presMaxUs = s_presentMaxUs.exchange(0, std::memory_order_relaxed);
+                double presAvgMs = presN ? (double)presUs / (double)presN / 1000.0 : 0.0;
+                ESPLog("box perf: %s count=%d pres=%u pAvg=%.1f pMax=%.1fms path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb",
+                       ESPEngineBoxPerfText(), count, presN, presAvgMs,
+                       (double)presMaxUs / 1000.0, g_espPathLayer ? 1 : 0,
                        g_espPathCalls, g_espPathBoxes, g_espPathFails,
                        ESPProviderIsDegraded() ? 1 : 0,
                        (unsigned long long)ESPProviderFailureCount(),

@@ -903,29 +903,11 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned long long)actorsData);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
-    // Giải mã GNames 1 lần cho cả scan (để đọc tên class).
-    // Resolve FAIL tốn cả khối diag + scan dữ liệu (~hàng chục ms) và lặp lại
-    // MỖI lượt quét mà kết quả không đổi -> chỉ thử tối đa 4 lượt cho mỗi game
-    // base (s_unameTries KHÔNG còn bị reset khi đổi world). VTable vẫn là đường
-    // nhận diện chính khi GNames không có.
-    {
-        static uint64_t s_unameBase = 0;
-        // s_unameTries: dùng biến file-scope, chỉ reset khi game base đổi.
-        if (s_unameBase != gameBase) {
-            s_unameBase = gameBase;
-            s_unameTries = 0;
-        }
-        if (g_espUName) {
-            // đã có, không đọc lại
-        } else if (s_unameTries >= 4) {
-            // đã fail 4 lượt cho base này: bỏ qua, không read/log lại
-        } else {
-            s_unameTries++;
-            g_espUName = ESPResolveUName(vmMap, gameBase);
-            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-            ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
-        }
-    }
+    // GNames/UName không còn ở đây. Đo được: scan đầu mất 13.0s thì ~11s là
+    // ESPResolveUName quét GNames (region cache còn lạnh), mà ra vẫn 0x0 —
+    // enemies=4 thu về nhờ VTable. Đặt TRƯỚC vòng phân loại là giữ tracked
+    // (tức là giữ box) chờ đúng bước vừa chậm vừa vô dụng đó.
+    // Xem khối resolve ở cuối hàm, sau khi đã swap tracked.
 
     uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
     static uint64_t s_actors[ESP_MAX_ACTORS_SCAN];
@@ -1140,6 +1122,31 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned)nFiltered, (unsigned)nCached, (unsigned)nearChar,
            (unsigned)nearDummy,
            CFAbsoluteTimeGetCurrent() - t0);
+
+    // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
+    // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
+    // unique_lock mỗi lần map vùng sẽ tranh với tick vẽ 40Hz (chính là nguồn
+    // giật). Chưa lọc được địch nào thì mới cần tên để phân loại tiếp.
+    // Thử tối đa 4 lượt cho mỗi game base (s_unameTries chỉ reset khi base đổi).
+    {
+        static uint64_t s_unameBase = 0;
+        if (s_unameBase != gameBase) {
+            s_unameBase = gameBase;
+            s_unameTries = 0;
+        }
+        if (g_espUName) {
+            // đã có, không đọc lại
+        } else if (s_unameTries >= 4) {
+            // đã fail 4 lượt cho base này: bỏ qua, không read/log lại
+        } else if (enemies > 0) {
+            // ĐÃ có địch nhờ VTable/heuristic -> không cần tên class nữa.
+        } else {
+            s_unameTries++;
+            g_espUName = ESPResolveUName(vmMap, gameBase);
+            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+            ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
+        }
+    }
     if (verbose) {
         std::vector<std::pair<uint64_t, uint32_t>> vts(vtHist.begin(), vtHist.end());
         std::sort(vts.begin(), vts.end(), [](const std::pair<uint64_t,uint32_t> &a,
