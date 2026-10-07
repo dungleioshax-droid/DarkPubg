@@ -307,7 +307,17 @@ static BOOL ESPReadSharedLocked(uint64_t remoteAddr, void *buf, uint64_t len) {
         s_cacheHit.fetch_add(1, std::memory_order_relaxed);
         uint64_t chunk = len - off;
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
-        memcpy(out + off, (void *)(uintptr_t)(r->localAddress + pageOff), (size_t)chunk);
+        // localAddress là ĐẦU VÙNG (r->base), KHÔNG phải đầu trang cần đọc.
+        // PHẢI cộng (pageStart - r->base): bỏ sót khoản này là memcpy về sai
+        // trang — luôn đọc nhầm về trang đầu của vùng (offset 0) -> số ra rác.
+        // Đây là nguyên nhân "ESP không hoạt động": base-scan đi
+        // ESPRegionGetLocked (có (pageStart - base)) đọc GEngine ra
+        // 0x11813b000, còn world-chain đi đường này đọc CÙNG địa chỉ ra
+        // 0x10f002740 -> engine là object giả -> viewport/GameInstance = 0
+        // -> scan world FAIL step=4 -> không có box.
+        memcpy(out + off,
+               (void *)(uintptr_t)(r->localAddress + (pageStart - r->base) + pageOff),
+               (size_t)chunk);
         off += chunk;
     }
     return YES;
@@ -390,7 +400,11 @@ BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_
         s_cacheHit.fetch_add(1, std::memory_order_relaxed);
         uint64_t chunk = len - off;
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
-        memcpy(out + off, (void *)(uintptr_t)(r->localAddress + pageOff), (size_t)chunk);
+        // Cùng lỗi offset như ESPReadSharedLocked: localAddress = đầu vùng,
+        // phải cộng (pageStart - r->base) mới ra đúng trang.
+        memcpy(out + off,
+               (void *)(uintptr_t)(r->localAddress + (pageStart - r->base) + pageOff),
+               (size_t)chunk);
         off += chunk;
     }
     return YES;
