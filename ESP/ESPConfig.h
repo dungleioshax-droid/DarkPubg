@@ -52,4 +52,13 @@
 // NỀN nên CADisplayLink không tick được; 40Hz cực kỳ mượt mà vẫn an toàn tuyệt đối.
 #define ESP_PRESENT_HZ 40
 
+// Chiều cao kẻ địch (cm) để dựng nóc box. Đáy box = vị trí RootComponent
+// (chân địch), nóc = pos.z + ESP_CHAR_HEIGHT_CM; số mét trên label và boxH đều
+// suy ra từ đây nên đổi 1 chỗ là ảnh hưởng cả 2.
+// Đo trên kernrw12: nóc nhỉnh cao hơn đầu địch một TỈ LỆ NHỎ ở mọi khoảng
+// cách, trong khi đáy vẫn đúng chân và box KHÔNG bị lệch ngang (lệch ngang là
+// dấu hiệu tham chiếu FOV sai, không có) -> 175.0 hơi quá. 168 = ~4% thấp hơn,
+// khớp mức "gần trùng" người dùng quan sát được.
+#define ESP_CHAR_HEIGHT_CM 168.0f
+
 #endif /* ESPConfig_h */

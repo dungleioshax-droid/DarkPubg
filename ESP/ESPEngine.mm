@@ -2240,7 +2240,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; } // self
-        ESPVector head = pos; head.z += 175.0f;
+        ESPVector head = pos; head.z += ESP_CHAR_HEIGHT_CM;
         float hx = 0, hy = 0, hd = 0;
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
         if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
@@ -2251,7 +2251,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (175.0f / tz) * basis.k;
+            boxH = (ESP_CHAR_HEIGHT_CM / tz) * basis.k;
             topY = sy - boxH;
             centerX = sx;
         }
@@ -2502,7 +2502,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }
-        ESPVector head = pos; head.z += 175.0f;
+        ESPVector head = pos; head.z += ESP_CHAR_HEIGHT_CM;
         float hx = 0, hy = 0, hd = 0;
         float topY = 0, bottomY = 0, boxH = 0, boxW = 0, centerX = sx;
         if (ESPCamBasisProject(&basis, head, &hx, &hy, &hd)) {
@@ -2513,7 +2513,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         } else {
             float tz = dist * 100.0f;
             if (tz < 10.0f) tz = 10.0f;
-            boxH = (175.0f / tz) * basis.k;
+            boxH = (ESP_CHAR_HEIGHT_CM / tz) * basis.k;
             topY = sy - boxH;
             centerX = sx;
         }
