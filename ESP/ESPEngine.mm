@@ -221,6 +221,8 @@ static void ESPActorFieldsRead(uint64_t vmMap, uint64_t actor, ESPActorFields *f
 
 
 static int g_espStep = 0; // debug: kẹt ở đâu (xem StatusText E#)
+// Engine hợp lệ nhưng field null = game đang load: chờ, không ép rescan.
+static BOOL g_espWaitingLoad = NO;
 // g_espPasses/g_espVerboseLeft đọc từ cả scan queue, bridge queue lẫn main
 // thread nên dùng atomic (ghi chính vẫn dưới g_espClassifyMutex).
 static std::atomic_int g_espPasses{0}; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
@@ -601,6 +603,7 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     uint64_t engine = ESPReadU64(vmMap, geStatic, &ok);
     BOOL okEng = ok;
     if (!okEng || !ESPIsUserPtr(engine)) {
+        g_espWaitingLoad = NO; // engine đọc hỏng => nghi base, không phải load
         // Phân xử divergence: base scan đọc cùng địa chỉ ra pointer đẹp mà
         // engine ra 0. Map TƯƠI trực tiếp 1 page (không qua region cache) rồi
         // đọc — so 3 đường: region-memcpy (engine) vs map-tươi (direct).
@@ -630,6 +633,12 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
         ESPLog("world chain eng=0x%llx vpOk=%d vp=0x%llx giOk=%d gi=0x%llx",
                (unsigned long long)engine, okVp, (unsigned long long)viewport,
                okGi, (unsigned long long)gameInstProbe);
+        // Engine object hợp lệ nhưng viewport+gameinstance đều null = game
+        // đang load/khởi tạo (object mới chưa gán field), KHÔNG phải base sai:
+        // chờ game load xong, đừng ép rescan vô ích.
+        if (okVp && okGi && !viewport && !gameInstProbe) {
+            g_espWaitingLoad = YES;
+        }
     }
     if (!ok || !ESPIsUserPtr(viewport)) {
         // Fallback: UGameEngine->GameInstance->... không cho World trực tiếp,
@@ -865,7 +874,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         } else {
             s_worldFails = 0;
         }
-        if (!world && s_worldFails >= 5 &&
+        if (!world && s_worldFails >= 5 && !g_espWaitingLoad &&
             CFAbsoluteTimeGetCurrent() - s_lastForce > 15.0) {
             s_lastForce = CFAbsoluteTimeGetCurrent();
             ESPLog("world fail x%d pid=%d base=0x%llx: force base rescan",
@@ -873,9 +882,10 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             DSBridgeRefreshGameBase();
         }
     }
-    if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx pid=%d", g_espStep, (unsigned long long)gameBase, scanPid); return r; }
+    if (!world) { ESPLog("scan world FAIL step=%d base=0x%llx pid=%d%s", g_espStep, (unsigned long long)gameBase, scanPid, g_espWaitingLoad ? " waiting-load" : ""); return r; }
     if (!ESPValidateWorld(vmMap, world)) { ESPLog("scan validate FAIL step=%d", g_espStep); return r; }
     g_espStep = 0;
+    g_espWaitingLoad = NO; // có world = game load xong, hết chờ
     r.world = world;
 
     uint64_t level = 0;
