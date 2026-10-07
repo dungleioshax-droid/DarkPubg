@@ -48,9 +48,12 @@
 // giảm tải số remote call vào SpringBoard.
 #define ESP_OVERLAY_LABEL_HZ 10
 
-// Nhịp PRESENT nội suy (thuần CPU + IPC cached, không chạm kernel). App chạy
-// NỀN nên CADisplayLink không tick được; 40Hz cực kỳ mượt mà vẫn an toàn tuyệt đối.
-#define ESP_PRESENT_HZ 40
+// Nhịp PRESENT lên SpringBoard (IPC remote — KHÔNG phải nội suy thuần CPU).
+// Đo được trên bản kernrw14: mỗi lượt present ~10-16ms (pMax 70-128ms khi
+// SpringBoard bận) — ở 40Hz (ngân sách 25ms) là liên tục sát mép, frame vượt
+// ngân sách bị s_latestFrame.exchange ném đi -> box giật. 30Hz = ngân sách
+// 33ms thoải mái, tải IPC giảm ~25%, box 30fps vẫn mượt mắt.
+#define ESP_PRESENT_HZ 30
 
 // Chiều cao kẻ địch (cm) — CHỈ dùng làm mặc định khi không đọc được
 // Mesh.Bounds.BoxExtent.Z (thường đọc được: height = extent.Z*2).
