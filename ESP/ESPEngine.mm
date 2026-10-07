@@ -621,6 +621,16 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
     g_espStep = 4;
     uint64_t viewport = ESPReadU64(vmMap, engine + ESPOff_Engine_GameViewport, &ok);
     BOOL okVp = ok;
+    if (!okVp || !ESPIsUserPtr(viewport)) {
+        // Phân biệt object engine giả (base sai) vs offset viewport đổi bản:
+        // đọc thêm GameInstance (0xE20). Cả hai rác => object sai; GameInstance
+        // đẹp mà viewport rác => offset đổi => cần dò slot.
+        BOOL okGi = NO;
+        uint64_t gameInstProbe = ESPReadU64(vmMap, engine + ESPOff_GameEngine_GameInstance, &okGi);
+        ESPLog("world chain eng=0x%llx vpOk=%d vp=0x%llx giOk=%d gi=0x%llx",
+               (unsigned long long)engine, okVp, (unsigned long long)viewport,
+               okGi, (unsigned long long)gameInstProbe);
+    }
     if (!ok || !ESPIsUserPtr(viewport)) {
         // Fallback: UGameEngine->GameInstance->... không cho World trực tiếp,
         // thử GameInstance->LocalPlayers->PC->Pawn->Outer(Level)->OwningWorld
