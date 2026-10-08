@@ -2553,9 +2553,9 @@ static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
     ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB)",
            (double)portraitBounds.size.width, (double)portraitBounds.size.height,
            pxW, pxH, (double)bytes / 1048576.0);
-    // Warm mapping ở nền (đừng để lần ship đầu kẹt bridge). Present đi legacy
-    // cho tới khi warmed.
-    ds_esp_bitmap_warm_async(process);
+    // kernrw23: KHÔNG warm nền nữa (warmer thread revert cùng ship queue).
+    // Lần ship đầu map ~300 pages ngay trên bridge (kẹt 1-3s một lần, chấp
+    // nhận tạm — legacy/fallback vẫn sống nếu fail).
     return YES;
 }
 
@@ -2599,8 +2599,6 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
     if ((!g_espWindow || !g_espContainer) &&
         !ds_esp_overlay_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure-full");
     if (!ds_esp_bitmap_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure");
-    // Chưa warm xong (đang map pages ở nền) -> legacy vẽ tạm, không kẹt bridge.
-    if (!g_espBitmapWarmed) return NO;
     // Window show/hide mirror đường legacy.
     BOOL wantHidden = (count <= 0);
     if (wantHidden != g_espWindowHiddenCache) {
@@ -2774,8 +2772,14 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                       orientation == UIInterfaceOrientationLandscapeRight))
                         ? orientation
                         : UIInterfaceOrientationPortrait;
-    // (Bitmap mode chạy trên ship queue — xem ds_esp_present_single enqueue.
-    // Hàm này chỉ còn đường legacy/fallback.)
+    // kernrw23: bitmap chạy TẠI CHỖ trên bridge (single RemoteCall thread).
+    // Ship queue nền (kernrw22) gây đơ máy vài giây sau khi ESP hiện — revert
+    // để an toàn, điều tra nguyên nhân qua panic log. Thành công/không đổi
+    // frame thì return (kể cả idle-skip); fail thì rơi xuống per-box.
+    if (!g_espBitmapDisabled) {
+        if (ds_esp_bitmap_present(process, boxes, count, portraitBounds, orientation,
+                                  landW, landH, winCenter, mapOrient)) return;
+    }
     // Pre-check idle thuần CPU (0 remote call): frame nào không có gì đổi —
     // không box dịch/vẽ lại, không label/text đến hạn, không đổi container/
     // orient, không diag 1 lần — thì return luôn, khỏi mở pool (tiết kiệm
@@ -3191,7 +3195,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw22"
+#define DS_ESP_BUILD_TAG "kernrw23"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3227,20 +3231,12 @@ static std::atomic<uint32_t> s_presentMaxUs{0};
 static void ds_esp_present_heartbeat(void);
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE.
-static void ds_esp_ship_enqueue(DSESPFrame *frame, RemoteCall *process); // fwd (định nghĩa sau pump)
-
-// kernrw22: bitmap mode chỉ copy frame + enqueue sang ship queue rồi return
-// (µs, KHÔNG chạm RemoteCall trên bridge — setImage: từng treo 10s chờ SB
-// main). Ship lo render+ship+ensure. Legacy/fallback chạy tại chỗ dưới batch
-// lock như cũ.
 static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
-    if (!g_espBitmapDisabled) {
-        ds_esp_ship_enqueue(frame, g_springBoard);
-        return;
-    }
+    // kernrw23: single-thread (ship queue revert). Bitmap branch nằm trong
+    // overlay_update bên dưới. Legacy/fallback chạy tại chỗ dưới batch lock.
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     @try {
         if (frame->count < 0) {
