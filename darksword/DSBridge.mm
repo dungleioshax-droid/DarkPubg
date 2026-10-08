@@ -1241,9 +1241,13 @@ static void ds_reset_remote_symbol_cache(void) {
     g_remoteClassCache = [NSMutableDictionary dictionary];
 }
 
-// Forward (định nghĩa ở cụm pool bên dưới): cache dùng chung bridge/ship.
-static NSLock *s_remoteCacheLock;
-static void ds_remote_cache_ensure(void);
+// Lock + ensure cho cache sel/class/symbol dùng chung bridge/ship (leaf).
+// (Định nghĩa ở đây vì ds_remote_sel bên dưới dùng ngay.)
+static NSLock *s_remoteCacheLock = nil;
+static void ds_remote_cache_ensure(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s_remoteCacheLock = [NSLock new]; });
+}
 
 static uint64_t ds_remote_sel(RemoteCall *process, const char *name) {
     if (!process || !process.trojanMem || !name) return 0;
@@ -1358,11 +1362,8 @@ static thread_local uint64_t s_dsPool = 0;
 // ensure/nested gọi nhau an toàn. Thứ tự lock: batch -> cache/symbol (leaf)
 // -> ESPLog (leaf), không đảo nên không deadlock.
 static std::recursive_mutex s_rcBatchMutex;
-static NSLock *s_remoteCacheLock = nil;
-static void ds_remote_cache_ensure(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ s_remoteCacheLock = [NSLock new]; });
-}
+// (s_remoteCacheLock + ds_remote_cache_ensure đã định nghĩa phía trên,
+// trước ds_remote_sel.)
 
 static void ds_remote_pool_begin(RemoteCall *process) {
     if (s_dsPoolDepth != 0) return; // đã có pool outer (lồng nhau)
@@ -3292,8 +3293,7 @@ static void ds_esp_present_heartbeat(void) {
     uint32_t n = s_presentN.load(std::memory_order_relaxed);
     uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
     double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
-    ESPLog("present hb: enq=%u n=%u pAvg=%.1f pMax=%.1fms",
-           s_shipEnqueued.load(std::memory_order_relaxed),
+    ESPLog("present hb: n=%u pAvg=%.1f pMax=%.1fms",
            n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
@@ -3440,7 +3440,8 @@ static void ds_esp_ship_heartbeat(void) {
     uint32_t n = s_presentN.load(std::memory_order_relaxed);
     uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
     double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
-    ESPLog("ship hb: n=%u pAvg=%.1f pMax=%.1fms",
+    ESPLog("ship hb: enq=%u n=%u pAvg=%.1f pMax=%.1fms",
+           s_shipEnqueued.load(std::memory_order_relaxed),
            n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
