@@ -1241,6 +1241,10 @@ static void ds_reset_remote_symbol_cache(void) {
     g_remoteClassCache = [NSMutableDictionary dictionary];
 }
 
+// Forward (định nghĩa ở cụm pool bên dưới): cache dùng chung bridge/ship.
+static NSLock *s_remoteCacheLock;
+static void ds_remote_cache_ensure(void);
+
 static uint64_t ds_remote_sel(RemoteCall *process, const char *name) {
     if (!process || !process.trojanMem || !name) return 0;
     ds_remote_cache_ensure();
@@ -2738,54 +2742,6 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
     return YES;
 }
 
-// Ship 1 frame trên ship queue: tính geometry + vẽ + ship + đo cost vào
-// counter present chung + heartbeat riêng (phân biệt ship stall vs bridge stall).
-static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame) {
-    if (!process || !frame) return;
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    @try {
-        CGRect bounds = frame->bounds;
-        CGFloat landW = MAX(bounds.size.width, bounds.size.height);
-        CGFloat landH = MIN(bounds.size.width, bounds.size.height);
-        CGPoint winCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
-        BOOL scenePortrait = bounds.size.height > bounds.size.width;
-        int mapOrient = (scenePortrait &&
-                         (frame->orient == UIInterfaceOrientationLandscapeLeft ||
-                          frame->orient == UIInterfaceOrientationLandscapeRight))
-                            ? frame->orient
-                            : UIInterfaceOrientationPortrait;
-        ds_esp_bitmap_present(process, frame->boxes, frame->count,
-                              bounds, frame->orient,
-                              landW, landH, winCenter, mapOrient);
-    } @catch (NSException *e) {
-        ESPLog("ESP ship frame failed: %@", e.reason);
-    }
-    double usP = (CFAbsoluteTimeGetCurrent() - t0) * 1000000.0;
-    if (usP < 0) usP = 0;
-    s_presentN.fetch_add(1, std::memory_order_relaxed);
-    s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
-    uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
-    while (usP > (double)prevMax &&
-           !s_presentMaxUs.compare_exchange_weak(prevMax, (uint32_t)usP,
-                                                 std::memory_order_relaxed)) {
-    }
-    ds_esp_ship_heartbeat();
-}
-
-// Heartbeat từ SHIP QUEUE: mất dấu trong khi present hb (bridge) vẫn chạy =
-// ship kẹt (VD chờ SB main). Cả hai cùng mất = app/queue chết.
-static void ds_esp_ship_heartbeat(void) {
-    static CFAbsoluteTime s_lastShipHb = 0;
-    CFAbsoluteTime nowHb = CFAbsoluteTimeGetCurrent();
-    if (nowHb - s_lastShipHb < 5.0) return;
-    s_lastShipHb = nowHb;
-    uint32_t n = s_presentN.load(std::memory_order_relaxed);
-    uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
-    double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
-    ESPLog("ship hb: n=%u pAvg=%.1f pMax=%.1fms",
-           n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
-}
-
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
@@ -3270,6 +3226,8 @@ static std::atomic<uint32_t> s_presentMaxUs{0};
 static void ds_esp_present_heartbeat(void);
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE.
+static void ds_esp_ship_enqueue(DSESPFrame *frame, RemoteCall *process); // fwd (định nghĩa sau pump)
+
 // kernrw22: bitmap mode chỉ copy frame + enqueue sang ship queue rồi return
 // (µs, KHÔNG chạm RemoteCall trên bridge — setImage: từng treo 10s chờ SB
 // main). Ship lo render+ship+ensure. Legacy/fallback chạy tại chỗ dưới batch
@@ -3435,6 +3393,55 @@ static void ds_esp_ship_enqueue(DSESPFrame *frame, RemoteCall *process) {
             ds_esp_ship_pump();
         });
     }
+}
+
+// Ship 1 frame trên ship queue: tính geometry + vẽ + ship + đo cost vào
+// counter present chung + heartbeat riêng (phân biệt ship stall vs bridge stall).
+// (Định nghĩa ở đây vì cần DSESPFrame + counter khai báo phía trên.)
+static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame) {
+    if (!process || !frame) return;
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    @try {
+        CGRect bounds = frame->bounds;
+        CGFloat landW = MAX(bounds.size.width, bounds.size.height);
+        CGFloat landH = MIN(bounds.size.width, bounds.size.height);
+        CGPoint winCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+        BOOL scenePortrait = bounds.size.height > bounds.size.width;
+        int mapOrient = (scenePortrait &&
+                         (frame->orient == UIInterfaceOrientationLandscapeLeft ||
+                          frame->orient == UIInterfaceOrientationLandscapeRight))
+                            ? frame->orient
+                            : UIInterfaceOrientationPortrait;
+        ds_esp_bitmap_present(process, frame->boxes, frame->count,
+                              bounds, frame->orient,
+                              landW, landH, winCenter, mapOrient);
+    } @catch (NSException *e) {
+        ESPLog("ESP ship frame failed: %@", e.reason);
+    }
+    double usP = (CFAbsoluteTimeGetCurrent() - t0) * 1000000.0;
+    if (usP < 0) usP = 0;
+    s_presentN.fetch_add(1, std::memory_order_relaxed);
+    s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
+    uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
+    while (usP > (double)prevMax &&
+           !s_presentMaxUs.compare_exchange_weak(prevMax, (uint32_t)usP,
+                                                 std::memory_order_relaxed)) {
+    }
+    ds_esp_ship_heartbeat();
+}
+
+// Heartbeat từ SHIP QUEUE: mất dấu trong khi present hb (bridge) vẫn chạy =
+// ship kẹt (VD chờ SB main). Cả hai cùng mất = app/queue chết.
+static void ds_esp_ship_heartbeat(void) {
+    static CFAbsoluteTime s_lastShipHb = 0;
+    CFAbsoluteTime nowHb = CFAbsoluteTimeGetCurrent();
+    if (nowHb - s_lastShipHb < 5.0) return;
+    s_lastShipHb = nowHb;
+    uint32_t n = s_presentN.load(std::memory_order_relaxed);
+    uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
+    double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
+    ESPLog("ship hb: n=%u pAvg=%.1f pMax=%.1fms",
+           n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
 static void ds_esp_tick(void) {
