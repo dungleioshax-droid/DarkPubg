@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
@@ -1242,26 +1243,39 @@ static void ds_reset_remote_symbol_cache(void) {
 
 static uint64_t ds_remote_sel(RemoteCall *process, const char *name) {
     if (!process || !process.trojanMem || !name) return 0;
-    if (!g_remoteSelectorCache) g_remoteSelectorCache = [NSMutableDictionary dictionary];
-    NSString *key = [NSString stringWithUTF8String:name];
-    if (!key) return 0;
-    NSNumber *cached = g_remoteSelectorCache[key];
-    if (cached) return cached.unsignedLongLongValue;
-    uint64_t value = remote_sel(process, name);
-    if (value) g_remoteSelectorCache[key] = @(value);
-    return value;
+    ds_remote_cache_ensure();
+    // Cache dùng chung bridge/ship -> khóa (leaf, không gọi gì khác khi giữ).
+    [s_remoteCacheLock lock];
+    @try {
+        if (!g_remoteSelectorCache) g_remoteSelectorCache = [NSMutableDictionary dictionary];
+        NSString *key = [NSString stringWithUTF8String:name];
+        if (!key) return 0;
+        NSNumber *cached = g_remoteSelectorCache[key];
+        if (cached) return cached.unsignedLongLongValue;
+        uint64_t value = remote_sel(process, name);
+        if (value) g_remoteSelectorCache[key] = @(value);
+        return value;
+    } @finally {
+        [s_remoteCacheLock unlock];
+    }
 }
 
 static uint64_t ds_remote_class(RemoteCall *process, const char *name) {
     if (!process || !process.trojanMem || !name) return 0;
-    if (!g_remoteClassCache) g_remoteClassCache = [NSMutableDictionary dictionary];
-    NSString *key = [NSString stringWithUTF8String:name];
-    if (!key) return 0;
-    NSNumber *cached = g_remoteClassCache[key];
-    if (cached) return cached.unsignedLongLongValue;
-    uint64_t value = remote_getClass(process, name);
-    if (value) g_remoteClassCache[key] = @(value);
-    return value;
+    ds_remote_cache_ensure();
+    [s_remoteCacheLock lock];
+    @try {
+        if (!g_remoteClassCache) g_remoteClassCache = [NSMutableDictionary dictionary];
+        NSString *key = [NSString stringWithUTF8String:name];
+        if (!key) return 0;
+        NSNumber *cached = g_remoteClassCache[key];
+        if (cached) return cached.unsignedLongLongValue;
+        uint64_t value = remote_getClass(process, name);
+        if (value) g_remoteClassCache[key] = @(value);
+        return value;
+    } @finally {
+        [s_remoteCacheLock unlock];
+    }
 }
 
 // The rate label changes every second. Keep its UTF-8 bytes in one reserved
@@ -1330,6 +1344,21 @@ typedef struct {
 // (HUD, ensure…) không gọi begin nên depth=0 -> chạy y hệt code cũ.
 static thread_local int s_dsPoolDepth = 0;
 static thread_local uint64_t s_dsPool = 0;
+
+// ---- RemoteCall batch lock (kernrw22) ----
+// RemoteCall không thread-safe (1 hijacked thread + scratch dùng chung trong
+// SB). Từ kernrw21 ship bitmap chạy queue nền riêng -> mọi traffic RemoteCall
+// (bridge present/rate/fgPoll/enable/disable + ship + warmer) phải qua lock
+// này theo BATCH (không khóa lẻ từng call vì scratch 0x800/0xC00 và text page
+// dùng chung giữa các bước của 1 invocation sequence). Recursive để
+// ensure/nested gọi nhau an toàn. Thứ tự lock: batch -> cache/symbol (leaf)
+// -> ESPLog (leaf), không đảo nên không deadlock.
+static std::recursive_mutex s_rcBatchMutex;
+static NSLock *s_remoteCacheLock = nil;
+static void ds_remote_cache_ensure(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s_remoteCacheLock = [NSLock new]; });
+}
 
 static void ds_remote_pool_begin(RemoteCall *process) {
     if (s_dsPoolDepth != 0) return; // đã có pool outer (lồng nhau)
@@ -2027,14 +2056,20 @@ static const CGFloat kDSESPBorder = 2.0;
 static void *ds_remote_system_symbol(const char *name) {
     static NSMutableDictionary<NSString *, NSNumber *> *cache = nil;
     if (!name) return NULL;
-    if (!cache) cache = [NSMutableDictionary dictionary];
-    NSString *key = [NSString stringWithUTF8String:name];
-    if (!key) return NULL;
-    NSNumber *hit = cache[key];
-    if (hit) return (void *)(uintptr_t)hit.unsignedLongLongValue;
-    void *addr = dlsym(RTLD_DEFAULT, name);
-    if (addr) cache[key] = @((uint64_t)(uintptr_t)addr);
-    return addr;
+    ds_remote_cache_ensure();
+    [s_remoteCacheLock lock];
+    @try {
+        if (!cache) cache = [NSMutableDictionary dictionary];
+        NSString *key = [NSString stringWithUTF8String:name];
+        if (!key) return NULL;
+        NSNumber *hit = cache[key];
+        if (hit) return (void *)(uintptr_t)hit.unsignedLongLongValue;
+        void *addr = dlsym(RTLD_DEFAULT, name);
+        if (addr) cache[key] = @((uint64_t)(uintptr_t)addr);
+        return addr;
+    } @finally {
+        [s_remoteCacheLock unlock];
+    }
 }
 
 static void ds_esp_path_clear(RemoteCall *process) {
@@ -2399,6 +2434,7 @@ static void ds_esp_bitmap_warm_async(RemoteCall *process) {
         BOOL ok = NO;
         uint8_t *tmp = (bytes > 0 && bytes <= 64 * 1024 * 1024) ? (uint8_t *)calloc(1, bytes) : NULL;
         if (tmp && addr && process.trojanMem == troj && troj != 0) {
+            std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
             ok = [process remote_write:addr from:tmp size:(uint64_t)bytes];
         }
         if (tmp) free(tmp);
@@ -2552,6 +2588,11 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
                                    CGFloat landW, CGFloat landH, CGPoint winCenter, int mapOrient) {
     if (g_espBitmapDisabled) return NO;
     if (!process || !process.trojanMem) return NO;
+    // Toàn bộ batch remote của ship dưới 1 lock (render local ~1ms cũng nằm
+    // trong để đơn giản — bridge-legacy chờ vài ms là cùng).
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
+    if ((!g_espWindow || !g_espContainer) &&
+        !ds_esp_overlay_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure-full");
     if (!ds_esp_bitmap_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure");
     // Chưa warm xong (đang map pages ở nền) -> legacy vẽ tạm, không kẹt bridge.
     if (!g_espBitmapWarmed) return NO;
@@ -2697,9 +2738,61 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
     return YES;
 }
 
+// Ship 1 frame trên ship queue: tính geometry + vẽ + ship + đo cost vào
+// counter present chung + heartbeat riêng (phân biệt ship stall vs bridge stall).
+static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame) {
+    if (!process || !frame) return;
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    @try {
+        CGRect bounds = frame->bounds;
+        CGFloat landW = MAX(bounds.size.width, bounds.size.height);
+        CGFloat landH = MIN(bounds.size.width, bounds.size.height);
+        CGPoint winCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
+        BOOL scenePortrait = bounds.size.height > bounds.size.width;
+        int mapOrient = (scenePortrait &&
+                         (frame->orient == UIInterfaceOrientationLandscapeLeft ||
+                          frame->orient == UIInterfaceOrientationLandscapeRight))
+                            ? frame->orient
+                            : UIInterfaceOrientationPortrait;
+        ds_esp_bitmap_present(process, frame->boxes, frame->count,
+                              bounds, frame->orient,
+                              landW, landH, winCenter, mapOrient);
+    } @catch (NSException *e) {
+        ESPLog("ESP ship frame failed: %@", e.reason);
+    }
+    double usP = (CFAbsoluteTimeGetCurrent() - t0) * 1000000.0;
+    if (usP < 0) usP = 0;
+    s_presentN.fetch_add(1, std::memory_order_relaxed);
+    s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
+    uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
+    while (usP > (double)prevMax &&
+           !s_presentMaxUs.compare_exchange_weak(prevMax, (uint32_t)usP,
+                                                 std::memory_order_relaxed)) {
+    }
+    ds_esp_ship_heartbeat();
+}
+
+// Heartbeat từ SHIP QUEUE: mất dấu trong khi present hb (bridge) vẫn chạy =
+// ship kẹt (VD chờ SB main). Cả hai cùng mất = app/queue chết.
+static void ds_esp_ship_heartbeat(void) {
+    static CFAbsoluteTime s_lastShipHb = 0;
+    CFAbsoluteTime nowHb = CFAbsoluteTimeGetCurrent();
+    if (nowHb - s_lastShipHb < 5.0) return;
+    s_lastShipHb = nowHb;
+    uint32_t n = s_presentN.load(std::memory_order_relaxed);
+    uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
+    double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
+    ESPLog("ship hb: n=%u pAvg=%.1f pMax=%.1fms",
+           n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
+}
+
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
+    // Legacy per-box chạy trên bridge; ship bitmap chạy queue riêng — chung
+    // lock batch (kernrw22). Bitmap branch đã chuyển hẳn sang ship queue
+    // (present_single enqueue), hàm này chỉ còn đường legacy/fallback.
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
     // Hoist lên đầu hàm để pre-check idle (trước pool) dùng chung với vòng vẽ
     // chính bên dưới — 1 nguồn sự thật cho gate text/diag.
@@ -2724,13 +2817,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                       orientation == UIInterfaceOrientationLandscapeRight))
                         ? orientation
                         : UIInterfaceOrientationPortrait;
-    // Bitmap mode (kernrw19, theo DSGames): render 1 ảnh local + 1 setImage:.
-    // Tiêu thụ frame (return) khi thành công HOẶC khi frame giống hệt đã ship
-    // (khỏi ship lại); fail thì rơi xuống đường per-box cũ bên dưới.
-    if (!g_espBitmapDisabled) {
-        if (ds_esp_bitmap_present(process, boxes, count, portraitBounds, orientation,
-                                  landW, landH, winCenter, mapOrient)) return;
-    }
+    // (Bitmap mode chạy trên ship queue — xem ds_esp_present_single enqueue.
+    // Hàm này chỉ còn đường legacy/fallback.)
     // Pre-check idle thuần CPU (0 remote call): frame nào không có gì đổi —
     // không box dịch/vẽ lại, không label/text đến hạn, không đổi container/
     // orient, không diag 1 lần — thì return luôn, khỏi mở pool (tiết kiệm
@@ -3075,6 +3163,8 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
 static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
+    // Rate 1Hz chạy bridge, ship bitmap chạy queue riêng -> chung batch lock.
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
 
     uint64_t input = 0;
     uint64_t output = 0;
@@ -3144,7 +3234,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw21"
+#define DS_ESP_BUILD_TAG "kernrw22"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3179,11 +3269,20 @@ static std::atomic<uint32_t> s_presentN{0};
 static std::atomic<uint32_t> s_presentMaxUs{0};
 static void ds_esp_present_heartbeat(void);
 
-// Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
+// Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE.
+// kernrw22: bitmap mode chỉ copy frame + enqueue sang ship queue rồi return
+// (µs, KHÔNG chạm RemoteCall trên bridge — setImage: từng treo 10s chờ SB
+// main). Ship lo render+ship+ensure. Legacy/fallback chạy tại chỗ dưới batch
+// lock như cũ.
 static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
+    if (!g_espBitmapDisabled) {
+        ds_esp_ship_enqueue(frame, g_springBoard);
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     @try {
         if (frame->count < 0) {
             // Lệnh hide từ worker.
@@ -3235,7 +3334,8 @@ static void ds_esp_present_heartbeat(void) {
     uint32_t n = s_presentN.load(std::memory_order_relaxed);
     uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
     double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
-    ESPLog("present hb: n=%u pAvg=%.1f pMax=%.1fms",
+    ESPLog("present hb: enq=%u n=%u pAvg=%.1f pMax=%.1fms",
+           s_shipEnqueued.load(std::memory_order_relaxed),
            n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
@@ -3265,6 +3365,74 @@ static void ds_esp_schedule_present(DSESPFrame *frame) {
     if (s_espPresenting.compare_exchange_strong(expected, true)) {
         dispatch_async(ds_bridge_queue(), ^{
             ds_esp_presentation_loop();
+        });
+    }
+}
+
+// ---- Bitmap ship queue (kernrw22) ----
+// setImage: chờ SB main từng treo 10s (kernrw21: ship total=10008ms, set=
+// 10005) — chạy ship trên queue riêng để bridge (HUD text/rate/enable,
+// present pacing) không bao giờ kẹt theo. Bridge chỉ copy frame + retain proc
+// rồi return (µs). Ship lấy frame MỚI NHẤT (exchange, frame cũ vứt) nên SB
+// stall thì tự coalesce, hồi phục tự động. Mọi traffic RemoteCall (ship +
+// bridge + warmer) qua s_rcBatchMutex vì scratch/hijacked thread dùng chung.
+static dispatch_queue_t g_espShipQueue = NULL;
+static std::atomic_bool s_shipRunning{false};
+static std::atomic<uint32_t> s_shipEnqueued{0};
+typedef struct {
+    DSESPFrame frame; // copy theo giá trị
+    RemoteCall *proc; // unsafe_unretained trong malloc struct; retain tay lúc enqueue
+} DSShipItem;
+static std::atomic<DSShipItem *> s_shipLatest{nullptr};
+
+static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame); // fwd
+static void ds_esp_ship_heartbeat(void); // fwd
+
+static void ds_esp_ship_pump(void) {
+    while (true) {
+        DSShipItem *item = s_shipLatest.exchange(nullptr);
+        if (!item) {
+            s_shipRunning.store(false);
+            item = s_shipLatest.exchange(nullptr);
+            if (!item) break;
+            s_shipRunning.store(true);
+        }
+        RemoteCall *proc = item->proc;
+        @try {
+            if (proc && proc.trojanMem) {
+                ds_esp_bitmap_present_from_frame(proc, &item->frame);
+            }
+        } @catch (NSException *e) {
+            ESPLog("ESP ship pump exception: %@", e.reason);
+        }
+        if (proc) CFRelease((__bridge CFTypeRef)proc);
+        free(item);
+    }
+}
+
+static void ds_esp_ship_enqueue(DSESPFrame *frame, RemoteCall *process) {
+    if (!frame) return;
+    if (!process) { free(frame); return; }
+    if (!g_espShipQueue) {
+        g_espShipQueue = dispatch_queue_create("esp-bitmap-ship", DISPATCH_QUEUE_SERIAL);
+    }
+    DSShipItem *item = (DSShipItem *)malloc(sizeof(DSShipItem));
+    if (!item) { free(frame); return; }
+    item->frame = *frame;
+    item->proc = process;
+    CFRetain((__bridge CFTypeRef)process);
+    free(frame);
+    DSShipItem *old = s_shipLatest.exchange(item);
+    if (old) {
+        // Frame cũ chưa ship kịp -> vứt (coalesce khi SB stall).
+        if (old->proc) CFRelease((__bridge CFTypeRef)old->proc);
+        free(old);
+    }
+    s_shipEnqueued.fetch_add(1, std::memory_order_relaxed);
+    bool expected = false;
+    if (s_shipRunning.compare_exchange_strong(expected, true)) {
+        dispatch_async(g_espShipQueue, ^{
+            ds_esp_ship_pump();
         });
     }
 }
@@ -3814,6 +3982,9 @@ BOOL DSBridgeBootstrap(void) {
 }
 
 static void ds_finish_disable(void) {
+    // Ship bitmap có thể đang giữ batch (VD kẹt chờ SB) -> disable chờ batch
+    // xong mới teardown/destroy (không bao giờ remote_write vào buffer vừa free).
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     ds_set_stage(ds_localized(@"Closing HUD"));
     ds_unregister_hud_notifications();
     ds_stop_rate_timer();
@@ -3892,6 +4063,8 @@ static void ds_finish_disable(void) {
 
 static void ds_finish_enable(void) {
     if (!g_hudRequested.load()) return;
+    // Enable chạy bridge, ship/warmer có thể còn sót batch cũ -> chung lock.
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     g_dsRunning.store(true);
     g_dsProgress.store(0.0);
     ds_set_stage(ds_localized(@"Preparing startup"));
