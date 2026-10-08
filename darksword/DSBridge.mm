@@ -2362,6 +2362,13 @@ static ESPBox2D g_espBitmapLast[ESPOverlayMaxBoxes];
 static int g_espBitmapLastCount = -1;
 static CGRect g_espBitmapLastBounds = CGRectZero;
 static int g_espBitmapLastOrient = -1;
+// Warmer: lần remote_write đầu phải map ~300 pages qua exploit (mỗi page chục
+// ms) — làm trên bridge là kẹt present hàng giây (thấy ở kernrw20: pres=3,
+// pAvg 690ms rồi bridge đứng). Warmer map dần ở queue nền; present đi legacy
+// cho tới khi warmed=YES.
+static BOOL g_espBitmapWarmed = NO;
+static dispatch_queue_t g_espBitmapWarmQueue = NULL;
+static BOOL s_bmpFirstShipLogged = NO;
 
 static BOOL ds_esp_bitmap_fail(const char *why) {
     ESPLog("esp bitmap fail: %s (streak=%d)", why, g_espBitmapFailStreak + 1);
@@ -2372,6 +2379,38 @@ static BOOL ds_esp_bitmap_fail(const char *why) {
         ESPLog("esp bitmap OFF -> per-box fallback");
     }
     return NO;
+}
+
+static void ds_esp_bitmap_warm_async(RemoteCall *process) {
+    if (!process) return;
+    if (!g_espBitmapWarmQueue) {
+        g_espBitmapWarmQueue = dispatch_queue_create("esp-bitmap-warm", DISPATCH_QUEUE_SERIAL);
+    }
+    // Chụp địa chỉ/session lúc dispatch; verify lại sau write (disable/enable
+    // xen giữa sẽ đổi addr/session -> bỏ, không set warmed bậy).
+    // Buffer nguồn calloc riêng trong warmer (không đụng buffer render của
+    // bridge -> không lifetime race với teardown).
+    uint64_t addr = g_espBitmapAddr;
+    uint64_t troj = process.trojanMem;
+    int pxW = g_espBitmapPxW, pxH = g_espBitmapPxH;
+    dispatch_async(g_espBitmapWarmQueue, ^{
+        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+        size_t bytes = (size_t)pxW * (size_t)pxH * 4;
+        BOOL ok = NO;
+        uint8_t *tmp = (bytes > 0 && bytes <= 64 * 1024 * 1024) ? (uint8_t *)calloc(1, bytes) : NULL;
+        if (tmp && addr && process.trojanMem == troj && troj != 0) {
+            ok = [process remote_write:addr from:tmp size:(uint64_t)bytes];
+        }
+        if (tmp) free(tmp);
+        double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
+        if (ok && addr == g_espBitmapAddr && process.trojanMem == troj &&
+            pxW == g_espBitmapPxW && pxH == g_espBitmapPxH) {
+            g_espBitmapWarmed = YES;
+            ESPLog("esp bitmap warmed: %.0fms (%zu pages est)", ms, bytes / 16384);
+        } else {
+            ESPLog("esp bitmap warm FAIL after %.0fms (legacy meanwhile)", ms);
+        }
+    });
 }
 
 static void ds_esp_bitmap_teardown(RemoteCall *process) {
@@ -2393,6 +2432,7 @@ static void ds_esp_bitmap_teardown(RemoteCall *process) {
     g_espBitmapView = 0; g_espBitmapAddr = 0; g_espBitmapCtx = 0; g_espBitmapCS = 0;
     g_espBitmapImage = 0; g_espBitmapPxW = g_espBitmapPxH = 0;
     g_espBitmapHiddenCache = YES;
+    g_espBitmapWarmed = NO;
 }
 
 static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
@@ -2467,9 +2507,14 @@ static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
     g_espBitmapPxW = pxW; g_espBitmapPxH = pxH;
     g_espBitmapImage = 0; g_espBitmapHiddenCache = YES; g_espBitmapFailStreak = 0;
     g_espBitmapLastCount = -1;
+    g_espBitmapWarmed = NO;
+    s_bmpFirstShipLogged = NO;
     ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB)",
            (double)portraitBounds.size.width, (double)portraitBounds.size.height,
            pxW, pxH, (double)bytes / 1048576.0);
+    // Warm mapping ở nền (đừng để lần ship đầu kẹt bridge). Present đi legacy
+    // cho tới khi warmed.
+    ds_esp_bitmap_warm_async(process);
     return YES;
 }
 
@@ -2508,6 +2553,8 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
     if (g_espBitmapDisabled) return NO;
     if (!process || !process.trojanMem) return NO;
     if (!ds_esp_bitmap_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure");
+    // Chưa warm xong (đang map pages ở nền) -> legacy vẽ tạm, không kẹt bridge.
+    if (!g_espBitmapWarmed) return NO;
     // Window show/hide mirror đường legacy.
     BOOL wantHidden = (count <= 0);
     if (wantHidden != g_espWindowHiddenCache) {
@@ -2596,6 +2643,9 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
         withAttributes:s_bmpAttrs];
     }
     // Pool riêng cho UIImage autorelease (bitmap branch chạy trước pool chung).
+    // Log stage khi ship đầu hoặc khi chậm bất thường (>100ms) để bắt đúng
+    // khâu kẹt (write mapping? createimage? setimage chờ SB main?).
+    CFAbsoluteTime tShip0 = CFAbsoluteTimeGetCurrent();
     BOOL beganPool = (s_dsPoolDepth == 0);
     ds_remote_pool_begin(process);
     @try {
@@ -2603,17 +2653,27 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
         if (![process remote_write:g_espBitmapAddr from:g_espBitmapLocal size:(uint64_t)bytes]) {
             return ds_esp_bitmap_fail("write");
         }
+        CFAbsoluteTime tShipW = CFAbsoluteTimeGetCurrent();
         void *createImageSym = ds_remote_system_symbol("CGBitmapContextCreateImage");
         void *cgRelSym = ds_remote_system_symbol("CGImageRelease");
         if (!createImageSym) return ds_esp_bitmap_fail("sym");
         uint64_t cg = (uint64_t)DSRemoteArbCallWithTimeout(2, process, createImageSym, g_espBitmapCtx);
         if (!cg || !process.trojanMem) return ds_esp_bitmap_fail("createimage");
+        CFAbsoluteTime tShipC = CFAbsoluteTimeGetCurrent();
         uint64_t uiClass = ds_remote_class(process, "UIImage");
         uint64_t img = (uiClass && process.trojanMem)
             ? remote_msg(process, uiClass, ds_remote_sel(process, "imageWithCGImage:"), cg, 0, 0, 0) : 0;
         if (cgRelSym && process.trojanMem) DSRemoteArbCallWithTimeout(1, process, cgRelSym, cg);
         if (!img || !process.trojanMem) return ds_esp_bitmap_fail("uiimage");
         ds_perform_on_springboard_main(process, g_espBitmapView, ds_remote_sel(process, "setImage:"), img, YES);
+        CFAbsoluteTime tShipS = CFAbsoluteTimeGetCurrent();
+        double totMs = (tShipS - tShip0) * 1000.0;
+        if (!s_bmpFirstShipLogged || totMs > 100.0) {
+            s_bmpFirstShipLogged = YES;
+            ESPLog("esp bitmap ship: total=%.0fms write=%.0f create=%.0f set=%.0f",
+                   totMs, (tShipW - tShip0) * 1000.0,
+                   (tShipC - tShipW) * 1000.0, (tShipS - tShipC) * 1000.0);
+        }
         if (!process.trojanMem) {
             return ds_esp_bitmap_fail("setimage");
         }
@@ -3084,7 +3144,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw20"
+#define DS_ESP_BUILD_TAG "kernrw21"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
