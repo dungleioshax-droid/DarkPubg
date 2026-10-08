@@ -2249,8 +2249,87 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
     CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
+    // Hoist lên đầu hàm để pre-check idle (trước pool) dùng chung với vòng vẽ
+    // chính bên dưới — 1 nguồn sự thật cho gate text/diag.
+    static BOOL s_espBoundsLogged = NO;
+    static CFAbsoluteTime s_lastTextAt[ESPOverlayMaxBoxes] = {0};
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
+    }
+    // Game PUBG luôn render landscape: W = cạnh dài, H = cạnh ngắn — KHÔNG suy
+    // từ orientation (SpringBoard scene kẹt portrait). Phải khớp EXACT với
+    // landW/H dùng trong W2S ở ds_esp_tick, không thì box lệch/hụt.
+    // (Tính ở đây — thuần CPU — để cả pre-check idle lẫn vòng vẽ dùng chung.)
+    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
+    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
+    CGPoint winCenter = CGPointMake(CGRectGetMidX(portraitBounds), CGRectGetMidY(portraitBounds));
+    // Chỉ map ±90° khi scene THẬT đang portrait (h>w) và game landscape.
+    // Nếu scene đã landscape (w>=h) thì container khớp game — vẽ trực tiếp
+    // (map thêm 90° sẽ quay ngược, box ra rìa màn hình).
+    BOOL scenePortrait = portraitBounds.size.height > portraitBounds.size.width;
+    int mapOrient = (scenePortrait &&
+                     (orientation == UIInterfaceOrientationLandscapeLeft ||
+                      orientation == UIInterfaceOrientationLandscapeRight))
+                        ? orientation
+                        : UIInterfaceOrientationPortrait;
+    // Pre-check idle thuần CPU (0 remote call): frame nào không có gì đổi —
+    // không box dịch/vẽ lại, không label/text đến hạn, không đổi container/
+    // orient, không diag 1 lần — thì return luôn, khỏi mở pool (tiết kiệm
+    // alloc+init+drain). Điều kiện mirror Y HỆT vòng vẽ bên dưới; nghi ngờ
+    // trường hợp nào thì dirty (chạy như cũ), nên không bao giờ bỏ sót vẽ.
+    {
+        BOOL dirty = NO;
+        BOOL wantHiddenPre = (count <= 0);
+        if (wantHiddenPre != g_espWindowHiddenCache) dirty = YES;
+        else if (wantHiddenPre) {
+            for (int i = 0; i < ESPOverlayMaxBoxes && !dirty; i++) {
+                if (!g_espHiddenCache[i]) dirty = YES;
+            }
+        }
+        if (!dirty && !s_espBoundsLogged) dirty = YES;
+        if (!dirty && g_espPathLayer) dirty = YES;
+        if (!dirty && (!CGRectEqualToRect(g_espLastContainerBounds, portraitBounds) ||
+                       mapOrient != g_espLastMapOrient)) dirty = YES;
+        for (int i = 0; i < ESPOverlayMaxBoxes && !dirty; i++) {
+            ESPBox2D b = boxes[i];
+            BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
+            if (hide != g_espHiddenCache[i] || !g_espRectValid[i]) { dirty = YES; break; }
+            if (hide) continue;
+            char distTxt[24] = {0};
+            if (b.health >= 0 && b.health <= 100) {
+                snprintf(distTxt, sizeof(distTxt), "%.0fm %d%%", b.distance, b.health);
+            } else {
+                snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
+            }
+            CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
+                                             landW, landH, winCenter, mapOrient);
+            CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
+            CGPoint labelCenter = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
+                                                   landW, landH, winCenter, mapOrient);
+            CGRect prevBox = g_espLastRect[i][0];
+            BOOL boxMoved;
+            if (g_espPathLayer) {
+                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
+                            fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
+                            fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
+                            fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
+            } else {
+                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
+                            fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
+                            fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
+                            fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
+            }
+            if (boxMoved) { dirty = YES; break; }
+            if (strcmp(g_espLastDist[i], distTxt) != 0 && nowP - s_lastTextAt[i] >= 0.2) {
+                dirty = YES; break;
+            }
+            if ((fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 2.0 ||
+                 fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 2.0) &&
+                nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ)) {
+                dirty = YES; break;
+            }
+        }
+        if (!dirty) return;
     }
     // 1 pool cho TOÀN BỘ lượt present: mỗi setFrame/setText trước đây tự tạo
     // + drain pool (3 remote_msg thừa). Bọc @try/@finally để pool LUÔN được
@@ -2262,7 +2341,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     // (biết SpringBoard có tự xoay window overlay theo máy không — quyết định
     // boxes phải map local hay vẽ trực tiếp).
     {
-        static BOOL s_espBoundsLogged = NO;
+        // s_espBoundsLogged hoist ở đầu hàm (dùng chung với pre-check idle).
         if (!s_espBoundsLogged) {
             s_espBoundsLogged = YES;
             CGRect cb = CGRectZero, wb = CGRectZero;
@@ -2293,21 +2372,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
         return;
     }
-    // Game PUBG luôn render landscape: W = cạnh dài, H = cạnh ngắn — KHÔNG suy
-    // từ orientation (SpringBoard scene kẹt portrait). Phải khớp EXACT với
-    // landW/H dùng trong W2S ở ds_esp_tick, không thì box lệch/hụt.
-    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
-    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
-    CGPoint winCenter = CGPointMake(CGRectGetMidX(portraitBounds), CGRectGetMidY(portraitBounds));
-    // Chỉ map ±90° khi scene THẬT đang portrait (h>w) và game landscape.
-    // Nếu scene đã landscape (w>=h) thì container khớp game — vẽ trực tiếp
-    // (map thêm 90° sẽ quay ngược, box ra rìa màn hình).
-    BOOL scenePortrait = portraitBounds.size.height > portraitBounds.size.width;
-    int mapOrient = (scenePortrait &&
-                     (orientation == UIInterfaceOrientationLandscapeLeft ||
-                      orientation == UIInterfaceOrientationLandscapeRight))
-                        ? orientation
-                        : UIInterfaceOrientationPortrait;
+    // landW/landH/winCenter/mapOrient đã tính ở pre-check idle phía trên —
+    // dùng chung ở đây để khớp EXACT (không tính lại 2 lần lệch nhau).
     // Container: full theo scene, KHÔNG xoay remote (setTransform: không có
     // tác dụng trên SpringBoard). Map tọa độ từng box local khi cần.
     if (!CGRectEqualToRect(g_espLastContainerBounds, portraitBounds)) {
@@ -2399,7 +2465,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
         // Rate-limit setText: tối đa 5Hz (200ms) để không dồn IPC alloc/setText/release vào SpringBoard
-        static CFAbsoluteTime s_lastTextAt[ESPOverlayMaxBoxes] = {0};
+        // (s_lastTextAt hoist ở đầu hàm, dùng chung với pre-check idle).
         BOOL textChanged = (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0);
         if (textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.2)) {
             s_lastTextAt[i] = nowP;
@@ -2619,7 +2685,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw16"
+#define DS_ESP_BUILD_TAG "kernrw17"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2810,12 +2876,11 @@ static void ds_esp_tick(void) {
 
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
-        // Refresh MỖI tick 60Hz. Kernel position reads vẫn bị throttle 15Hz
-        // bên trong ESPEngineRefreshBoxes (kPosReadInterval + ngoại suy vận
-        // tốc) — van chống quá tải exploit path. Camera POV đi page-cache
-        // (memcpy sau lần đầu). Present trước đây bị kẹp theo didRefresh
-        // (=15Hz khi không task port) -> box update 15fps = giật; giờ present
-        // mọi tick khi còn box.
+        // Refresh MỖI tick. ESPEngineRefreshBoxes đọc xoay vòng kiểu Kernel:
+        // mỗi tick chỉ đọc tươi 1/2 tracked (luân phiên), lượt còn lại tái
+        // dùng vị trí cache nhưng project bằng camera TƯƠI -> bám khi xoay,
+        // số read kernel giảm ~50%. Camera POV đi page-cache (memcpy).
+        // Present mọi tick khi còn box.
         double minInterval = 0.5 / (double)ESP_REFRESH_HZ;
 
         uint64_t gen = 0;

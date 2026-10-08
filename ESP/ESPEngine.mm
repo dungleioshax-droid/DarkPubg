@@ -2452,27 +2452,25 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
 
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    // Region map giữ mapping vĩnh viễn: đọc vị trí sau lần map đầu chỉ là memcpy
-    // (~µs) nên đọc MỖI frame, bỏ hẳn đọc thưa + ngoại suy.
-    // Region map: sau lần map đầu, đọc vị trí chỉ là memcpy từ mapping giữ sẵn
-    // (~µs) — KHÔNG cần đọc thưa + ngoại suy nữa. 0 = đọc lại MỖI frame, nhờ đó
-    // bỏ được ngoại suy/blend (thứ làm box "đứng im rồi nhảy").
-    const double kPosReadInterval = 0.0;
+    // Đọc xoay vòng kiểu Kernel (s_frame % 3): mỗi refresh chỉ đọc tươi 1/2
+    // tracked (luân phiên chẵn/lẻ), lượt còn lại TÁI DÙNG vị trí cache nhưng
+    // vẫn project bằng camera TƯƠI của tick này -> xoay nhanh vẫn bám dính,
+    // số read kernel giảm ~50% (áp lực lock region-map giảm theo). Chưa từng
+    // đọc (h->at<=0) thì đọc ngay bất kể lượt. Ẩn/chết/HP cũng chỉ đọc ở lượt
+    // của nó — box của địch vừa chết/ẩn nán lại tối đa 1 tick (25ms).
+    // Ngoại suy/blend vận tốc đã bỏ (thứ làm box "đứng im rồi nhảy").
+    static int s_posTurn = 0;
+    s_posTurn ^= 1;
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();
         ESPPosHist *h = ESPPosHistSlot(tr->actor);
         ESPVector pos = {0,0,0};
-        if (h->valid && nowF - h->at < kPosReadInterval) {
-            // Còn trong cửa sổ ngoại suy: KHÔNG chạm kernel, cộng vận tốc đã làm mượt.
-            // Chặn dt để một frame trễ không đẩy box vọt xa; áp dụng damping nhẹ.
-            float dt = (float)(nowF - h->at);
-            if (dt > 0.25f) dt = 0.25f;
-            float damp = 1.0f - dt * 0.8f;
-            if (damp < 0.65f) damp = 0.65f;
-            pos.x = h->pos.x + (h->vel.x * dt) * damp;
-            pos.y = h->pos.y + (h->vel.y * dt) * damp;
-            pos.z = h->pos.z + (h->vel.z * dt) * damp;
+        BOOL readTurn = (!h->valid || h->at <= 0) || ((((int)i + s_posTurn) & 1) == 0);
+        if (!readTurn) {
+            // Lượt nghỉ: KHÔNG chạm kernel, dùng vị trí/HP cache; project bên
+            // dưới vẫn dùng basis camera tươi của tick này.
+            pos = h->pos;
         } else {
             // Đến hạn đọc: đọc cả cờ ẩn/chết ở đây (thay vì đọc mỗi frame).
             // bHidden ở 0xE8, bDead ở 0xE7C — cách xa nên không gộp 1 lần đọc;
