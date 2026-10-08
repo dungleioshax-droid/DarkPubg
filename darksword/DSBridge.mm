@@ -1355,6 +1355,80 @@ static void ds_remote_pool_end(RemoteCall *process) {
     }
 }
 
+// ---- NSInvocation cache (kernrw18) ----
+// Mỗi (target,selector) của void-method (setFrame:/setHidden:/setBounds:/...)
+// chỉ dựng NSInvocation 1 lần rồi retain trong SB; các frame sau chỉ còn
+// remote_write arg + setArgument: + invoke (3 msg thay vì ~7: bỏ
+// methodSignatureForSelector + invocationWithMethodSignature: + setTarget: +
+// setSelector:). Cùng entry point SB (setArgument/invoke) nên an toàn hơn
+// path layer. Getter có return value KHÔNG cache (đi đường cũ).
+// Session/view mới -> địa chỉ cũ vô nghĩa -> xả qua ds_inv_cache_drop()
+// (gọi ở ensure rebuild + disable); đổi trojanMem cũng tự xả.
+static NSMutableDictionary<NSString *, NSNumber *> *s_invCache = nil;
+static NSLock *s_invCacheLock = nil;
+static uint64_t s_invCacheTrojan = 0;
+
+static void ds_inv_cache_ensure(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s_invCache = [NSMutableDictionary dictionary];
+        s_invCacheLock = [NSLock new];
+    });
+}
+
+static inline NSString *ds_inv_cache_key(uint64_t target, uint64_t selector) {
+    return [NSString stringWithFormat:@"%llx_%llx",
+            (unsigned long long)target, (unsigned long long)selector];
+}
+
+// Trả invocation đã retain, hoặc 0. Tự xả khi đổi session.
+static uint64_t ds_inv_cache_get(RemoteCall *process, uint64_t target, uint64_t selector) {
+    if (!process || !process.trojanMem || !target || !selector) return 0;
+    ds_inv_cache_ensure();
+    uint64_t inv = 0;
+    [s_invCacheLock lock];
+    @try {
+        if (s_invCacheTrojan != process.trojanMem) {
+            [s_invCache removeAllObjects];
+            s_invCacheTrojan = process.trojanMem;
+        } else {
+            NSNumber *hit = s_invCache[ds_inv_cache_key(target, selector)];
+            inv = hit ? hit.unsignedLongLongValue : 0;
+        }
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+    return inv;
+}
+
+static void ds_inv_cache_put(RemoteCall *process, uint64_t target, uint64_t selector, uint64_t invocation) {
+    if (!process || !process.trojanMem || !target || !selector || !invocation) return;
+    ds_inv_cache_ensure();
+    [s_invCacheLock lock];
+    @try {
+        if (s_invCacheTrojan != process.trojanMem) {
+            [s_invCache removeAllObjects];
+            s_invCacheTrojan = process.trojanMem;
+        }
+        s_invCache[ds_inv_cache_key(target, selector)] = @(invocation);
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+}
+
+// Xả toàn bộ (gọi khi rebuild views / disable — địa chỉ view mới khác cũ,
+// dùng lại invocation cũ sẽ bắn nhầm vào view chết đã leak).
+static void ds_inv_cache_drop(void) {
+    ds_inv_cache_ensure();
+    [s_invCacheLock lock];
+    @try {
+        [s_invCache removeAllObjects];
+        s_invCacheTrojan = 0;
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+}
+
 // RemoteCall's doRemoteCallSyncOnMainThread assumes task->threads.next is the
 // main thread. On iOS 17 it can be RemoteCall's newly-created pthread instead,
 // which makes UIView initialization abort SpringBoard under
@@ -1367,6 +1441,12 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
                                             void *result,
                                             NSUInteger resultSize) {
     if (!process || !target || !selector || !process.trojanMem) return NO;
+
+    // Fast path kernrw18: invocation đã dựng + retain từ frame trước (chỉ cho
+    // call không lấy return value: setFrame:/setHidden:/...). Getter đi đường cũ.
+    BOOL wantResult = (result && resultSize > 0);
+    uint64_t cachedInv = 0;
+    if (!wantResult) cachedInv = ds_inv_cache_get(process, target, selector);
 
     // depth>0 = caller đang giữ pool (ds_remote_pool_begin) -> dùng chung,
     // không tạo và không drain. depth==0 = nguyên bản: 1 pool cho đúng 1 lời gọi.
@@ -1388,22 +1468,33 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
 
     @try {
 
-    uint64_t signature = remote_msg(process, target,
-                                    ds_remote_sel(process, "methodSignatureForSelector:"),
-                                    selector, 0, 0, 0);
-    if (!process.trojanMem) return NO;
-    uint64_t invocationClass = ds_remote_class(process, "NSInvocation");
-    uint64_t invocation = signature && invocationClass
-        ? remote_msg(process, invocationClass,
-                     ds_remote_sel(process, "invocationWithMethodSignature:"),
-                     signature, 0, 0, 0)
-        : 0;
-    if (!invocation || !process.trojanMem) return NO;
+    uint64_t invocation = cachedInv;
+    if (!invocation) {
+        uint64_t signature = remote_msg(process, target,
+                                        ds_remote_sel(process, "methodSignatureForSelector:"),
+                                        selector, 0, 0, 0);
+        if (!process.trojanMem) return NO;
+        uint64_t invocationClass = ds_remote_class(process, "NSInvocation");
+        invocation = signature && invocationClass
+            ? remote_msg(process, invocationClass,
+                         ds_remote_sel(process, "invocationWithMethodSignature:"),
+                         signature, 0, 0, 0)
+            : 0;
+        if (!invocation || !process.trojanMem) return NO;
 
-    remote_msg(process, invocation, ds_remote_sel(process, "setTarget:"), target, 0, 0, 0);
-    if (!process.trojanMem) return NO;
-    remote_msg(process, invocation, ds_remote_sel(process, "setSelector:"), selector, 0, 0, 0);
-    if (!process.trojanMem) return NO;
+        remote_msg(process, invocation, ds_remote_sel(process, "setTarget:"), target, 0, 0, 0);
+        if (!process.trojanMem) return NO;
+        remote_msg(process, invocation, ds_remote_sel(process, "setSelector:"), selector, 0, 0, 0);
+        if (!process.trojanMem) return NO;
+        if (!wantResult) {
+            // Giữ invocation cho frame sau: retain trong SB ngay lúc này
+            // (bản autorelease gốc sẽ bị pool chung drain cuối lượt present).
+            // setArgument: copy bytes vào frame lúc gọi nên scratch tái dùng
+            // an toàn; invoke gọi lại nhiều lần hợp lệ.
+            remote_msg(process, invocation, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
+            if (process.trojanMem) ds_inv_cache_put(process, target, selector, invocation);
+        }
+    }
 
     uint64_t scratch = process.trojanMem + 0x800;
     for (NSUInteger index = 0; index < argumentCount; index++) {
@@ -2064,10 +2155,12 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
              portraitBounds.size.height);
     // Session/process mới: địa chỉ path layer + buffer CGRect cũ không còn dùng
     // được. GIỮ batching TẮT (bisect respring) — per-box views đã ổn định.
+    // Views mới = địa chỉ mới -> xả invocation cache (kẻo bắn nhầm view cũ).
     g_espPathLayer = 0;
     g_espPathObj = 0;
     g_espRectsAddr = 0;
     g_espRectsCap = 0;
+    ds_inv_cache_drop();
     if (g_espWindow && g_espContainer) {
         BOOL ok = YES;
         for (int i = 0; i < ESPOverlayMaxBoxes && ok; i++) {
@@ -2685,7 +2778,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw17"
+#define DS_ESP_BUILD_TAG "kernrw18"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3402,6 +3495,7 @@ static void ds_finish_disable(void) {
     }
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
+    ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;
