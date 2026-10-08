@@ -2338,6 +2338,295 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
     return ok;
 }
 
+// ---- Bitmap overlay (kernrw19, theo DSGames) ----
+// Vẽ TẤT CẢ box vào 1 bitmap trong suốt NGAY TRONG APP (CoreGraphics, ~1ms),
+// ship 1 lần/frame sang SB: remote_write pixels + UIImage imageWithCGImage:
+// + setImage: (~5 msg). Thay ~35 NSInvocation/frame của đường per-box.
+// Fail 3 lần liên tiếp -> tắt bitmap, rơi về per-box (không bao giờ mất ESP).
+// Buffer SB malloc 1 lần (remote_write sau đó chỉ là memcpy qua shmem cache);
+// release UIImage cũ mỗi frame (không là SB phình RAM); teardown khi disable.
+static uint64_t g_espBitmapView = 0;    // UIImageView trong SB
+static uint64_t g_espBitmapAddr = 0;    // pixel buffer RGBA trong SB
+static int g_espBitmapPxW = 0, g_espBitmapPxH = 0;
+static uint64_t g_espBitmapCtx = 0;     // CGBitmapContextCreate (SB)
+static uint64_t g_espBitmapCS = 0;      // colorspace (SB)
+static uint64_t g_espBitmapImage = 0;   // UIImage đang hiển thị (release frame sau)
+static BOOL g_espBitmapHiddenCache = YES;
+static int g_espBitmapFailStreak = 0;
+static BOOL g_espBitmapDisabled = NO;
+static uint8_t *g_espBitmapLocal = NULL; // buffer local tái dùng
+static CGContextRef g_espBitmapLocalCtx = NULL;
+static int g_espBitmapLocalW = 0, g_espBitmapLocalH = 0;
+// Cache frame đã ship: giống hệt thì khỏi render+ship (tiết kiệm 5MB write).
+static ESPBox2D g_espBitmapLast[ESPOverlayMaxBoxes];
+static int g_espBitmapLastCount = -1;
+static CGRect g_espBitmapLastBounds = CGRectZero;
+static int g_espBitmapLastOrient = -1;
+
+static BOOL ds_esp_bitmap_fail(const char *why) {
+    ESPLog("esp bitmap fail: %s (streak=%d)", why, g_espBitmapFailStreak + 1);
+    if (++g_espBitmapFailStreak >= 3) {
+        g_espBitmapDisabled = YES;
+        // Về per-box: vẽ lại hết (text/rect legacy có thể cũ).
+        for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
+        ESPLog("esp bitmap OFF -> per-box fallback");
+    }
+    return NO;
+}
+
+static void ds_esp_bitmap_teardown(RemoteCall *process) {
+    if (g_espBitmapLocalCtx) { CGContextRelease(g_espBitmapLocalCtx); g_espBitmapLocalCtx = NULL; }
+    if (g_espBitmapLocal) { free(g_espBitmapLocal); g_espBitmapLocal = NULL; }
+    g_espBitmapLocalW = g_espBitmapLocalH = 0;
+    g_espBitmapLastCount = -1;
+    if (process && process.trojanMem) {
+        void *freeSym = ds_remote_system_symbol("free");
+        void *ctxRelSym = ds_remote_system_symbol("CGBitmapContextRelease");
+        void *csRelSym = ds_remote_system_symbol("CGColorSpaceRelease");
+        if (freeSym && g_espBitmapAddr) DSRemoteArbCallWithTimeout(1, process, freeSym, g_espBitmapAddr);
+        if (ctxRelSym && g_espBitmapCtx) DSRemoteArbCallWithTimeout(1, process, ctxRelSym, g_espBitmapCtx);
+        if (csRelSym && g_espBitmapCS) DSRemoteArbCallWithTimeout(1, process, csRelSym, g_espBitmapCS);
+        // UIImageView + UIImage leak theo policy (dealloc UIView trên hijacked
+        // thread = crash SB); chỉ ẩn view.
+        if (g_espBitmapView) ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 1);
+    }
+    g_espBitmapView = 0; g_espBitmapAddr = 0; g_espBitmapCtx = 0; g_espBitmapCS = 0;
+    g_espBitmapImage = 0; g_espBitmapPxW = g_espBitmapPxH = 0;
+    g_espBitmapHiddenCache = YES;
+}
+
+static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
+    if (!process || !process.trojanMem) return NO;
+    int pxW = (int)(portraitBounds.size.width * ESP_BITMAP_SCALE + 0.5);
+    int pxH = (int)(portraitBounds.size.height * ESP_BITMAP_SCALE + 0.5);
+    if (pxW < 8 || pxH < 8 || pxW > 4096 || pxH > 4096) return NO;
+    if (g_espBitmapView && g_espBitmapCtx && g_espBitmapAddr &&
+        pxW == g_espBitmapPxW && pxH == g_espBitmapPxH) return YES;
+    // Size đổi/session mới -> dựng lại từ đầu.
+    ds_esp_bitmap_teardown(process);
+    if (!process.trojanMem) return NO;
+    void *mallocSym = ds_remote_system_symbol("malloc");
+    void *freeSym = ds_remote_system_symbol("free");
+    void *csSym = ds_remote_system_symbol("CGColorSpaceCreateDeviceRGB");
+    void *csRelSym = ds_remote_system_symbol("CGColorSpaceRelease");
+    void *ctxSym = ds_remote_system_symbol("CGBitmapContextCreate");
+    if (!mallocSym || !freeSym || !csSym || !ctxSym) return NO;
+    size_t bytes = (size_t)pxW * (size_t)pxH * 4;
+    uint64_t buf = (uint64_t)DSRemoteArbCallWithTimeout(2, process, mallocSym, (uint64_t)bytes);
+    if (!buf || !process.trojanMem) return NO;
+    uint64_t cs = (uint64_t)DSRemoteArbCallWithTimeout(1, process, csSym, (uint64_t)0);
+    if (!cs || !process.trojanMem) {
+        DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
+        return NO;
+    }
+    // RGBA8888 premultiplied-last, row = w*4.
+    uint64_t ctx = (uint64_t)DSRemoteArbCallWithTimeout(
+        2, process, ctxSym, buf, (uint64_t)pxW, (uint64_t)pxH, (uint64_t)8,
+        (uint64_t)(pxW * 4), cs, (uint64_t)(1 | (4 << 12)));
+    if (!ctx || !process.trojanMem) {
+        if (process.trojanMem) {
+            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
+            if (csRelSym) DSRemoteArbCallWithTimeout(1, process, csRelSym, cs);
+        }
+        return NO;
+    }
+    // UIImageView phủ container (pattern như label: init + setFrame + addSubview).
+    uint64_t viewClass = ds_remote_class(process, "UIImageView");
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t iv = viewClass && alloc ? remote_msg(process, viewClass, alloc, 0, 0, 0, 0) : 0;
+    BOOL ok = (iv && ds_remote_invoke_noarg_on_main(process, iv, "init"));
+    if (ok) {
+        uint64_t clear = ds_remote_get_object_on_main(process, ds_remote_class(process, "UIColor"), "clearColor");
+        ds_remote_set_rect_on_main(process, iv, "setFrame:", portraitBounds);
+        if (clear) ds_perform_on_springboard_main(process, iv, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+        ds_remote_set_u64_on_main(process, iv, "setUserInteractionEnabled:", 0);
+        ds_remote_set_u64_on_main(process, iv, "setHidden:", 1);
+        ds_perform_on_springboard_main(process, g_espContainer, ds_remote_sel(process, "addSubview:"), iv, YES);
+        ok = (process.trojanMem != 0);
+    }
+    if (!ok || !process.trojanMem) {
+        if (process.trojanMem) {
+            void *ctxRelSym = ds_remote_system_symbol("CGBitmapContextRelease");
+            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
+            if (csRelSym) DSRemoteArbCallWithTimeout(1, process, csRelSym, cs);
+            if (ctxRelSym) DSRemoteArbCallWithTimeout(1, process, ctxRelSym, ctx);
+        }
+        return NO;
+    }
+    g_espBitmapView = iv; g_espBitmapAddr = buf; g_espBitmapCtx = ctx; g_espBitmapCS = cs;
+    g_espBitmapPxW = pxW; g_espBitmapPxH = pxH;
+    g_espBitmapImage = 0; g_espBitmapHiddenCache = YES; g_espBitmapFailStreak = 0;
+    g_espBitmapLastCount = -1;
+    ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB)",
+           (double)portraitBounds.size.width, (double)portraitBounds.size.height,
+           pxW, pxH, (double)bytes / 1048576.0);
+    return YES;
+}
+
+// Context vẽ local (tái dùng theo size). Flip Y 1 lần lúc tạo để hệ tọa độ
+// trùng UIKit (gốc trên-trái) — không flip là ảnh ngược.
+static CGContextRef ds_esp_bitmap_local_ctx(int pxW, int pxH) {
+    if (g_espBitmapLocalCtx && g_espBitmapLocalW == pxW && g_espBitmapLocalH == pxH) {
+        return g_espBitmapLocalCtx;
+    }
+    if (g_espBitmapLocalCtx) { CGContextRelease(g_espBitmapLocalCtx); g_espBitmapLocalCtx = NULL; }
+    if (g_espBitmapLocal) { free(g_espBitmapLocal); g_espBitmapLocal = NULL; }
+    size_t bytes = (size_t)pxW * (size_t)pxH * 4;
+    g_espBitmapLocal = (uint8_t *)calloc(1, bytes);
+    if (!g_espBitmapLocal) return NULL;
+    static CGColorSpaceRef rgb = NULL;
+    if (!rgb) rgb = CGColorSpaceCreateDeviceRGB();
+    g_espBitmapLocalCtx = CGBitmapContextCreate(
+        g_espBitmapLocal, pxW, pxH, 8, pxW * 4, rgb,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    if (!g_espBitmapLocalCtx) return NULL;
+    CGContextTranslateCTM(g_espBitmapLocalCtx, 0, pxH);
+    CGContextScaleCTM(g_espBitmapLocalCtx, 1, -1);
+    g_espBitmapLocalW = pxW; g_espBitmapLocalH = pxH;
+    return g_espBitmapLocalCtx;
+}
+
+static BOOL ds_esp_bitmap_boxes_same(ESPBox2D *a, ESPBox2D *b) {
+    return a->x == b->x && a->y == b->y && a->w == b->w && a->h == b->h &&
+           a->distance == b->distance && a->health == b->health &&
+           a->visible == b->visible && a->actor == b->actor;
+}
+
+static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int count,
+                                   CGRect portraitBounds, int orientation,
+                                   CGFloat landW, CGFloat landH, CGPoint winCenter, int mapOrient) {
+    if (g_espBitmapDisabled) return NO;
+    if (!process || !process.trojanMem) return NO;
+    if (!ds_esp_bitmap_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure");
+    // Window show/hide mirror đường legacy.
+    BOOL wantHidden = (count <= 0);
+    if (wantHidden != g_espWindowHiddenCache) {
+        ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", wantHidden ? 1 : 0);
+        g_espWindowHiddenCache = wantHidden;
+    }
+    // Ẩn legacy views 1 lần (chế độ bitmap chúng không vẽ gì).
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        if (!g_espHiddenCache[i]) {
+            if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
+            if (g_espLabels[i]) ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
+            g_espHiddenCache[i] = YES;
+        }
+    }
+    int visN = 0;
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        ESPBox2D b = boxes[i];
+        if (!(b.visible == 0 || b.w < 1.0f || b.h < 2.0f)) visN++;
+    }
+    if (wantHidden || visN == 0) {
+        if (!g_espBitmapHiddenCache) {
+            ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 1);
+            g_espBitmapHiddenCache = YES;
+        }
+        memcpy(g_espBitmapLast, boxes, sizeof(g_espBitmapLast));
+        g_espBitmapLastCount = count;
+        g_espBitmapLastBounds = portraitBounds;
+        g_espBitmapLastOrient = orientation;
+        return YES;
+    }
+    // Frame giống hệt đã ship -> khỏi render+ship (tiết kiệm 5MB write).
+    BOOL same = (count == g_espBitmapLastCount &&
+                 orientation == g_espBitmapLastOrient &&
+                 CGRectEqualToRect(portraitBounds, g_espBitmapLastBounds));
+    for (int i = 0; same && i < ESPOverlayMaxBoxes; i++) {
+        if (!ds_esp_bitmap_boxes_same(&boxes[i], &g_espBitmapLast[i])) same = NO;
+    }
+    if (same) return YES;
+    // Render local vào buffer tái dùng (đỏ viền 2pt + chữ trắng 10pt bold,
+    // y hệt legacy: border đỏ, label trắng "12m 87%").
+    float sc = (float)ESP_BITMAP_SCALE;
+    CGContextRef ctx = ds_esp_bitmap_local_ctx(g_espBitmapPxW, g_espBitmapPxH);
+    if (!ctx) return ds_esp_bitmap_fail("localctx");
+    CGContextClearRect(ctx, CGRectMake(0, 0, g_espBitmapPxW, g_espBitmapPxH));
+    CGContextSetStrokeColorWithColor(ctx, [UIColor redColor].CGColor);
+    CGFloat lw = 2.0 * sc;
+    CGContextSetLineWidth(ctx, lw);
+    static UIFont *s_bmpFont = nil;
+    static NSDictionary *s_bmpAttrs = nil;
+    static dispatch_once_t s_bmpOnce;
+    dispatch_once(&s_bmpOnce, ^{
+        s_bmpFont = [UIFont boldSystemFontOfSize:10.0 * sc];
+        NSShadow *sh = [[NSShadow alloc] init];
+        sh.shadowColor = [UIColor blackColor];
+        sh.shadowOffset = CGSizeMake(0, 1.0 * sc);
+        sh.shadowBlurRadius = 1.0 * sc;
+        s_bmpAttrs = @{NSFontAttributeName: s_bmpFont,
+                       NSForegroundColorAttributeName: [UIColor whiteColor],
+                       NSShadowAttributeName: sh};
+    });
+    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
+        ESPBox2D b = boxes[i];
+        if (b.visible == 0 || b.w < 1.0f || b.h < 2.0f) continue;
+        if (!isfinite(b.x) || !isfinite(b.y) || !isfinite(b.w) || !isfinite(b.h)) continue;
+        CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
+                                         landW, landH, winCenter, mapOrient);
+        CGRect r = CGRectMake(fullBox.origin.x * sc + lw * 0.5,
+                              fullBox.origin.y * sc + lw * 0.5,
+                              fullBox.size.width * sc - lw,
+                              fullBox.size.height * sc - lw);
+        if (r.size.width < 2 || r.size.height < 4) continue;
+        CGContextStrokeRect(ctx, r);
+        char distTxt[24] = {0};
+        if (b.health >= 0 && b.health <= 100) {
+            snprintf(distTxt, sizeof(distTxt), "%.0fm %d%%", b.distance, b.health);
+        } else {
+            snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
+        }
+        NSString *s = [NSString stringWithUTF8String:distTxt];
+        if (!s) continue;
+        CGSize ts = [s sizeWithAttributes:s_bmpAttrs];
+        CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
+        CGPoint lc = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
+                                      landW, landH, winCenter, mapOrient);
+        [s drawAtPoint:CGPointMake(lc.x * sc - ts.width * 0.5, lc.y * sc - ts.height * 0.5)
+        withAttributes:s_bmpAttrs];
+    }
+    // Pool riêng cho UIImage autorelease (bitmap branch chạy trước pool chung).
+    BOOL beganPool = (s_dsPoolDepth == 0);
+    ds_remote_pool_begin(process);
+    @try {
+        size_t bytes = (size_t)g_espBitmapPxW * (size_t)g_espBitmapPxH * 4;
+        if (![process remote_write:g_espBitmapAddr from:g_espBitmapLocal size:(uint64_t)bytes]) {
+            return ds_esp_bitmap_fail("write");
+        }
+        void *createImageSym = ds_remote_system_symbol("CGBitmapContextCreateImage");
+        void *cgRelSym = ds_remote_system_symbol("CGImageRelease");
+        if (!createImageSym) return ds_esp_bitmap_fail("sym");
+        uint64_t cg = (uint64_t)DSRemoteArbCallWithTimeout(2, process, createImageSym, g_espBitmapCtx);
+        if (!cg || !process.trojanMem) return ds_esp_bitmap_fail("createimage");
+        uint64_t uiClass = ds_remote_class(process, "UIImage");
+        uint64_t img = (uiClass && process.trojanMem)
+            ? remote_msg(process, uiClass, ds_remote_sel(process, "imageWithCGImage:"), cg, 0, 0, 0) : 0;
+        if (cgRelSym && process.trojanMem) DSRemoteArbCallWithTimeout(1, process, cgRelSym, cg);
+        if (!img || !process.trojanMem) return ds_esp_bitmap_fail("uiimage");
+        ds_perform_on_springboard_main(process, g_espBitmapView, ds_remote_sel(process, "setImage:"), img, YES);
+        if (!process.trojanMem) {
+            return ds_esp_bitmap_fail("setimage");
+        }
+        if (g_espBitmapImage && process.trojanMem) {
+            remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+        }
+        g_espBitmapImage = img;
+        if (g_espBitmapHiddenCache) {
+            ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 0);
+            g_espBitmapHiddenCache = NO;
+        }
+    } @finally {
+        if (beganPool) ds_remote_pool_end(process);
+    }
+    if (!process.trojanMem) return ds_esp_bitmap_fail("died");
+    g_espBitmapFailStreak = 0;
+    memcpy(g_espBitmapLast, boxes, sizeof(g_espBitmapLast));
+    g_espBitmapLastCount = count;
+    g_espBitmapLastBounds = portraitBounds;
+    g_espBitmapLastOrient = orientation;
+    return YES;
+}
+
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
@@ -2365,6 +2654,13 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                       orientation == UIInterfaceOrientationLandscapeRight))
                         ? orientation
                         : UIInterfaceOrientationPortrait;
+    // Bitmap mode (kernrw19, theo DSGames): render 1 ảnh local + 1 setImage:.
+    // Tiêu thụ frame (return) khi thành công HOẶC khi frame giống hệt đã ship
+    // (khỏi ship lại); fail thì rơi xuống đường per-box cũ bên dưới.
+    if (!g_espBitmapDisabled) {
+        if (ds_esp_bitmap_present(process, boxes, count, portraitBounds, orientation,
+                                  landW, landH, winCenter, mapOrient)) return;
+    }
     // Pre-check idle thuần CPU (0 remote call): frame nào không có gì đổi —
     // không box dịch/vẽ lại, không label/text đến hạn, không đổi container/
     // orient, không diag 1 lần — thì return luôn, khỏi mở pool (tiết kiệm
@@ -2778,7 +3074,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw18"
+#define DS_ESP_BUILD_TAG "kernrw19"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3458,6 +3754,11 @@ static void ds_finish_disable(void) {
     g_hudActive.store(false);
     if (process) {
         @try {
+            // Nhả buffer/ctx bitmap trong SB trước khi huỷ session (kẻo rò
+            // ~5MB mỗi lần tắt/bật). UIImageView leak theo policy chung.
+            ds_esp_bitmap_teardown(process);
+        } @catch (__unused NSException *e) {}
+        @try {
             ds_remove_springboard_hud(process);
         } @catch (NSException *exception) {
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] HUD remove exception: %{public}@", exception.reason);
@@ -3496,6 +3797,7 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
+    g_espBitmapDisabled = NO; // phiên mới thử lại bitmap từ đầu
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;

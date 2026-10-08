@@ -56,6 +56,13 @@
 // (gate 29.3ms > tick 25ms) cũng hết.
 #define ESP_PRESENT_HZ 40
 
+// Bitmap overlay (kernrw19, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
+// suốt NGAY TRONG APP rồi ship 1 lần/frame (remote_write + setImage:).
+// Scale 2 = chữ/viền nét trên màn 3x; 812x375pt -> ~4.9MB/frame (remote_write
+// qua shmem cache chỉ là memcpy sau frame đầu). Scale 1 = ~1.2MB/frame nếu
+// cần tiết kiệm băng thông mach.
+#define ESP_BITMAP_SCALE 2
+
 // Chiều cao kẻ địch (cm) — CHỈ dùng làm mặc định khi không đọc được
 // Mesh.Bounds.BoxExtent.Z (thường đọc được: height = extent.Z*2).
 // QUAN TRỌNG: RootComponent.RelativeLocation là TÂM (capsule/mesh pivot center),
