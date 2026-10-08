@@ -2619,7 +2619,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw15"
+#define DS_ESP_BUILD_TAG "kernrw16"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2656,6 +2656,7 @@ static std::atomic<uint32_t> s_presentMaxUs{0};
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
 static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
+    ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
     @try {
         if (frame->count < 0) {
@@ -2689,9 +2690,27 @@ static void ds_esp_present_single(DSESPFrame *frame) {
             }
         }
     } @catch (NSException *exception) {
+        // Vào ESP.log (không chỉ os_log): nếu SB chết ngay sau dòng này thì
+        // breadcrumb chỉ đúng exception làm respring.
+        ESPLog("ESP present failed: %@", exception.reason);
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP present failed: %{public}@", exception.reason);
     }
     free(frame);
+}
+
+// Heartbeat từ BRIDGE QUEUE: nếu SB chết thì log vẫn viết được (queue này chỉ
+// treo khi app chết). Dòng cuối mất dấu = bridge queue/app dừng — so với
+// BOX-SUM (work queue) và scan (scan queue) để xác định queue nào chết trước.
+static void ds_esp_present_heartbeat(void) {
+    static CFAbsoluteTime s_lastHb = 0;
+    CFAbsoluteTime nowHb = CFAbsoluteTimeGetCurrent();
+    if (nowHb - s_lastHb < 5.0) return;
+    s_lastHb = nowHb;
+    uint32_t n = s_presentN.load(std::memory_order_relaxed);
+    uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
+    double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
+    ESPLog("present hb: n=%u pAvg=%.1f pMax=%.1fms",
+           n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
 static void ds_esp_presentation_loop(void) {
@@ -3071,6 +3090,7 @@ static void ds_esp_tick(void) {
                    (double)CGRectGetHeight(sbBounds));
         }
     } @catch (NSException *exception) {
+        ESPLog("ESP overlay update failed: %@", exception.reason);
         os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP overlay update failed: %{public}@", exception.reason);
     }
 }
@@ -3287,11 +3307,13 @@ static void ds_finish_disable(void) {
             // Ẩn ESP overlay trước khi huỷ session (views leak có chủ ý như HUD).
             if (g_espWindow) ds_esp_overlay_hide(process);
         } @catch (NSException *exception) {
+            ESPLog("ESP hide exception: %@", exception.reason);
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] ESP hide exception: %{public}@", exception.reason);
         }
         @try {
             [process destroyRemoteCall];
         } @catch (NSException *exception) {
+            ESPLog("destroyRemoteCall exception: %@", exception.reason);
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] destroyRemoteCall exception: %{public}@", exception.reason);
         }
     }
