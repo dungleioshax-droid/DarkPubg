@@ -2652,6 +2652,7 @@ static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam asyn
 static std::atomic<uint64_t> s_presentUsTotal{0};
 static std::atomic<uint32_t> s_presentN{0};
 static std::atomic<uint32_t> s_presentMaxUs{0};
+static void ds_esp_present_heartbeat(void);
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE (RemoteCall không thread-safe).
 static void ds_esp_present_single(DSESPFrame *frame) {
