@@ -2414,6 +2414,16 @@ static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
     size_t bytes = (size_t)pxW * (size_t)pxH * 4;
     uint64_t buf = (uint64_t)DSRemoteArbCallWithTimeout(2, process, mallocSym, (uint64_t)bytes);
     if (!buf || !process.trojanMem) return NO;
+    // Fault-in toàn bộ pages trong SB (malloc mới là zero-fill chưa chạm —
+    // vmmapremotepage bên remote_write có thể không map được page chưa hiện).
+    void *memsetSym = ds_remote_system_symbol("memset");
+    if (memsetSym && process.trojanMem) {
+        DSRemoteArbCallWithTimeout(2, process, memsetSym, buf, (uint64_t)0, (uint64_t)bytes);
+        if (!process.trojanMem) {
+            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
+            return NO;
+        }
+    }
     uint64_t cs = (uint64_t)DSRemoteArbCallWithTimeout(1, process, csSym, (uint64_t)0);
     if (!cs || !process.trojanMem) {
         DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
@@ -3074,7 +3084,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw19"
+#define DS_ESP_BUILD_TAG "kernrw20"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
