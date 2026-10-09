@@ -2446,95 +2446,89 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         return 0;
     }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
-    for (int i = 0; i < maxBoxes; i++) {
-        outBoxes[i] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
-    }
-
     int n = 0;
     uint32_t cHid = 0, cPos = 0, cW2s = 0, cSelf = 0, cH = 0;
-    // Đọc xoay vòng kiểu Kernel (s_frame % 3): mỗi refresh chỉ đọc tươi 1/2
-    // tracked (luân phiên chẵn/lẻ), lượt còn lại TÁI DÙNG vị trí cache nhưng
-    // vẫn project bằng camera TƯƠI của tick này -> xoay nhanh vẫn bám dính,
-    // số read kernel giảm ~50% (áp lực lock region-map giảm theo). Chưa từng
-    // đọc (h->at<=0) thì đọc ngay bất kể lượt. Ẩn/chết/HP cũng chỉ đọc ở lượt
-    // của nó — box của địch vừa chết/ẩn nán lại tối đa 1 tick (25ms).
-    // Ngoại suy/blend vận tốc đã bỏ (thứ làm box "đứng im rồi nhảy").
-    static int s_posTurn = 0;
-    s_posTurn ^= 1;
+    // Đọc vị trí MỖI tick rồi project bằng camera TƯƠI của chính tick đó.
+    //
+    // KHÔNG còn xoay vòng 1/2 tracked như kernrw17..kernrw23: lượt nghỉ dùng
+    // lại vị trí cache nên địch ĐANG CHẠY chỉ được cập nhật 20Hz trong khi
+    // frame vẫn ship 40Hz -> box nhảy từng bước, kèm trễ pha tới 50ms. Ở cự ly
+    // 10m, 0.3m dịch chuyển trong 50ms ~ 12pt -> đúng kiểu "giật giật, không
+    // bám theo địch" (xoay camera thì vẫn mượt vì basis tươi, nên lỗi chỉ lộ
+    // khi địch di chuyển).
+    //
+    // Chi phí đọc lại rất thấp: vùng đã map thì mỗi lần đọc chỉ là memcpy dưới
+    // shared_lock (~µs, xem ESPReadSharedLocked) chứ không map lại; ~8 tracked
+    // x 4 read x 40Hz vẫn không đáng kể.
+    //
+    // Ngoại suy/blend vận tốc vẫn KHÔNG dùng (thứ từng làm box "đứng im rồi
+    // nhảy"); đọc đủ nhịp nên không cần ngoại suy.
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();
         ESPPosHist *h = ESPPosHistSlot(tr->actor);
         ESPVector pos = {0,0,0};
-        BOOL readTurn = (!h->valid || h->at <= 0) || ((((int)i + s_posTurn) & 1) == 0);
-        if (!readTurn) {
-            // Lượt nghỉ: KHÔNG chạm kernel, dùng vị trí/HP cache; project bên
-            // dưới vẫn dùng basis camera tươi của tick này.
-            pos = h->pos;
-        } else {
-            // Đến hạn đọc: đọc cả cờ ẩn/chết ở đây (thay vì đọc mỗi frame).
-            // bHidden ở 0xE8, bDead ở 0xE7C — cách xa nên không gộp 1 lần đọc;
-            // đọc bHidden trước, ẩn/chết thì khỏi đọc bDead.
-            uint8_t flags[2] = {0, 0};
-            if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
-                if (flags[0] & 0x1) { cHid++; h->valid = NO; continue; }
-                if (tr->kind != 3) {
-                    if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
-                        if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
-                    }
+        // Đọc cả cờ ẩn/chết ngay tại đây (thay vì đọc mỗi frame ở đường khác).
+        // bHidden ở 0xE8, bDead ở 0xE7C — cách xa nên không gộp 1 lần đọc;
+        // đọc bHidden trước, ẩn/chết thì khỏi đọc bDead.
+        uint8_t flags[2] = {0, 0};
+        if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
+            if (flags[0] & 0x1) { cHid++; h->valid = NO; continue; }
+            if (tr->kind != 3) {
+                if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
+                    if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
                 }
             }
-            ESPVector fresh = {0,0,0};
-            if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
-            // Vận tốc = delta 2 mẫu gần nhất với bộ lọc EMA (Exponential Moving Average)
-            // để triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
-            BOOL sampleReject = NO;
-            if (h->valid && h->at > 0) {
-                double ddt = nowF - h->at;
-                float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
-                float jump = sqrtf(dx*dx + dy*dy + dz*dz);
-                if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
-                    ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
-                    float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-                    if (sp > ESP_MAX_VEL) {
-                        float s = ESP_MAX_VEL / sp;
-                        v.x *= s; v.y *= s; v.z *= s;
-                    }
-                    if (h->vel.x != 0 || h->vel.y != 0 || h->vel.z != 0) {
-                        const float alphaVel = 0.45f;
-                        h->vel.x = h->vel.x * (1.0f - alphaVel) + v.x * alphaVel;
-                        h->vel.y = h->vel.y * (1.0f - alphaVel) + v.y * alphaVel;
-                        h->vel.z = h->vel.z * (1.0f - alphaVel) + v.z * alphaVel;
-                    } else {
-                        h->vel = v;
-                    }
-                    h->outliers = 0;
-                } else {
-                    // Mẫu bất thường: không ngoại suy.
-                    h->vel = (ESPVector){0, 0, 0};
-                    if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
-                        sampleReject = YES;
-                    } else {
-                        h->outliers = 0;
-                    }
-                }
-            } else {
-                h->vel = (ESPVector){0, 0, 0};
-                h->outliers = 0;
-            }
-            h->at = nowF;
-            h->valid = YES;
-            if (sampleReject) {
-                pos = h->pos;      // giữ vị trí cũ cho frame này
-            } else {
-                // Đọc mỗi frame nên mẫu luôn tươi: theo thẳng vị trí mới.
-                // (Blend EMA trước đây tạo trễ pha -> box đứng im rồi nhảy.)
-                h->pos = fresh;
-                pos = h->pos;
-            }
-            // HP cho thanh máu, cùng nhịp với vị trí (máu không cần ngoại suy).
-            h->hpPct = ESPHPPercent(vmMap, tr->actor, tr->kind);
         }
+        ESPVector fresh = {0,0,0};
+        if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
+        // Vận tốc = delta 2 mẫu gần nhất với bộ lọc EMA (Exponential Moving Average)
+        // để triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
+        BOOL sampleReject = NO;
+        if (h->valid && h->at > 0) {
+            double ddt = nowF - h->at;
+            float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
+            float jump = sqrtf(dx*dx + dy*dy + dz*dz);
+            if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
+                ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
+                float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+                if (sp > ESP_MAX_VEL) {
+                    float s = ESP_MAX_VEL / sp;
+                    v.x *= s; v.y *= s; v.z *= s;
+                }
+                if (h->vel.x != 0 || h->vel.y != 0 || h->vel.z != 0) {
+                    const float alphaVel = 0.45f;
+                    h->vel.x = h->vel.x * (1.0f - alphaVel) + v.x * alphaVel;
+                    h->vel.y = h->vel.y * (1.0f - alphaVel) + v.y * alphaVel;
+                    h->vel.z = h->vel.z * (1.0f - alphaVel) + v.z * alphaVel;
+                } else {
+                    h->vel = v;
+                }
+                h->outliers = 0;
+            } else {
+                // Mẫu bất thường (teleport/respawn): bỏ 1 frame rồi mới nhận.
+                h->vel = (ESPVector){0, 0, 0};
+                if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
+                    sampleReject = YES;
+                } else {
+                    h->outliers = 0;
+                }
+            }
+        } else {
+            h->vel = (ESPVector){0, 0, 0};
+            h->outliers = 0;
+        }
+        h->at = nowF;
+        h->valid = YES;
+        if (sampleReject) {
+            pos = h->pos;      // giữ vị trí cũ cho frame này
+        } else {
+            // Đọc mỗi tick nên mẫu luôn tươi: theo thẳng vị trí mới.
+            h->pos = fresh;
+            pos = h->pos;
+        }
+        // HP cho thanh máu, cùng nhịp với vị trí (máu không cần ngoại suy).
+        h->hpPct = ESPHPPercent(vmMap, tr->actor, tr->kind);
         float sx = 0, sy = 0, dist = 0;
         if (!ESPCamBasisProject(&basis, pos, &sx, &sy, &dist)) { cW2s++; continue; }
         if (dist < 2.0f) { cSelf++; continue; }

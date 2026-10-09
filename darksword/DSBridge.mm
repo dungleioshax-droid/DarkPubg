@@ -3195,7 +3195,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw23"
+#define DS_ESP_BUILD_TAG "kernrw24"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3507,10 +3507,11 @@ static void ds_esp_tick(void) {
 
         CFAbsoluteTime now2 = CFAbsoluteTimeGetCurrent();
         int orient = ds_esp_game_orientation();
-        // Refresh MỖI tick. ESPEngineRefreshBoxes đọc xoay vòng kiểu Kernel:
-        // mỗi tick chỉ đọc tươi 1/2 tracked (luân phiên), lượt còn lại tái
-        // dùng vị trí cache nhưng project bằng camera TƯƠI -> bám khi xoay,
-        // số read kernel giảm ~50%. Camera POV đi page-cache (memcpy).
+        // Refresh MỖI tick. ESPEngineRefreshBoxes đọc vị trí TƯƠI của mọi
+        // tracked mỗi tick + camera POV tươi (đều qua region-map memcpy).
+        // kernrw17..kernrw23 đọc xoay vòng 1/2 tracked -> địch đang chạy chỉ
+        // cập nhật 20Hz trong khi frame ship 40Hz = box nhảy từng bước + trễ
+        // pha ("giật giật, không bám theo địch"); đã bỏ ở kernrw24.
         // Present mọi tick khi còn box.
         double minInterval = 0.5 / (double)ESP_REFRESH_HZ;
 
