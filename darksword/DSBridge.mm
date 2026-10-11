@@ -2393,7 +2393,10 @@ static uint64_t g_espBitmapCS = 0;      // colorspace (SB)
 static uint64_t g_espBitmapImage = 0;   // UIImage đang hiển thị (release frame sau)
 static BOOL g_espBitmapHiddenCache = YES;
 static int g_espBitmapFailStreak = 0;
-static BOOL g_espBitmapDisabled = NO;
+// kernrw24: TẮT bitmap mặc định (đơ máy ở 19-23 khi ship bitmap liên tục).
+// Per-box + invocation cache (kernrw18) đã chạy ổn định nhiều session.
+// Bật lại bitmap chỉ khi đã chốt nguyên nhân qua panic/jetsam log.
+static BOOL g_espBitmapDisabled = YES;
 static uint8_t *g_espBitmapLocal = NULL; // buffer local tái dùng
 static CGContextRef g_espBitmapLocalCtx = NULL;
 static int g_espBitmapLocalW = 0, g_espBitmapLocalH = 0;
@@ -3195,7 +3198,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw24"
+#define DS_ESP_BUILD_TAG "kernrw25"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4043,7 +4046,7 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
-    g_espBitmapDisabled = NO; // phiên mới thử lại bitmap từ đầu
+    g_espBitmapDisabled = YES; // kernrw24: giữ bitmap TẮT (đơ máy 19-23)
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;
