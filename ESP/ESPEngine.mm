@@ -1065,8 +1065,20 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     ESPVector samplePos = {0,0,0};
     BOOL hasPos = NO;
     int logged = 0;
+    // Budget thời gian cho vòng phân loại (kernrw34): lúc game loading mỗi
+    // actor tốn hàng chục ms (GNames lạnh + tranh lock với tick 40Hz + discover
+    // budget 48) — log thực tế có lượt scan 23.3s. Quá 0.5s thì dừng, phần còn
+    // lại để lượt quét sau (TTL 0.8s) + discover (0.12s) phân loại nốt. Lượt
+    // thường chỉ 0.0-0.2s nên ngưỡng này không bao giờ chạm khi vào trận.
+    bool scanCompleted = true;
     for (uint32_t i = 0; i < scanN; i++) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
+        if ((i & 63) == 0 && i > 0 && CFAbsoluteTimeGetCurrent() - t0 > 0.5) {
+            ESPLog("scan budget cut at %u/%u (0.5s) — phan con de luot sau",
+                   (unsigned)i, (unsigned)scanN);
+            scanCompleted = false;
+            break;
+        }
         // Nhường mutex read cho box refresh chen vào: scan giữ từng read hàng
         // chục ms, không nhường thì refresh đói tới vài giây (max 4.8s đo thực
         // tế). Nhịp 15Hz/1ms thay vì 64/3ms: cửa sổ actor giờ đi qua page cache
@@ -1154,10 +1166,23 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         // read fail, actor chưa spawn) mà xoá là refresh 60Hz trả 0 box cho tới
         // lượt quét sau (TTL 2s) — nhìn như box tắt/bật giật. Xoá tracked là
         // việc của ESPVerdictResetIfWorldChanged khi ĐỔI world.
+        // Budget-cut (dừng giữa chừng vì quá 0.5s): MERGE thay vì swap để
+        // không rơi mất địch đã track (discover + lượt sau bù phần còn lại).
         std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (!localTracked.empty()) {
-            g_espTracked.swap(localTracked);
-            g_espTrackGen++;
+            if (scanCompleted) {
+                g_espTracked.swap(localTracked);
+                g_espTrackGen++;
+            } else {
+                for (const auto &nt : localTracked) {
+                    bool exists = false;
+                    for (const auto &t : g_espTracked) {
+                        if (t.actor == nt.actor) { exists = true; break; }
+                    }
+                    if (!exists) g_espTracked.push_back(nt);
+                }
+                g_espTrackGen++;
+            }
         }
         g_espPasses++;
     }
@@ -1192,10 +1217,21 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         } else if (enemies > 0) {
             // ĐÃ có địch nhờ VTable/heuristic -> không cần tên class nữa.
         } else {
-            s_unameTries++;
-            g_espUName = ESPResolveUName(vmMap, gameBase);
-            std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-            ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
+            // Cooldown 10s giữa các lần thử (kernrw34): lúc game loading mỗi
+            // lần walk GNames tốn hàng giây trên cache lạnh + tranh lock với
+            // tick 40Hz (log: tries 1-4 chạy 4s liên tiếp). Không vội —
+            // VTable/heuristic vẫn bắt địch trong lúc chờ GNames.
+            static CFAbsoluteTime s_unameLastTry = 0;
+            CFAbsoluteTime nowU = CFAbsoluteTimeGetCurrent();
+            if (s_unameTries > 0 && nowU - s_unameLastTry < 10.0) {
+                // bỏ qua lượt này, chờ nguội
+            } else {
+                s_unameLastTry = nowU;
+                s_unameTries++;
+                g_espUName = ESPResolveUName(vmMap, gameBase);
+                std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+                ESPLog("uname=0x%llx vtableKnown=%d tries=%d", (unsigned long long)g_espUName, g_espPlayerVTable ? 1 : 0, s_unameTries);
+            }
         }
     }
     if (verbose) {
