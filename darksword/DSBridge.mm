@@ -180,7 +180,7 @@ static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
 static int g_espRectsCap = 0;            // số CGRect buffer chứa được
-static BOOL g_espPathDisabled = NO;       // kernrw26: BẬT lại CAShapeLayer batching (5 msg/frame thay vì ~35 per-box). Việc tắt ở bản orientfix1 chỉ để bisect respring, chưa từng chứng minh path là thủ phạm; fail 3 lần liên tiếp tự về per-box.
+static BOOL g_espPathDisabled = YES;       // kernrw27: path layer GÂY RESPRING (xác nhận ở kernrw26: bật -> respring vài giây sau khi ESP hiện) -> tắt vĩnh viễn. Đòn tối ưu còn lại chỉ là per-box + invocation cache.
 static unsigned long g_espPathCalls = 0;
 static unsigned long g_espPathBoxes = 0;
 static unsigned long g_espPathFails = 0;
@@ -3198,7 +3198,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw26"
+#define DS_ESP_BUILD_TAG "kernrw27"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4047,7 +4047,7 @@ static void ds_finish_disable(void) {
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
     g_espBitmapDisabled = YES; // kernrw24: giữ bitmap TẮT (đơ máy 19-23)
-    g_espPathDisabled = NO; // kernrw26: phiên mới thử lại path batching
+    g_espPathDisabled = YES; // kernrw27: path batching đã chứng minh gây respring
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;
