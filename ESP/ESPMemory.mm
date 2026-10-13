@@ -26,6 +26,7 @@
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
+#import <mach/message.h>
 #import <mach/vm_region.h>
 #import <mach-o/loader.h>
 #include <atomic>
