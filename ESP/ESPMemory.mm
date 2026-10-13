@@ -26,7 +26,6 @@
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
-#import <mach/message.h>
 #import <mach/vm_region.h>
 #import <mach-o/loader.h>
 #include <atomic>
@@ -176,10 +175,11 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
     mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
     mach_vm_address_t regionAddr = (mach_vm_address_t)local;
     mach_vm_size_t regionSize = 0;
+    // 0 = MACH_MSG_TYPE_NONE_SEND (hằng đó không được export trong một số
+    // SDK; giá trị của nó chính là 0).
     kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
                                                (vm_region_recurse_info_t)&info, &infoCnt,
-                                               NULL, MACH_MSG_TYPE_NONE_SEND,
-                                               MACH_MSG_TYPE_NONE_SEND, NULL);
+                                               NULL, 0, 0, NULL);
     if (kr != KERN_SUCCESS || regionSize == 0) {
         static std::atomic<uint32_t> s_checkErr{0};
         uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;
