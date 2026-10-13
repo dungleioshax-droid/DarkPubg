@@ -64,7 +64,7 @@ extern "C" kern_return_t mach_vm_region_recurse(vm_map_t target_task,
                                                mach_port_t *object_name,
                                                mach_msg_type_number_t object_nameCnt,
                                                mach_msg_type_number_t object_nameDealloc,
-                                               vm32_size_t *pages_dirty);
+                                               uint32_t *pages_dirty);
 
 // vmmapremoterange()/vmmapremotepage() không re-entrant: nó tạo memory entry rồi
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
@@ -193,10 +193,15 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
     mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
     mach_vm_address_t regionAddr = (mach_vm_address_t)local;
     mach_vm_size_t regionSize = 0;
-    // object_name = NULL nên không cần dealloc port sau đó.
+    // TUYỆT ĐỐI không truyền NULL cho out-param: MIG stub của kernel ghi kết
+    // quả ra các con trỏ này; NULL = kernel ghi vào địa chỉ 0 = panic/reboot
+    // ngay lần check đầu (đúng kiểu "bấm HUD chưa kịp hiện đã respring").
+    mach_port_t objName = MACH_PORT_NULL;
+    uint32_t pagesDirty = 0;
     kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
                                                (vm_region_recurse_info_t)&info, &infoCnt,
-                                               NULL, 0, 0, NULL);
+                                               &objName, 0, 0, &pagesDirty);
+    if (objName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, objName);
     if (kr != KERN_SUCCESS || regionSize == 0) {
         static std::atomic<uint32_t> s_checkErr{0};
         uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;
