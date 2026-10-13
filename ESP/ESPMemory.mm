@@ -26,6 +26,7 @@
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
+#import <mach/mach_vm.h>
 #import <mach/vm_region.h>
 #import <mach-o/loader.h>
 #include <atomic>
@@ -173,14 +174,12 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
     if (!local || !span) return 0;
     vm_region_basic_info_data_64_t info;
     mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
-    vm_address_t regionAddr = (vm_address_t)local;
-    vm_size_t regionSize = 0;
+    mach_vm_address_t regionAddr = (mach_vm_address_t)local;
+    mach_vm_size_t regionSize = 0;
     // object_name = NULL nên không cần dealloc port sau đó.
-    // (vm_region_recurse, không phải mach_vm_region — bản sau bị deprecated
-    //  và build này bật -Werror=deprecated-declarations.)
-    kern_return_t kr = vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
-                                         (vm_region_recurse_info_t)&info, &infoCnt,
-                                         NULL, 0, 0, NULL);
+    kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
+                                               (vm_region_recurse_info_t)&info, &infoCnt,
+                                               NULL, 0, 0, NULL);
     if (kr != KERN_SUCCESS || regionSize == 0) {
         static std::atomic<uint32_t> s_checkErr{0};
         uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;
