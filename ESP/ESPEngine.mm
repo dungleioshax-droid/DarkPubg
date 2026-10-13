@@ -2060,6 +2060,23 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
         // ESPMemoryRead (0x38 < 1 page) đi đường region map — sau lần đầu là
         // memcpy thuần; trước đây ESPReadWindow map page mới mỗi lần (~20ms).
         if (ESPMemoryRead(vmMap, pov, raw, sizeof(raw))) {
+            // Đọc kép chống rách (kernrw32): POV 56B đọc đúng lúc game đang
+            // ghi -> trộn 2 frame (log kernrw31: dYaw 40-57° + dLoc 2m trong
+            // 1 tick, ~10 lần/85s lúc combat; rách nhỏ hơn ngưỡng guard vẫn
+            // lọt -> box nhảy 60-80px). Đọc 2 lần cách nhau µs: giống nhau
+            // (memcmp) thì lấy; khác -> đọc lần 3, lấy mẫu trùng 2/3; không
+            // trùng -> giữ mẫu đầu (fail-open, guard ngưỡng ở refresh bắt
+            // nốt). Chi phí +1 memcpy 56B/tick. Không còn tick camera stale.
+            uint8_t raw2[0x38];
+            if (ESPMemoryRead(vmMap, pov, raw2, sizeof(raw2)) &&
+                memcmp(raw, raw2, sizeof(raw)) != 0) {
+                uint8_t raw3[0x38];
+                if (ESPMemoryRead(vmMap, pov, raw3, sizeof(raw3)) &&
+                    memcmp(raw, raw3, sizeof(raw)) != 0 &&
+                    memcmp(raw2, raw3, sizeof(raw2)) == 0) {
+                    memcpy(raw, raw2, sizeof(raw)); // A rách, B==C đúng
+                }
+            }
             memcpy(&loc, raw + ESPOff_POV_Location, sizeof(loc));
             memcpy(&rot, raw + ESPOff_POV_Rotation, sizeof(rot));
             memcpy(&fov, raw + ESPOff_POV_FOV, sizeof(fov));
