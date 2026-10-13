@@ -26,7 +26,6 @@
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach/vm_region.h>
 #import <mach-o/loader.h>
 #include <atomic>
@@ -53,6 +52,19 @@ extern "C" uint64_t vmmapfindentry(uint64_t vmMap, uint64_t address);
 extern "C" void vmmapiterateentries(uint64_t vmmapptr, void (^itblock)(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop));
 extern "C" void vmentrygetrange(uint64_t entry, uint64_t *startout, uint64_t *endout);
 extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
+// mach_vm_region_recurse: header <mach/mach_vm.h> bị SDK iOS chặn ("mach_vm.h
+// unsupported") nên tự khai báo — y hệt cách codebase đã tự khai báo
+// mach_vm_deallocate ở trên. Dùng để hỏi kernel "mapping localAddress của ta
+// còn sống không" (xem ESPLocalRangeCheck).
+extern "C" kern_return_t mach_vm_region_recurse(vm_map_t target_task,
+                                               mach_vm_address_t *address,
+                                               mach_vm_size_t *size,
+                                               vm_region_recurse_info_t info,
+                                               mach_msg_type_number_t *infoCnt,
+                                               mach_port_t *object_name,
+                                               mach_msg_type_number_t object_nameCnt,
+                                               mach_msg_type_number_t object_nameDealloc,
+                                               vm32_inode_t *pages_dirty);
 
 // vmmapremoterange()/vmmapremotepage() không re-entrant: nó tạo memory entry rồi
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
