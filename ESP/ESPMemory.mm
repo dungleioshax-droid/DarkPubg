@@ -64,7 +64,7 @@ extern "C" kern_return_t mach_vm_region_recurse(vm_map_t target_task,
                                                mach_port_t *object_name,
                                                mach_msg_type_number_t object_nameCnt,
                                                mach_msg_type_number_t object_nameDealloc,
-                                               vm32_inode_t *pages_dirty);
+                                               vm32_size_t *pages_dirty);
 
 // vmmapremoterange()/vmmapremotepage() không re-entrant: nó tạo memory entry rồi
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
