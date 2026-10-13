@@ -268,6 +268,11 @@ static CFAbsoluteTime g_espVMAt = 0;
 static uint64_t g_espUName = 0; // GNames đã giải mã cho base hiện tại
 static uint64_t g_espPlayerVTable = 0; // VTable class player đã học (primary)
 static std::unordered_set<uint64_t> g_espPlayerVTables; // Mọi VTable player/bot đã biết
+// VTable rác đã biết (lựu đạn, đạn, loot, xe, hiệu ứng...): gặp lại thì verdict
+// 2 ngay bằng 1 lần đọc, khỏi FName walk qua GNames. Học từ mọi verdict-2.
+// Đây là đường nhanh khiến 91 unknown chỉ còn vài FName walk mỗi vòng (Kernel
+// làm tương tự với PlayerVTable/GrenadeVTable). Xả theo world như player set.
+static std::unordered_set<uint64_t> g_espJunkVTables;
 static int s_unameTries = 0; // Số lần thử giải mã GNames per game base
 static uint64_t s_camPC = 0;
 static uint64_t s_camWorld = 0;
@@ -348,6 +353,7 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espVerdictWorld = world;
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPlayerVTables.clear();
+        g_espJunkVTables.clear(); // world mới => học lại rác từ đầu
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
@@ -477,6 +483,18 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
             ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
             goto check_live;
         }
+        // 0b) VTable rác đã biết: verdict 2 ngay, 0 read thêm, KHỎI FName walk
+        // qua GNames (phần đắt nhất của phân loại). VTable định danh CLASS nên
+        // cùng class luôn cùng verdict; địa chỉ pool tái dùng khác class thì
+        // VTable khác -> rơi vào FName/heuristic như thường. Check player
+        // trước (ở trên) nên không bao giờ nuốt nhầm địch.
+        if (f.hasVtable && f.vtable && g_espJunkVTables.count(f.vtable) > 0) {
+            if (diag) diag->rule = 6;
+            ESPVerdictSetLocked(actor, 2, INT_MIN);
+            g_espTeamCache.erase(actor);
+            g_espVerdictVt[actor] = f.vtable;
+            return NO;
+        }
         // 1) FName qua GNames (như Kernel GetFName -> IsASTExtraPlayerCharacter)
         if (g_espUName && f.hasName) {
             char nm[64] = {0};
@@ -553,8 +571,13 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         if (diag && f.hasTarget && ESPIsUserPtr(f.tMesh)) diag->nearDummy = 1;
         ESPVerdictSetLocked(actor, 2, INT_MIN);
         g_espTeamCache.erase(actor);
-        // Nhớ VTable để lượt sau phát hiện object đổi class (tái dùng địa chỉ).
+        // Nhớ VTable để lượt sau phát hiện object đổi class (tái dùng địa chỉ),
+        // đồng thời dạy junk set để lần sau gặp class này thì skip FName walk.
         if (f.hasVtable) g_espVerdictVt[actor] = f.vtable;
+        if (f.hasVtable && f.vtable) {
+            if (g_espJunkVTables.size() > 4096) g_espJunkVTables.clear();
+            g_espJunkVTables.insert(f.vtable);
+        }
         if (diag) diag->rule = 0;
         return NO;
     }

@@ -19,7 +19,11 @@
 // Discover địch mới: khoảng (giây) giữa 2 lần + budget phân loại full/lần.
 // 0.12s ~= 8Hz; budget 16 actor unknown mỗi lượt (page cache warm thì ~vài ms).
 #define ESP_DISCOVER_INTERVAL 0.12
-#define ESP_DISCOVER_BUDGET 16
+// Budget unknown mỗi vòng: từ kernrw33 mỗi unknown quen chỉ tốn ~2 read
+// (fields window + VTable check, FName walk chỉ cho VTable lạ) nên nâng 16->48
+// để quét sạch ~100 unknown trong ~2 vòng (~0.24s) thay vì ~6 vòng (~0.8-2s).
+// Địch mới (class đã biết) hiện sau ~1 vòng (~0.12s) thay vì 1-2s.
+#define ESP_DISCOVER_BUDGET 48
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
 // 40Hz: mượt mà, bám sát nhịp chuyển động mà không gây nghẽn runloop SpringBoard.
