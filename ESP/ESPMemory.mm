@@ -202,6 +202,10 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
                                                (vm_region_recurse_info_t)&info, &infoCnt,
                                                &objName, 0, 0, &pagesDirty);
     if (objName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, objName);
+    // kr=1 (KERN_INVALID_ADDRESS) = địa chỉ chắc chắn không còn map -> chết.
+    // kr khác (!=0) = trap từ chối tham số (transient lúc khởi động, đã thấy
+    // kr=4 x3 ở kernrw30) -> KHÔNG kết luận chết để tránh vứt nhầm vùng tốt.
+    if (kr == KERN_INVALID_ADDRESS) return 0;
     if (kr != KERN_SUCCESS || regionSize == 0) {
         static std::atomic<uint32_t> s_checkErr{0};
         uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;

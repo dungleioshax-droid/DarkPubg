@@ -2443,6 +2443,52 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     ESPCamera cam;
     if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
+    // Guard camera rách (kernrw31): POV đọc bằng 1 memcpy 0x38B trong lúc game
+    // đang ghi -> yaw/pitch/loc có thể nửa cũ nửa mới trong đúng 1 tick. Dấu
+    // hiệu trong log kernrw30: box nhảy 130-170px/25ms rồi w2s rớt cả loạt
+    // 1-1.5s (slot age 0.9-1.7s, box tắt rồi hiện lại chỗ mới = "giật giật").
+    // Chặn bằng giới hạn tốc độ vật lý: flick tay ~800°/s, scope ~350°/s,
+    // máy bay 100m/s. Rách -> dùng lại camera tốt gần nhất của tick này.
+    {
+        static ESPCamera s_lastCam = {0};
+        static CFAbsoluteTime s_lastCamAt = 0;
+        static BOOL s_lastCamValid = NO;
+        CFAbsoluteTime nowC = CFAbsoluteTimeGetCurrent();
+        BOOL useLast = NO;
+        if (s_lastCamValid && s_lastCamAt > 0) {
+            double dt = nowC - s_lastCamAt;
+            if (dt > 0.001 && dt < 5.0) {
+                float dYaw = fabsf(cam.rotation.yaw - s_lastCam.rotation.yaw);
+                if (dYaw > 180.0f) dYaw = 360.0f - dYaw;
+                float dPitch = fabsf(cam.rotation.pitch - s_lastCam.rotation.pitch);
+                if (dPitch > 180.0f) dPitch = 360.0f - dPitch;
+                float dx = cam.location.x - s_lastCam.location.x;
+                float dy = cam.location.y - s_lastCam.location.y;
+                float dz = cam.location.z - s_lastCam.location.z;
+                float dLoc = sqrtf(dx*dx + dy*dy + dz*dz) / 100.0f; // mét
+                float dFov = fabsf(cam.fov - s_lastCam.fov);
+                float maxDeg = 1200.0f * (float)dt + 5.0f;
+                float maxLoc = 600.0f * (float)dt + 2.0f;
+                float maxFov = 600.0f * (float)dt + 3.0f;
+                if (dYaw > maxDeg || dPitch > maxDeg || dLoc > maxLoc || dFov > maxFov) {
+                    static CFAbsoluteTime s_lastCamRejLog = 0;
+                    if (nowC - s_lastCamRejLog >= 1.0) {
+                        s_lastCamRejLog = nowC;
+                        ESPLog("cam jump rejected dYaw=%.1f dPitch=%.1f dLoc=%.1f dFov=%.1f dt=%.3f",
+                               dYaw, dPitch, dLoc, dFov, dt);
+                    }
+                    useLast = YES;
+                }
+            }
+        }
+        if (useLast) {
+            cam = s_lastCam;
+        } else {
+            s_lastCam = cam;
+            s_lastCamAt = nowC;
+            s_lastCamValid = YES;
+        }
+    }
     // Dựng basis view-projection 1 lần cho cả danh sách tracked (không trig/actor).
     ESPCamBasis basis;
     if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) {
