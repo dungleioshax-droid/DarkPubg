@@ -1,11 +1,11 @@
 //
 //  ESPTask.h
-//  Task port của game: thử task_for_pid trực tiếp, nếu không được thì DỰNG
-//  port giả từ kernel (ghi ip_kobject của port mình thành task game) —
-//  không cần patch CS_GET_TASK_ALLOW nên chạy cả khi proc_ro read-only
-//  (iOS 16+). Đọc bulk bằng mach_vm_read_overwrite: syscall thuần, không còn
-//  exploit dance từng page. Không cần entitlement đặc biệt trên app (Esign
-//  vẫn qua) vì mọi thứ làm ở phía target/kernel đã có KRW.
+//  Dual-path đọc memory game (kernrw35):
+//    - Route A: task_for_pid (TrollStore + entitlement task_for_pid-allow).
+//    - Route B: host_processor_set_priv + processor_set_tasks (jb/root).
+//  Được port -> mọi read đi mach_vm_read_overwrite (1 syscall, không mapping,
+//  không refcount race, không dead-mapping, không lock convoy khi map).
+//  Trượt cả 2 (Esign mobile thường) -> rớt về kernel region-map (ESPMemory).
 //
 
 #ifndef ESPTask_h

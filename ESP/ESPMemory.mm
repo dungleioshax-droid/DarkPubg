@@ -24,6 +24,7 @@
 #import "ESPOffsets.h"
 #import "ESPProvider.h"
 #import "ESPLog.h"
+#import "ESPTask.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
 #import <mach/vm_region.h>
@@ -127,6 +128,9 @@ static uint64_t s_chunkFails = 0;
 // Đếm đường đọc: kernel exploit region-map (task port đã xoá hẳn).
 // Atomic vì cả scan queue lẫn timer bridge queue đều đọc.
 static std::atomic<uint64_t> s_kernelReads{0};
+// Đếm read đi đường task port (mach_vm_read_overwrite) — tách riêng để box
+// perf read(t=..) cho biết máy có lấy được port không.
+static std::atomic<uint64_t> s_taskReads{0};
 // Last-entry: quét tuần tự (GNames segment scan, mảng actor) chạm các page
 // liền kề trong cùng entry -> kiểm tra entry trước đó trước (2 read), khỏi
 // walk cả map (hàng nghìn kernel read) mỗi miss.
@@ -159,7 +163,7 @@ uint64_t ESPMemoryRegionCount(void) {
 }
 
 void ESPMemoryReadPathStats(uint64_t *taskReads, uint64_t *kernelReads) {
-    if (taskReads) *taskReads = 0; // task port đã xoá, luôn 0
+    if (taskReads) *taskReads = s_taskReads.load();
     if (kernelReads) *kernelReads = s_kernelReads.load();
 }
 
@@ -523,6 +527,12 @@ BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_
     if (!vmMap || !ds_isvalid(vmMap) || !remoteAddr || !buf || !len) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    // Dual-path (kernrw35): task port đọc thẳng, khỏi peek region.
+    if (ESPTaskRead(remoteAddr, buf, len)) {
+        s_taskReads.fetch_add(1, std::memory_order_relaxed);
+        ESPProviderNoteKernelRead(YES);
+        return YES;
+    }
     // Peek không map vùng mới: shared_lock là đủ, không chặn reader khác.
     std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
     uint64_t off = 0;
@@ -564,7 +574,14 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (len > 0x10000) return NO; // chặn đọc quá lớn 1 lần
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
-    // Kernel region-map là đường duy nhất (task port đã xoá hẳn).
+    // Dual-path (kernrw35): có task port (jb/TrollStore) thì 1 syscall
+    // mach_vm_read_overwrite, khỏi chạm region-map/lock. Trượt thì đi tiếp.
+    if (ESPTaskRead(remoteAddr, buf, len)) {
+        s_taskReads.fetch_add(1, std::memory_order_relaxed);
+        ESPProviderNoteKernelRead(YES);
+        return YES;
+    }
+    // Kernel region-map là đường fallback (Esign mobile thường).
     s_kernelReads++;
     // Vòng 1 (shared): vùng đã map thì memcpy, không chặn reader khác —
     // đường refresh 40Hz đi đây mỗi tick.
@@ -589,6 +606,12 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     if (len > 0x40000) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr)) return NO;
     if (!ESPRemoteAddrUsable(remoteAddr + len - 1)) return NO;
+    // Dual-path (kernrw35): task port trước.
+    if (ESPTaskRead(remoteAddr, buf, len)) {
+        s_taskReads.fetch_add(1, std::memory_order_relaxed);
+        ESPProviderNoteKernelRead(YES);
+        return YES;
+    }
     s_kernelReads++;
     // Không có task port: đi region map (1 lần/vùng). Cửa sổ 0xF00 của actor
     // trước đây map/lại mỗi lượt quét (~37ms/actor) — giờ lần đầu map cả vùng,
