@@ -51,6 +51,10 @@ BOOL ESPMemoryFlushPageCacheIfIdle(void);
 // Đếm region hit/miss tích luỹ (chẩn đoán perf refresh).
 void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss);
 
+// Số vùng đã bị loại vì kernel huỷ mapping (game free vm_object). Trước
+// kernrw28 con trỏ chết -> SIGSEGV giết app; giờ chỉ tốn một lần map lại.
+uint64_t ESPMemoryDeadRegionDrops(void);
+
 // Số vùng đang giữ mapping (dùng cho scan có ngân sách — vd dò GNames).
 uint64_t ESPMemoryRegionCount(void);
 

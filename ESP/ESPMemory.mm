@@ -26,6 +26,7 @@
 #import "ESPLog.h"
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
+#import <mach/vm_region.h>
 #import <mach-o/loader.h>
 #include <atomic>
 #include <mutex>
@@ -89,10 +90,13 @@ struct ESPRegion {
     uint64_t localAddress; // mapping live trong process mình
     uint64_t port;         // memory-entry port phải giữ cùng localAddress
     uint32_t pages;        // số page vùng này phủ
+    uint32_t dead;         // 1 = mapping đã bị kernel huỷ (xem ESPLocalRangeMapped)
+    uint64_t deadAt;       // thời điểm phát hiện chết (0 = chưa chết)
 };
 static ESPRegion s_regions[ESP_REGION_MAX];
 static int s_regionCount = 0;
 static uint64_t s_liveBytes = 0;
+static std::atomic<uint32_t> s_regionDeadDrops{0};
 // Đếm hit/miss để chẩn đoán (log box perf). Atomic vì readers concurrent
 // dưới shared_lock đều tăng được.
 static std::atomic<uint64_t> s_cacheHit{0};
@@ -124,6 +128,13 @@ void ESPMemoryCacheStats(uint64_t *hit, uint64_t *miss) {
     if (miss) *miss = s_cacheMiss.load(std::memory_order_relaxed);
 }
 
+// Số vùng đã bị loại vì kernel huỷ mapping (game free vm_object). Đây là
+// chỉ số sức khoẻ của đường region-map: trước kernrw28 con trỏ chết ->
+// SIGSEGV, giờ chỉ tốn một lần map lại.
+uint64_t ESPMemoryDeadRegionDrops(void) {
+    return s_regionDeadDrops.load(std::memory_order_relaxed);
+}
+
 uint64_t ESPMemoryRegionCount(void) {
     std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
     return (uint64_t)s_regionCount;
@@ -144,6 +155,60 @@ static inline uint64_t ESPRegionSpan(const ESPRegion *r) {
     return (uint64_t)(r->pages ? r->pages : 1) * PAGE_SIZE;
 }
 
+// ---- Kiểm tra mapping còn sống (kernrw28) ----
+// Region-map của mình KHÔNG copy dữ liệu game: nó tạo memory-entry trỏ thẳng
+// vào vm_object CỦA GAME (vmcreateshmemwithobjpages) và giữ object sống bằng
+// `ref_count++` — mà phép đó là ds_kread32 + ds_kwrite32, KHÔNG atomic (chính
+// comment vm.m cảnh báo). Game tự free object (actor bị xoá, world đổi, heap
+// dọn) -> kernel huỷ mapping của ta -> s_regions[] vẫn giữ localAddress cũ ->
+// memcpy kế tiếp đọc vùng trống -> SIGSEGV giết app (crash thật 2026-10-13,
+// thread esp-scan, _platform_memmove, KERN_INVALID_ADDRESS nằm trong GAP).
+//
+// Trước đây ESPRegionFind() TIN MÙI BLIND: một lần hỏng là hỏng vĩnh viễn.
+// Giờ mỗi lần dùng vùng đều hỏi kernel "còn map không" bằng vm_region_recurse
+// (syscall ~1-2us, chạy dưới shared_lock). Hệ quả tốt: vùng chết bị loại ->
+// đường đọc chuyển sang map lại, không còn đọc con trỏ rác.
+// Trả 1 = còn sống, 0 = đã chết, -1 = lỗi kiểm tra (không kết luận chết).
+static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
+    if (!local || !span) return 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_vm_address_t regionAddr = (mach_vm_address_t)local;
+    mach_vm_size_t regionSize = 0;
+    kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
+                                               (vm_region_recurse_info_t)&info, &infoCnt,
+                                               NULL, MACH_MSG_TYPE_NONE_SEND,
+                                               MACH_MSG_TYPE_NONE_SEND, NULL);
+    if (kr != KERN_SUCCESS || regionSize == 0) {
+        static std::atomic<uint32_t> s_checkErr{0};
+        uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (e <= 3) {
+            ESPLog("ESP region check err kr=%d (x%u) — bo qua ket luan chet lan nay",
+                   (int)kr, e);
+        }
+        return -1;
+    }
+    // local phải nằm trong đúng vùng kernel trả về.
+    return (local >= (uint64_t)regionAddr &&
+            local < (uint64_t)regionAddr + (uint64_t)regionSize) ? 1 : 0;
+}
+
+// Gỡ vùng chết khỏi bảng (exclusive lock) + nhả memory-entry port.
+// Mapping đã bị kernel huỷ nên mach_vm_deallocate ở đây là no-op vô hại;
+// việc quan trọng là trả tên port + dọn slot để không chạm ESP_REGION_MAX.
+static void ESPRegionDropLocked(ESPRegion *r) {
+    if (r->port) mach_port_deallocate(mach_task_self_, (mach_port_t)r->port);
+    if (r->localAddress) {
+        mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)r->localAddress,
+                           (mach_vm_size_t)ESPRegionSpan(r));
+    }
+    uint64_t span = (uint64_t)(r->pages ? r->pages : 1) * PAGE_SIZE;
+    // Không để uint64_t wrap khi trừ quá (s_liveBytes là số byte đang giữ).
+    s_liveBytes = (s_liveBytes > span) ? (s_liveBytes - span) : 0;
+    r->base = 0; r->localAddress = 0; r->port = 0; r->pages = 0;
+    r->dead = 0; r->deadAt = 0;
+}
+
 // Tìm vùng PHỦ pageStart. Mảng sắp theo base và các vùng KHÔNG chồng nhau nên
 // chỉ cần tìm vùng cuối có base <= pageStart rồi kiểm tra nó có phủ không.
 // KHÔNG lock — caller giữ mutex.
@@ -160,15 +225,46 @@ static ESPRegion *ESPRegionFind(uint64_t pageStart, uint64_t *outPageOffset) {
     }
     if (cand < 0) return NULL;
     ESPRegion *r = &s_regions[cand];
-    if (pageStart - r->base < ESPRegionSpan(r)) {
-        if (outPageOffset) *outPageOffset = (pageStart - r->base) / PAGE_SIZE;
-        return r;
+    if (pageStart - r->base >= ESPRegionSpan(r)) {
+        return NULL;
     }
-    return NULL;
+    // Vùng đã biết chết -> miss ngay (không hỏi kernel lần nữa).
+    if (__atomic_load_n(&r->dead, __ATOMIC_ACQUIRE)) {
+        return NULL;
+    }
+    // Hỏi kernel mapping còn sống không (xem ESPLocalRangeMapped). Chỉ đánh
+    // dấu chết ở đây — dọn bảng phải cần exclusive lock nên để lượt map sau.
+    // Lỗi kiểm tra (kr!=0) coi như "chưa chết" để không vứt nhầm vùng tốt.
+    if (ESPLocalRangeCheck(r->localAddress, ESPRegionSpan(r)) == 0) {
+        __atomic_store_n(&r->dead, 1, __ATOMIC_RELEASE);
+        r->deadAt = (uint64_t)CFAbsoluteTimeGetCurrent();
+        uint32_t drops = s_regionDeadDrops.fetch_add(1, std::memory_order_relaxed) + 1;
+        if ((drops & 0x0f) == 1) {
+            ESPLog("ESP region dead x%u (mapping bi kernel huy - game free vm_object)", drops);
+        }
+        return NULL;
+    }
+    if (outPageOffset) *outPageOffset = (pageStart - r->base) / PAGE_SIZE;
+    return r;
+}
+
+// Dọn các vùng đã chết (đánh dấu bởi shared-path) — exclusive lock.
+static void ESPRegionPurgeDeadLocked(void) {
+    int w = 0;
+    for (int i = 0; i < s_regionCount; i++) {
+        if (__atomic_load_n(&s_regions[i].dead, __ATOMIC_ACQUIRE)) {
+            ESPRegionDropLocked(&s_regions[i]);
+            continue;
+        }
+        if (w != i) s_regions[w] = s_regions[i];
+        w++;
+    }
+    s_regionCount = w;
 }
 
 // Chèn giữ nguyên thứ tự theo base (mảng nhỏ, miss rất thưa). KHÔNG lock.
 static void ESPRegionInsert(uint64_t base, uint64_t local, uint64_t port, uint64_t pages) {
+    ESPRegionPurgeDeadLocked();
     int i = s_regionCount;
     while (i > 0 && s_regions[i - 1].base > base) {
         s_regions[i] = s_regions[i - 1];
@@ -178,6 +274,8 @@ static void ESPRegionInsert(uint64_t base, uint64_t local, uint64_t port, uint64
     s_regions[i].localAddress = local;
     s_regions[i].port = port;
     s_regions[i].pages = (uint32_t)pages;
+    s_regions[i].dead = 0;
+    s_regions[i].deadAt = 0;
     s_regionCount++;
 }
 
@@ -188,6 +286,7 @@ static uint64_t ESPRegionAvoidOverlap(uint64_t base, uint64_t pageStart) {
     for (int guard = 0; guard < 8; guard++) {
         uint64_t hitEnd = 0;
         for (int i = 0; i < s_regionCount; i++) {
+            if (__atomic_load_n(&s_regions[i].dead, __ATOMIC_ACQUIRE)) continue;
             uint64_t s = s_regions[i].base;
             uint64_t e = s + ESPRegionSpan(&s_regions[i]);
             if (base >= s && base < e) { hitEnd = e; break; }
@@ -213,6 +312,8 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
         return YES;
     }
     s_cacheMiss.fetch_add(1, std::memory_order_relaxed);
+    // Chỗ trống do vùng chết -> dọn trước khi kết luận "hết chỗ".
+    ESPRegionPurgeDeadLocked();
     if (s_regionCount >= ESP_REGION_MAX) return NO;
     // Negative cache: page này vừa fail -> bỏ qua ngay, khỏi walk lại.
     {
@@ -326,13 +427,7 @@ static BOOL ESPReadSharedLocked(uint64_t remoteAddr, void *buf, uint64_t len) {
 // KHÔNG lock — caller đã giữ s_espReadMutex.
 static void ESPRegionFlushLocked(void) {
     for (int i = 0; i < s_regionCount; i++) {
-        ESPRegion *r = &s_regions[i];
-        if (r->localAddress) {
-            mach_vm_deallocate(mach_task_self_, (mach_vm_address_t)r->localAddress,
-                               (mach_vm_size_t)ESPRegionSpan(r));
-        }
-        if (r->port) mach_port_deallocate(mach_task_self_, (mach_port_t)r->port);
-        r->base = 0; r->localAddress = 0; r->port = 0; r->pages = 0;
+        ESPRegionDropLocked(&s_regions[i]);
     }
     s_regionCount = 0;
     s_liveBytes = 0;

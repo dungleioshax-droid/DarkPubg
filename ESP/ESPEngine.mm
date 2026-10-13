@@ -1952,23 +1952,27 @@ const char *ESPEngineBoxPerfText(void) {
     uint64_t dChunkPages = chunkPages - g_perfLastChunkPages;
     g_perfLastChunkMaps = chunkMaps;
     g_perfLastChunkPages = chunkPages;
+    uint64_t deadDrops = ESPMemoryDeadRegionDrops();
+    static uint64_t g_perfLastDead = 0;
+    uint64_t dDead = deadDrops - g_perfLastDead;
+    g_perfLastDead = deadDrops;
     if (g_perfN > 0) {
         snprintf(g_perfBuf, sizeof(g_perfBuf),
-                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu)",
+                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu) dead=%llu",
                  g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
                  g_perfSumAct / (double)g_perfN,
                  (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs,
                  (unsigned long long)dHit, (unsigned long long)dMiss,
                  (unsigned long long)dTask, (unsigned long long)dKernel,
                  (unsigned long long)dChunkMaps, (unsigned long long)dChunkPages,
-                 (unsigned long long)chunkFails);
+                 (unsigned long long)chunkFails, (unsigned long long)dDead);
     } else {
         snprintf(g_perfBuf, sizeof(g_perfBuf),
-                 "n=0 cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu)",
+                 "n=0 cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu) dead=%llu",
                  (unsigned long long)dHit, (unsigned long long)dMiss,
                  (unsigned long long)dTask, (unsigned long long)dKernel,
                  (unsigned long long)dChunkMaps, (unsigned long long)dChunkPages,
-                 (unsigned long long)chunkFails);
+                 (unsigned long long)chunkFails, (unsigned long long)dDead);
     }
     g_perfSumProc = 0;
     g_perfSumCam = 0;

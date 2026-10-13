@@ -3198,7 +3198,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw27"
+#define DS_ESP_BUILD_TAG "kernrw28"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3738,14 +3738,15 @@ static void ds_esp_tick(void) {
                 uint64_t presUs = s_presentUsTotal.exchange(0, std::memory_order_relaxed);
                 uint32_t presMaxUs = s_presentMaxUs.exchange(0, std::memory_order_relaxed);
                 double presAvgMs = presN ? (double)presUs / (double)presN / 1000.0 : 0.0;
-                ESPLog("box perf: %s count=%d pres=%u pAvg=%.1f pMax=%.1fms path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb",
+                ESPLog("box perf: %s count=%d pres=%u pAvg=%.1f pMax=%.1fms path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb dead=%llu",
                        ESPEngineBoxPerfText(), count, presN, presAvgMs,
                        (double)presMaxUs / 1000.0, g_espPathLayer ? 1 : 0,
                        g_espPathCalls, g_espPathBoxes, g_espPathFails,
                        ESPProviderIsDegraded() ? 1 : 0,
                        (unsigned long long)ESPProviderFailureCount(),
                        (unsigned long long)ESPProviderFullScanCount(),
-                       hpCur, hpMax, hpPct, hpFails, (unsigned long long)rssMB);
+                       hpCur, hpMax, hpPct, hpFails, (unsigned long long)rssMB,
+                       (unsigned long long)ESPMemoryDeadRegionDrops());
             }
         }
 
