@@ -42,6 +42,10 @@ static CFAbsoluteTime s_lastTryAt = 0;
 static BOOL s_failLogged = NO;
 static pid_t s_okLoggedPid = 0;
 static int s_okLoggedRoute = 0;
+// Esign mobile thường: cả 2 route đều trượt vĩnh viễn -> thử 5 lần rồi thôi
+// cả session (khỏi proc_listallpids mỗi 5s vô ích). Reset khi Reset() (world
+// đổi/disable) để máy TrollStore resign entitlement vẫn có cơ hội.
+static int s_giveUpFails = 0;
 
 static pid_t ESPTaskFindGamePid(void) {
     int count = proc_listallpids(NULL, 0);
@@ -130,6 +134,11 @@ BOOL ESPGameTaskEnsure(void) {
         pthread_mutex_unlock(&s_taskMutex);
         return NO;
     }
+    if (s_giveUpFails >= 5) {
+        // Đã trượt đủ: Esign thường -> region-map only, khỏi thử nữa.
+        pthread_mutex_unlock(&s_taskMutex);
+        return NO;
+    }
     s_lastTryAt = now;
     pid_t pid = ESPTaskFindGamePid();
     task_t t = MACH_PORT_NULL;
@@ -159,6 +168,9 @@ BOOL ESPGameTaskEnsure(void) {
         s_failLogged = YES;
         ESPLog("task port FAIL (Esign mobile?) - fallback kernel region-map");
     }
+    if (++s_giveUpFails == 5) {
+        ESPLog("task port unavailable x5 - region-map only for this session");
+    }
     pthread_mutex_unlock(&s_taskMutex);
     return NO;
 }
@@ -170,6 +182,9 @@ void ESPGameTaskReset(void) {
         s_gameTask = MACH_PORT_NULL;
         s_gamePid = 0;
     }
+    // Cho thử lại sau world đổi/disable (máy resign entitlement giữa chừng).
+    s_giveUpFails = 0;
+    s_lastTryAt = 0;
     pthread_mutex_unlock(&s_taskMutex);
 }
 
