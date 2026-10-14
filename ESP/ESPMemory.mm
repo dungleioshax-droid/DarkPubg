@@ -375,6 +375,31 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
 
     // Vùng lớn chỉ khi còn dưới trần và không degraded. Degraded -> map 1 page
     // (vẫn giữ vĩnh viễn) cho an toàn như DarkSwordMemoryProvider.
+    // Budget map/tick (kiểu QBL maxMapsPerTick): mỗi lần map là 1 kernel
+    // refcount RMW + giữ unique_lock; bão map (first-ship 300 pages, scan 23s
+    // lúc loading) kẹt lock + dồn RMW. Quá 16 map/100ms thì miss lần này,
+    // lượt sau map tiếp (refresh bỏ 1 frame, scan/discover bù pass sau).
+    // Chạy dưới exclusive lock nên counter thường là đủ, không cần atomic.
+    static uint64_t s_mapBudgetWindow = 0;
+    static int s_mapBudgetLeft = 0;
+    {
+        uint64_t nowMs = (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+        uint64_t win = nowMs / 100;
+        if (win != s_mapBudgetWindow) {
+            s_mapBudgetWindow = win;
+            s_mapBudgetLeft = 16;
+        }
+        if (s_mapBudgetLeft <= 0) {
+            static CFAbsoluteTime s_lastBudgetLog = 0;
+            CFAbsoluteTime nowL = CFAbsoluteTimeGetCurrent();
+            if (nowL - s_lastBudgetLog >= 5.0) {
+                s_lastBudgetLog = nowL;
+                ESPLog("esp map budget cap (16/100ms) — trailing to next window");
+            }
+            return NO;
+        }
+        s_mapBudgetLeft--;
+    }
     BOOL allowLarge = (s_liveBytes < ESP_MAX_LIVE_BYTES) && ESPProviderShouldBulkMap();
 
     struct ESPShmem sh = {0};
