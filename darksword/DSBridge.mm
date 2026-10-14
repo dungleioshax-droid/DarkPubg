@@ -2393,10 +2393,11 @@ static uint64_t g_espBitmapCS = 0;      // colorspace (SB)
 static uint64_t g_espBitmapImage = 0;   // UIImage đang hiển thị (release frame sau)
 static BOOL g_espBitmapHiddenCache = YES;
 static int g_espBitmapFailStreak = 0;
-// kernrw24: TẮT bitmap mặc định (đơ máy ở 19-23 khi ship bitmap liên tục).
-// Per-box + invocation cache (kernrw18) đã chạy ổn định nhiều session.
-// Bật lại bitmap chỉ khi đã chốt nguyên nhân qua panic/jetsam log.
-static BOOL g_espBitmapDisabled = YES;
+// kernrw41 v2: BẬT lại bitmap (thử có guard). Nguyên nhân đơ máy 19-23 đã
+// chốt: (1) setImage fail vẫn release-old + store dangling, (2) teardown
+// không release ảnh đang hiển thị, (3) churn 5MB/frame không phanh.
+// V2 sửa cả 3 + scale 1 + rate-cap 30Hz + auto-kill khi ship >250ms.
+static BOOL g_espBitmapDisabled = NO;
 static uint8_t *g_espBitmapLocal = NULL; // buffer local tái dùng
 static CGContextRef g_espBitmapLocalCtx = NULL;
 static int g_espBitmapLocalW = 0, g_espBitmapLocalH = 0;
@@ -2405,6 +2406,12 @@ static ESPBox2D g_espBitmapLast[ESPOverlayMaxBoxes];
 static int g_espBitmapLastCount = -1;
 static CGRect g_espBitmapLastBounds = CGRectZero;
 static int g_espBitmapLastOrient = -1;
+// Kiểm toán cân bằng set/release (kernrw41 v2): mỗi setImage: phải có đúng 1
+// release-old tương ứng (trừ frame đang hiển thị). Lệch = rò RAM SB -> đơ máy
+// (bài học kernrw19-23). Log ở teardown.
+static unsigned long g_espBitmapSetCount = 0;
+static unsigned long g_espBitmapRelCount = 0;
+static CFAbsoluteTime s_bmpLastShipAt = 0;
 // Warmer: lần remote_write đầu phải map ~300 pages qua exploit (mỗi page chục
 // ms) — làm trên bridge là kẹt present hàng giây (thấy ở kernrw20: pres=3,
 // pAvg 690ms rồi bridge đứng). Warmer map dần ở queue nền; present đi legacy
@@ -2469,10 +2476,23 @@ static void ds_esp_bitmap_teardown(RemoteCall *process) {
         if (freeSym && g_espBitmapAddr) DSRemoteArbCallWithTimeout(1, process, freeSym, g_espBitmapAddr);
         if (ctxRelSym && g_espBitmapCtx) DSRemoteArbCallWithTimeout(1, process, ctxRelSym, g_espBitmapCtx);
         if (csRelSym && g_espBitmapCS) DSRemoteArbCallWithTimeout(1, process, csRelSym, g_espBitmapCS);
-        // UIImageView + UIImage leak theo policy (dealloc UIView trên hijacked
-        // thread = crash SB); chỉ ẩn view.
+        // kernrw41 v2: release ảnh đang hiển thị (trước đây zero luôn -> rò
+        // 4.6MB/session trong SB). release an toàn trên hijacked thread như
+        // mọi frame (chỉ UIView mới cấm dealloc ngoài main).
+        if (g_espBitmapImage) {
+            remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+            g_espBitmapRelCount++;
+        }
+        // UIImageView leak theo policy (dealloc UIView trên hijacked thread =
+        // crash SB); chỉ ẩn view.
         if (g_espBitmapView) ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 1);
     }
+    if (g_espBitmapSetCount != g_espBitmapRelCount) {
+        ESPLog("esp bitmap imbalance: set=%lu rel=%lu (rò %ld ảnh trong SB!)",
+               g_espBitmapSetCount, g_espBitmapRelCount,
+               (long)g_espBitmapSetCount - (long)g_espBitmapRelCount);
+    }
+    g_espBitmapSetCount = 0; g_espBitmapRelCount = 0;
     g_espBitmapView = 0; g_espBitmapAddr = 0; g_espBitmapCtx = 0; g_espBitmapCS = 0;
     g_espBitmapImage = 0; g_espBitmapPxW = g_espBitmapPxH = 0;
     g_espBitmapHiddenCache = YES;
@@ -2640,6 +2660,15 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
         if (!ds_esp_bitmap_boxes_same(&boxes[i], &g_espBitmapLast[i])) same = NO;
     }
     if (same) return YES;
+    // Rate cap (kernrw41 v2): ship liên tục là nguồn churn RAM SB. Frame giống
+    // đã skip ở trên; frame khác mà trong 33ms (30Hz) thì giữ frame cũ.
+    {
+        CFAbsoluteTime nowS = CFAbsoluteTimeGetCurrent();
+        if (s_bmpLastShipAt > 0 && nowS - s_bmpLastShipAt < (1.0 / ESP_BITMAP_SHIP_HZ)) {
+            return YES;
+        }
+        s_bmpLastShipAt = nowS;
+    }
     // Render local vào buffer tái dùng (đỏ viền 2pt + chữ trắng 10pt bold,
     // y hệt legacy: border đỏ, label trắng "12m 87%").
     float sc = (float)ESP_BITMAP_SCALE;
@@ -2712,7 +2741,11 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
             ? remote_msg(process, uiClass, ds_remote_sel(process, "imageWithCGImage:"), cg, 0, 0, 0) : 0;
         if (cgRelSym && process.trojanMem) DSRemoteArbCallWithTimeout(1, process, cgRelSym, cg);
         if (!img || !process.trojanMem) return ds_esp_bitmap_fail("uiimage");
-        ds_perform_on_springboard_main(process, g_espBitmapView, ds_remote_sel(process, "setImage:"), img, YES);
+        // kernrw41 v2: KIỂM TRA setImage (trước đây bỏ qua BOOL này — setImage
+        // fail mà vẫn release-old + store img mới (dangling, pool đã drain) ->
+        // frame sau release vào rác = crash/rò SB. Fail ở đây: giữ nguyên
+        // (old còn hiển thị, img mới pool dọn), về fallback.
+        BOOL setOK = ds_perform_on_springboard_main(process, g_espBitmapView, ds_remote_sel(process, "setImage:"), img, YES);
         CFAbsoluteTime tShipS = CFAbsoluteTimeGetCurrent();
         double totMs = (tShipS - tShip0) * 1000.0;
         if (!s_bmpFirstShipLogged || totMs > 100.0) {
@@ -2721,13 +2754,23 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
                    totMs, (tShipW - tShip0) * 1000.0,
                    (tShipC - tShipW) * 1000.0, (tShipS - tShipC) * 1000.0);
         }
-        if (!process.trojanMem) {
+        if (!setOK || !process.trojanMem) {
             return ds_esp_bitmap_fail("setimage");
         }
-        if (g_espBitmapImage && process.trojanMem) {
+        if (totMs > 250.0) {
+            // SB nghẽn nặng: tắt bitmap cả session để khỏi đơ máy (bài học
+            // kernrw19-23). Vẽ lại hết đường legacy ở frame này.
+            g_espBitmapDisabled = YES;
+            for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
+            ESPLog("esp bitmap SLOW %.0fms -> OFF (anti-freeze)", totMs);
+            return NO;
+        }
+        if (g_espBitmapImage) {
             remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+            g_espBitmapRelCount++;
         }
         g_espBitmapImage = img;
+        g_espBitmapSetCount++;
         if (g_espBitmapHiddenCache) {
             ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 0);
             g_espBitmapHiddenCache = NO;
@@ -3207,7 +3250,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw40"
+#define DS_ESP_BUILD_TAG "kernrw41"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3249,6 +3292,15 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     ds_trace("esp present count=%d", frame->count);
     // kernrw23: single-thread (ship queue revert). Bitmap branch nằm trong
     // overlay_update bên dưới. Legacy/fallback chạy tại chỗ dưới batch lock.
+    // kernrw41: backpressure — present trước chậm (>40ms, SB nghẽn) thì bỏ 1
+    // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
+    // không bao giờ thêm việc nên không thể gây kẹt.
+    static double s_lastPresentMs = 0;
+    if (s_lastPresentMs > 40.0) {
+        s_lastPresentMs = 0.0;
+        free(frame);
+        return;
+    }
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     @try {
         if (frame->count < 0) {
@@ -3272,6 +3324,7 @@ static void ds_esp_present_single(DSESPFrame *frame) {
                                       frame->bounds, frame->orient);
                 double usP = (CFAbsoluteTimeGetCurrent() - tPres) * 1000000.0;
                 if (usP < 0) usP = 0;
+                s_lastPresentMs = usP / 1000.0; // backpressure tick sau
                 s_presentN.fetch_add(1, std::memory_order_relaxed);
                 s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
                 uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
@@ -4058,7 +4111,7 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
-    g_espBitmapDisabled = YES; // kernrw24: giữ bitmap TẮT (đơ máy 19-23)
+    g_espBitmapDisabled = NO; // kernrw41 v2: thử lại bitmap có guard
     g_espPathDisabled = YES; // kernrw27: path batching đã chứng minh gây respring
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;

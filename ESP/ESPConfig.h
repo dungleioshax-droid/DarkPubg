@@ -59,12 +59,13 @@
 // label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms.
 #define ESP_PRESENT_HZ 40
 
-// Bitmap overlay (kernrw19, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
+// Bitmap overlay (kernrw41 v2, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
 // suốt NGAY TRONG APP rồi ship 1 lần/frame (remote_write + setImage:).
-// Scale 2 = chữ/viền nét trên màn 3x; 812x375pt -> ~4.9MB/frame (remote_write
-// qua shmem cache chỉ là memcpy sau frame đầu). Scale 1 = ~1.2MB/frame nếu
-// cần tiết kiệm băng thông mach.
-#define ESP_BITMAP_SCALE 2
+// Scale 1 = chữ/viền vừa đủ nét, ~1.2MB/frame (scale 2 gây churn 5MB/frame -
+// 1 phần nguyên nhân đơ máy 19-23). SHIP_HZ 30 = trần ship (rate-cap trong
+// code), frame giống hệt thì không ship.
+#define ESP_BITMAP_SCALE 1
+#define ESP_BITMAP_SHIP_HZ 30
 
 // Chiều cao kẻ địch (cm) — CHỈ dùng làm mặc định khi không đọc được
 // Mesh.Bounds.BoxExtent.Z (thường đọc được: height = extent.Z*2).
