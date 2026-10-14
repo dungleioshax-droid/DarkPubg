@@ -277,11 +277,21 @@ static int s_unameTries = 0; // Số lần thử giải mã GNames per game base
 static uint64_t s_camPC = 0;
 static uint64_t s_camWorld = 0;
 static uint64_t s_camMgr = 0;
+// Hysteresis chống chain rách lẻ: PC/mgr mới chỉ nhận sau 2 tick liên tiếp
+// giống nhau (xem ESPResolvePCCached). Tick lẻ giữ cache cũ.
+static uint64_t s_camPCPending = 0;
+static int s_camPCPendingN = 0;
+static uint64_t s_camMgrPending = 0;
+static int s_camMgrPendingN = 0;
 
 static void ESPCamPCClearLocked(void) {
     s_camPC = 0;
     s_camWorld = 0;
     s_camMgr = 0;
+    s_camPCPending = 0;
+    s_camPCPendingN = 0;
+    s_camMgrPending = 0;
+    s_camMgrPendingN = 0;
 }
 static void ESPCamPCClear(void) {
     std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
@@ -2042,12 +2052,15 @@ const char *ESPEngineBoxPerfText(void) {
 }
 
 static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
+    // kernrw40: resolve FRESH mỗi tick (chain chỉ 3 read cached) thay vì tin
+    // cache cả trận. Game realloc PlayerController/CameraManager khi đổi
+    // possess, lên/xuống xe, chết/respawn mà world KHÔNG đổi -> cache cũ trỏ
+    // vào object chết/memory tái dùng -> camera đứng hình/lệch (đúng kiểu
+    // "đi bộ box đứng yên, xoay camera box trôi rồi dính lại"; log kernrw39 có
+    // cam teleport dLoc=146.7m = đổi possess). Hysteresis 2 tick: PC mới chỉ
+    // nhận sau 2 lần liên tiếp giống nhau (chain rách lẻ 1 tick thì giữ cũ).
     // Không giữ lock ngoài suốt quá trình (ESPResolvePC tự lock trong —
     // mutex non-recursive). 2 threads cùng resolve 1 lúc là benign.
-    {
-        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-        if (s_camWorld == world && s_camPC) return s_camPC;
-    }
     BOOL ok = NO;
     uint64_t pc = 0;
     // Đường Kernel trước (đã chứng minh sống), GI resolver fallback.
@@ -2063,30 +2076,79 @@ static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
         uint64_t gameInst = ESPReadU64(vmMap, world + ESPOff_UWorld_OwningGameInstance, &ok);
         if (ok && ESPIsUserPtr(gameInst)) pc = ESPResolvePC(vmMap, gameInst);
     }
-    if (pc) {
-        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-        if (s_camWorld != world) ESPLog("camPC pc=0x%llx", (unsigned long long)pc);
+    std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+    if (!pc) return s_camPC; // read fail: giữ cache cũ, đừng chớp tắt
+    if (s_camWorld != world) {
+        // World mới: nhận ngay (ClearLocked đã xả pending), không hysteresis.
+        ESPLog("camPC pc=0x%llx", (unsigned long long)pc);
         s_camPC = pc;
         s_camWorld = world;
+        s_camMgr = 0;
+        s_camPCPending = 0; s_camPCPendingN = 0;
+        s_camMgrPending = 0; s_camMgrPendingN = 0;
+        return pc;
     }
-    return pc;
+    if (pc == s_camPC) {
+        s_camPCPending = 0; s_camPCPendingN = 0;
+        return s_camPC;
+    }
+    if (s_camPC == 0) {
+        // Chưa từng có PC (đầu trận): nhận ngay, khỏi chờ 2 tick.
+        ESPLog("camPC pc=0x%llx", (unsigned long long)pc);
+        s_camPC = pc;
+        s_camPCPending = 0; s_camPCPendingN = 0;
+        return pc;
+    }
+    if (pc == s_camPCPending) {
+        if (++s_camPCPendingN >= 2) {
+            ESPLog("camPC re-resolve 0x%llx->0x%llx (possess/vehicle/respawn?)",
+                   (unsigned long long)s_camPC, (unsigned long long)pc);
+            s_camPC = pc;
+            s_camMgr = 0; // mgr của PC cũ hết hiệu lực
+            s_camPCPending = 0; s_camPCPendingN = 0;
+            s_camMgrPending = 0; s_camMgrPendingN = 0;
+            return pc;
+        }
+    } else {
+        s_camPCPending = pc;
+        s_camPCPendingN = 1;
+    }
+    return s_camPC; // giữ cũ 1 tick
 }
 
-// CamMgr cache theo (world, pc): đọc 1 lần rồi dùng lại, xả khi read fail.
+// CamMgr resolve fresh theo PC hiện tại (mgr cũng realloc cùng possess).
+// Hysteresis 2 tick như PC.
 static uint64_t ESPCamMgrCached(uint64_t vmMap, uint64_t world, uint64_t pc) {
-    {
-        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-        if (s_camWorld == world && s_camPC == pc && s_camMgr) return s_camMgr;
-    }
+    if (!pc) return 0;
     BOOL ok = NO;
     uint64_t cm = ESPReadU64(vmMap, pc + ESPOff_PC_CameraManager, &ok);
     if (!ok || !ESPIsUserPtr(cm)) {
-        ESPCamPCClear();
-        return 0;
+        return 0; // read fail: giữ im, đừng clear cache cả cụm vì 1 tick rách
     }
     std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
-    if (s_camWorld == world && s_camPC == pc) s_camMgr = cm;
-    return cm;
+    if (s_camWorld == world && s_camPC == pc) {
+        if (cm == s_camMgr) {
+            s_camMgrPending = 0; s_camMgrPendingN = 0;
+            return s_camMgr;
+        }
+        if (s_camMgr == 0) {
+            s_camMgr = cm;
+            s_camMgrPending = 0; s_camMgrPendingN = 0;
+            return cm;
+        }
+        if (cm == s_camMgrPending) {
+            if (++s_camMgrPendingN >= 2) {
+                s_camMgr = cm;
+                s_camMgrPending = 0; s_camMgrPendingN = 0;
+                return cm;
+            }
+        } else {
+            s_camMgrPending = cm;
+            s_camMgrPendingN = 1;
+        }
+        return s_camMgr; // giữ cũ 1 tick
+    }
+    return cm; // PC/world khác cache: trả fresh, caller (ESPEngineCamera) tự xử
 }
 
 BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
