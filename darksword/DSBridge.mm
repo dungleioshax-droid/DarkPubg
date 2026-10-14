@@ -3207,7 +3207,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw38"
+#define DS_ESP_BUILD_TAG "kernrw39"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3657,10 +3657,12 @@ static void ds_esp_tick(void) {
                 }
             }
 
-            // Phase 3: Thu thập box active. 2 ngưỡng:
-            //  - lastSeen <= 0.5s: project OK -> hiện box.
-            //  - 0.5s < lastSeen <= 2.5s: w2s fail / địch ra mép màn hình ->
-            //    ẨN box (visible=0) nhưng GIỮ slot (không clear actor) để khi
+            // Phase 3: Thu thập box active. 2 ngưỡng (kernrw39: nới hide 0.5->1.2s):
+            //  - lastSeen <= 1.2s: project OK -> hiện box. Kể cả w2s hụt vài
+            //    frame (lia máy, rách camera lẻ) box vẫn đứng yên vị trí cũ
+            //    thay vì tắt/bật = hết "reset" khi xoay camera.
+            //  - 1.2s < lastSeen <= 2.5s: chắc chắn out-of-view -> ẨN box
+            //    (visible=0) nhưng GIỮ slot (không clear actor) để khi
             //    project lại được thì Phase 1 rematch tức thì — không rơi vào
             //    BOX-DROP + BOX-ASSIGN +NEW = nhấp nháy / giật như map60.
             //  - > 2.5s: actor chắc chắn mất / out-of-tracked -> drop slot.
@@ -3683,7 +3685,7 @@ static void ds_esp_tick(void) {
                     s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
                     continue;
                 }
-                if (age > 0.5) {
+                if (age > 1.2) {
                     // Slot giữ lại, box ẩn (chưa project được).
                     s_boxes[s] = s_slots[s].box;
                     s_boxes[s].visible = 0;
