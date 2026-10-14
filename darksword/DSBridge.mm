@@ -2834,7 +2834,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw43"
+#define DS_ESP_BUILD_TAG "kernrw44"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -2868,6 +2868,26 @@ static std::atomic<uint64_t> s_presentUsTotal{0};
 static std::atomic<uint32_t> s_presentN{0};
 static std::atomic<uint32_t> s_presentMaxUs{0};
 static void ds_esp_present_heartbeat(void);
+
+// kernrw44: đo TOÀN BỘ ds_esp_tick (refresh + slot + log + geometry + mọi lần
+// chờ lock TRƯỚC tBox0). box perf proc/cam/act chỉ đo bên trong
+// ESPEngineRefreshBoxes -> không thấy phần chờ lock tracked (trước tBox0) và
+// các khâu khác của tick. So tick(N/10s, avg, max) với ngân sách 25ms (40Hz)
+// là biết ngay work queue có bị chặn không.
+static std::atomic<uint64_t> s_tickUsTotal{0};
+static std::atomic<uint32_t> s_tickN{0};
+static std::atomic<uint32_t> s_tickMaxUs{0};
+static void ds_esp_tick_note(double ms) {
+    if (ms < 0) ms = 0;
+    uint64_t us = (uint64_t)(ms * 1000.0);
+    s_tickN.fetch_add(1, std::memory_order_relaxed);
+    s_tickUsTotal.fetch_add(us, std::memory_order_relaxed);
+    uint32_t prev = s_tickMaxUs.load(std::memory_order_relaxed);
+    while ((double)us > (double)prev &&
+           !s_tickMaxUs.compare_exchange_weak(prev, (uint32_t)us,
+                                              std::memory_order_relaxed)) {
+    }
+}
 
 // Present lên SpringBoard — CHẠY TRÊN BRIDGE QUEUE.
 static void ds_esp_present_single(DSESPFrame *frame) {
@@ -3267,9 +3287,14 @@ static void ds_esp_tick(void) {
                 uint64_t presUs = s_presentUsTotal.exchange(0, std::memory_order_relaxed);
                 uint32_t presMaxUs = s_presentMaxUs.exchange(0, std::memory_order_relaxed);
                 double presAvgMs = presN ? (double)presUs / (double)presN / 1000.0 : 0.0;
-                ESPLog("box perf: %s count=%d pres=%u pAvg=%.1f pMax=%.1fms path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb dead=%llu",
+                uint32_t tickN = s_tickN.exchange(0, std::memory_order_relaxed);
+                uint64_t tickUs = s_tickUsTotal.exchange(0, std::memory_order_relaxed);
+                uint32_t tickMaxUs = s_tickMaxUs.exchange(0, std::memory_order_relaxed);
+                double tickAvgMs = tickN ? (double)tickUs / (double)tickN / 1000.0 : 0.0;
+                ESPLog("box perf: %s count=%d pres=%u pAvg=%.1f pMax=%.1fms tick(n=%u avg=%.1f max=%.1fms) path(on=%d c=%lu b=%lu f=%lu) prov=%d fails=%llu scans=%llu hp=%.0f/%.0f=%d hpf=%d rss=%llumb dead=%llu",
                        ESPEngineBoxPerfText(), count, presN, presAvgMs,
-                       (double)presMaxUs / 1000.0, g_espPathLayer ? 1 : 0,
+                       (double)presMaxUs / 1000.0, tickN, tickAvgMs,
+                       (double)tickMaxUs / 1000.0, g_espPathLayer ? 1 : 0,
                        g_espPathCalls, g_espPathBoxes, g_espPathFails,
                        ESPProviderIsDegraded() ? 1 : 0,
                        (unsigned long long)ESPProviderFailureCount(),
@@ -3335,7 +3360,9 @@ static void ds_start_esp_timer(void) {
                               interval, 1 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(g_espTimer, ^{
         @autoreleasepool {
+            CFAbsoluteTime tTick = CFAbsoluteTimeGetCurrent();
             ds_esp_tick();
+            ds_esp_tick_note((CFAbsoluteTimeGetCurrent() - tTick) * 1000.0);
         }
     });
     dispatch_resume(g_espTimer);
