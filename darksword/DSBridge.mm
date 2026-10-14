@@ -2308,7 +2308,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
         ds_remote_set_double_on_main(process, lbLayer, "setSpeed:", 999.0);
         
-        ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), lb, YES);
+        ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "addSubview:"), lb, YES);
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
 
@@ -2831,11 +2831,14 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                             fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
             }
             if (boxMoved) { dirty = YES; break; }
-            if (strcmp(g_espLastDist[i], distTxt) != 0 && nowP - s_lastTextAt[i] >= 0.2) {
+            if (strcmp(g_espLastDist[i], distTxt) != 0 && nowP - s_lastTextAt[i] >= 0.5) {
                 dirty = YES; break;
             }
-            if ((fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 2.0 ||
-                 fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 2.0) &&
+            // kernrw38 mirror: label local (subview của viền), ngưỡng 4pt.
+            CGPoint labelLocalPre = CGPointMake(labelCenter.x - fullBox.origin.x,
+                                                labelCenter.y - fullBox.origin.y);
+            if ((fabs(g_espLastLabelCenter[i].x - labelLocalPre.x) > 4.0 ||
+                 fabs(g_espLastLabelCenter[i].y - labelLocalPre.y) > 4.0) &&
                 nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ)) {
                 dirty = YES; break;
             }
@@ -2915,7 +2918,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
             if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
-            ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", hide ? 1 : 0);
+            // kernrw38: label là subview của viền -> ẩn theo cha, khỏi IPC riêng.
             g_espHiddenCache[i] = hide;
             if (hide) {
                 g_espRectValid[i] = NO;
@@ -2975,22 +2978,28 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
-        // Rate-limit setText: tối đa 5Hz (200ms) để không dồn IPC alloc/setText/release vào SpringBoard
+        // Rate-limit setText: tối đa 2Hz (500ms, kernrw38 từ 5Hz) — mét/HP đọc
+        // bằng mắt không cần nhanh hơn, mỗi setText là alloc+set+release IPC.
         // (s_lastTextAt hoist ở đầu hàm, dùng chung với pre-check idle).
         BOOL textChanged = (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0);
-        if (textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.2)) {
+        if (textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.5)) {
             s_lastTextAt[i] = nowP;
             NSString *dist = [NSString stringWithUTF8String:distTxt];
             ds_remote_set_text_on_main(process, g_espLabels[i], dist);
             snprintf(g_espLastDist[i], sizeof(g_espLastDist[i]), "%s", distTxt);
         }
-        // Vị trí label chỉ bắn ở ESP_OVERLAY_LABEL_HZ (không dồn mỗi frame theo textChanged)
+        // kernrw38: label là SUBVIEW của viền -> tọa độ LOCAL (trừ gốc fullBox),
+        // bắn bằng setCenter (1 call, không cần size). Ngưỡng 4pt + gate 10Hz:
+        // w box đổi mượt theo khoảng cách nên center local gần như đứng yên —
+        // lia máy/box chạy thì viền setFrame kéo label theo miễn phí.
+        CGPoint labelLocal = CGPointMake(labelCenter.x - fullBox.origin.x,
+                                         labelCenter.y - fullBox.origin.y);
         BOOL labelMoved = !g_espRectValid[i] ||
-            fabs(g_espLastLabelCenter[i].x - labelCenter.x) > 2.0 ||
-            fabs(g_espLastLabelCenter[i].y - labelCenter.y) > 2.0;
+            fabs(g_espLastLabelCenter[i].x - labelLocal.x) > 4.0 ||
+            fabs(g_espLastLabelCenter[i].y - labelLocal.y) > 4.0;
         if (labelMoved && (!g_espRectValid[i] || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
-            ds_remote_set_rect_on_main(process, g_espLabels[i], "setFrame:", lf);
-            g_espLastLabelCenter[i] = labelCenter;
+            ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelLocal);
+            g_espLastLabelCenter[i] = labelLocal;
             g_espLastLabelAt[i] = nowP;
         }
 
@@ -3198,7 +3207,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw37"
+#define DS_ESP_BUILD_TAG "kernrw38"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

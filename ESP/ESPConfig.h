@@ -53,12 +53,11 @@
 #define ESP_OVERLAY_LABEL_HZ 10
 
 // Nhịp PRESENT lên SpringBoard (IPC remote — KHÔNG phải nội suy thuần CPU).
-// kernrw18: invocation cache (dựng NSInvocation 1 lần/view/sel, các frame
-// sau chỉ write-arg + invoke: ~3 msg thay vì ~7) đưa mỗi lượt present từ
-// ~10-16ms về ~5-6ms -> quay lại 40Hz (ngân sách 25ms) để box 40fps, tải IPC
-// ~240ms/s nhẹ hơn cả thời 30Hz chưa cache. Aliasing 20Hz của bản kernrw17
-// (gate 29.3ms > tick 25ms) cũng hết.
-#define ESP_PRESENT_HZ 40
+// kernrw38: 40->30Hz. Với tick 40Hz (25ms), gate 1/30-4ms=29.3ms cho present
+// thực tế ~20/s (cách 1 tick). Đổi lại: tải IPC -50% so với 40Hz, ngân sách
+// 50ms/frame nuốt hết spike pMax ~60-130ms cũ -> hết rớt frame dây chuyền.
+// Box 20fps vẫn mượt mắt (data refresh giữ 40Hz, slot bám 40Hz).
+#define ESP_PRESENT_HZ 30
 
 // Bitmap overlay (kernrw19, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
 // suốt NGAY TRONG APP rồi ship 1 lần/frame (remote_write + setImage:).
