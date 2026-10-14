@@ -1355,8 +1355,8 @@ static thread_local uint64_t s_dsPool = 0;
 
 // ---- RemoteCall batch lock (kernrw22) ----
 // RemoteCall không thread-safe (1 hijacked thread + scratch dùng chung trong
-// SB). Từ kernrw21 ship bitmap chạy queue nền riêng -> mọi traffic RemoteCall
-// (bridge present/rate/fgPoll/enable/disable + ship + warmer) phải qua lock
+// SB). Mọi traffic RemoteCall
+// (bridge present/rate/fgPoll/enable/disable) phải qua lock
 // này theo BATCH (không khóa lẻ từng call vì scratch 0x800/0xC00 và text page
 // dùng chung giữa các bước của 1 invocation sequence). Recursive để
 // ensure/nested gọi nhau an toàn. Thứ tự lock: batch -> cache/symbol (leaf)
@@ -2378,511 +2378,11 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
     return ok;
 }
 
-// ---- Bitmap overlay (kernrw19, theo DSGames) ----
-// Vẽ TẤT CẢ box vào 1 bitmap trong suốt NGAY TRONG APP (CoreGraphics, ~1ms),
-// ship 1 lần/frame sang SB: remote_write pixels + UIImage imageWithCGImage:
-// + setImage: (~5 msg). Thay ~35 NSInvocation/frame của đường per-box.
-// Fail 3 lần liên tiếp -> tắt bitmap, rơi về per-box (không bao giờ mất ESP).
-// Buffer SB malloc 1 lần (remote_write sau đó chỉ là memcpy qua shmem cache);
-// release UIImage cũ mỗi frame (không là SB phình RAM); teardown khi disable.
-static uint64_t g_espBitmapView = 0;    // UIImageView trong SB
-static uint64_t g_espBitmapAddr = 0;    // pixel buffer RGBA trong SB
-static int g_espBitmapPxW = 0, g_espBitmapPxH = 0;
-static uint64_t g_espBitmapCtx = 0;     // CGBitmapContextCreate (SB)
-static uint64_t g_espBitmapCS = 0;      // colorspace (SB)
-static uint64_t g_espBitmapImage = 0;   // UIImage đang hiển thị (release frame sau)
-static BOOL g_espBitmapHiddenCache = YES;
-static int g_espBitmapFailStreak = 0;
-// kernrw41 v2: BẬT lại bitmap (thử có guard). Nguyên nhân đơ máy 19-23 đã
-// chốt: (1) setImage fail vẫn release-old + store dangling, (2) teardown
-// không release ảnh đang hiển thị, (3) churn 5MB/frame không phanh.
-// V2 sửa cả 3 + scale 1 + rate-cap 30Hz + auto-kill khi ship >250ms.
-static BOOL g_espBitmapDisabled = NO;
-static uint8_t *g_espBitmapLocal = NULL; // buffer local tái dùng
-static CGContextRef g_espBitmapLocalCtx = NULL;
-static int g_espBitmapLocalW = 0, g_espBitmapLocalH = 0;
-// Cache frame đã ship: giống hệt thì khỏi render+ship (tiết kiệm 5MB write).
-static ESPBox2D g_espBitmapLast[ESPOverlayMaxBoxes];
-static int g_espBitmapLastCount = -1;
-static CGRect g_espBitmapLastBounds = CGRectZero;
-static int g_espBitmapLastOrient = -1;
-// Kiểm toán cân bằng set/release (kernrw41 v2): mỗi setImage: phải có đúng 1
-// release-old tương ứng (trừ frame đang hiển thị). Lệch = rò RAM SB -> đơ máy
-// (bài học kernrw19-23). Log ở teardown.
-static unsigned long g_espBitmapSetCount = 0;
-static unsigned long g_espBitmapRelCount = 0;
-static CFAbsoluteTime s_bmpLastShipAt = 0;
-// Warmer: lần remote_write đầu phải map ~300 pages qua exploit (mỗi page chục
-// ms) — làm trên bridge là kẹt present hàng giây (thấy ở kernrw20: pres=3,
-// pAvg 690ms rồi bridge đứng). Warmer map dần ở queue nền; present đi legacy
-// cho tới khi warmed=YES.
-static BOOL g_espBitmapWarmed = NO;
-static dispatch_queue_t g_espBitmapWarmQueue = NULL;
-static BOOL s_bmpFirstShipLogged = NO;
-
-// ---- ĐỘ NÉT canvas (kernrw42) ----
-// Canvas là 812x375 *point*. Ship ở scale 1 = ảnh 812x375 px, UIImageView phóng
-// 3x lên màn 3x -> viền/chữ nhoè ("mờ đục"). Scale vẽ = scale màn hình thật
-// (UIScreen.scale, đọc 1 lần) -> 1 px ảnh = 1 pixel vật lý. Tự hạ 1 bậc khi
-// ship chậm liên tục (hạ nét còn hơn đơ máy), không tự nâng lại trong session.
-static int g_espBitmapScale = 0;              // 0 = chưa init
-static BOOL s_bmpScaleInit = NO;
-static int s_bmpSlowStreak = 0;
-// Frame ngay sau khi (re)map buffer: chi phí map page qua exploit (hàng trăm
-// ms) là 1 lần, KHÔNG tính là "SB nghẽn" -> miễn kiểm ngưỡng chậm 1 frame.
-static BOOL s_bmpRemapGrace = NO;
-
-static int ds_esp_bitmap_target_scale(void) {
-    if (!s_bmpScaleInit) {
-        s_bmpScaleInit = YES;
-        CGFloat ss = 1.0;
-        @try { ss = UIScreen.mainScreen.scale; } @catch (__unused NSException *e) { ss = 1.0; }
-        int s = (int)(ss + 0.5);
-        if (s < ESP_BITMAP_SCALE_MIN) s = ESP_BITMAP_SCALE_MIN;
-        if (s > ESP_BITMAP_SCALE_MAX) s = ESP_BITMAP_SCALE_MAX;
-        g_espBitmapScale = s;
-        ESPLog("esp bitmap scale init: screen=%.0fx -> render=%dx (nan 812x375p = %dx%d px)",
-               (double)ss, s, (int)(812 * s), (int)(375 * s));
-    }
-    return g_espBitmapScale;
-}
-
-// Hạ 1 bậc scale (đổi size buffer -> ensure() sẽ teardown + map lại). Trả về
-// scale mới (giữ nguyên nếu đã ở min).
-static int ds_esp_bitmap_drop_scale(const char *why, double ms) {
-    int cur = ds_esp_bitmap_target_scale();
-    if (cur <= ESP_BITMAP_SCALE_MIN) return cur;
-    g_espBitmapScale = cur - 1;
-    s_bmpRemapGrace = YES;   // frame map lại tốn 1 lần, đừng tính là nghẽn
-    s_bmpSlowStreak = 0;
-    ESPLog("esp bitmap ha scale %d -> %d (%s %.0fms)", cur, g_espBitmapScale, why, ms);
-    return g_espBitmapScale;
-}
-
-static void ds_esp_bitmap_note_ship_ms(double ms) {
-    if (ms <= ESP_BITMAP_SLOW_MS) { s_bmpSlowStreak = 0; return; }
-    if (++s_bmpSlowStreak < ESP_BITMAP_SLOW_STREAK) return;
-    ds_esp_bitmap_drop_scale("ship cham", ms);
-}
-
-static BOOL ds_esp_bitmap_fail(const char *why) {
-    ESPLog("esp bitmap fail: %s (streak=%d)", why, g_espBitmapFailStreak + 1);
-    if (++g_espBitmapFailStreak >= 3) {
-        g_espBitmapDisabled = YES;
-        // Về per-box: vẽ lại hết (text/rect legacy có thể cũ).
-        for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
-        ESPLog("esp bitmap OFF -> per-box fallback");
-    }
-    return NO;
-}
-
-static void ds_esp_bitmap_warm_async(RemoteCall *process) {
-    if (!process) return;
-    if (!g_espBitmapWarmQueue) {
-        g_espBitmapWarmQueue = dispatch_queue_create("esp-bitmap-warm", DISPATCH_QUEUE_SERIAL);
-    }
-    // Chụp địa chỉ/session lúc dispatch; verify lại sau write (disable/enable
-    // xen giữa sẽ đổi addr/session -> bỏ, không set warmed bậy).
-    // Buffer nguồn calloc riêng trong warmer (không đụng buffer render của
-    // bridge -> không lifetime race với teardown).
-    uint64_t addr = g_espBitmapAddr;
-    uint64_t troj = process.trojanMem;
-    int pxW = g_espBitmapPxW, pxH = g_espBitmapPxH;
-    dispatch_async(g_espBitmapWarmQueue, ^{
-        CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-        size_t bytes = (size_t)pxW * (size_t)pxH * 4;
-        BOOL ok = NO;
-        uint8_t *tmp = (bytes > 0 && bytes <= 64 * 1024 * 1024) ? (uint8_t *)calloc(1, bytes) : NULL;
-        if (tmp && addr && process.trojanMem == troj && troj != 0) {
-            std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
-            ok = [process remote_write:addr from:tmp size:(uint64_t)bytes];
-        }
-        if (tmp) free(tmp);
-        double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
-        if (ok && addr == g_espBitmapAddr && process.trojanMem == troj &&
-            pxW == g_espBitmapPxW && pxH == g_espBitmapPxH) {
-            g_espBitmapWarmed = YES;
-            ESPLog("esp bitmap warmed: %.0fms (%zu pages est)", ms, bytes / 16384);
-        } else {
-            ESPLog("esp bitmap warm FAIL after %.0fms (legacy meanwhile)", ms);
-        }
-    });
-}
-
-static void ds_esp_bitmap_teardown(RemoteCall *process) {
-    if (g_espBitmapLocalCtx) { CGContextRelease(g_espBitmapLocalCtx); g_espBitmapLocalCtx = NULL; }
-    if (g_espBitmapLocal) { free(g_espBitmapLocal); g_espBitmapLocal = NULL; }
-    g_espBitmapLocalW = g_espBitmapLocalH = 0;
-    g_espBitmapLastCount = -1;
-    if (process && process.trojanMem) {
-        void *freeSym = ds_remote_system_symbol("free");
-        void *ctxRelSym = ds_remote_system_symbol("CGBitmapContextRelease");
-        void *csRelSym = ds_remote_system_symbol("CGColorSpaceRelease");
-        if (freeSym && g_espBitmapAddr) DSRemoteArbCallWithTimeout(1, process, freeSym, g_espBitmapAddr);
-        if (ctxRelSym && g_espBitmapCtx) DSRemoteArbCallWithTimeout(1, process, ctxRelSym, g_espBitmapCtx);
-        if (csRelSym && g_espBitmapCS) DSRemoteArbCallWithTimeout(1, process, csRelSym, g_espBitmapCS);
-        // kernrw41 v2: release ảnh đang hiển thị (trước đây zero luôn -> rò
-        // 4.6MB/session trong SB). release an toàn trên hijacked thread như
-        // mọi frame (chỉ UIView mới cấm dealloc ngoài main).
-        if (g_espBitmapImage) {
-            remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
-            g_espBitmapRelCount++;
-        }
-        // UIImageView leak theo policy (dealloc UIView trên hijacked thread =
-        // crash SB); chỉ ẩn view.
-        if (g_espBitmapView) ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 1);
-    }
-    if (g_espBitmapSetCount != g_espBitmapRelCount) {
-        ESPLog("esp bitmap imbalance: set=%lu rel=%lu (rò %ld ảnh trong SB!)",
-               g_espBitmapSetCount, g_espBitmapRelCount,
-               (long)g_espBitmapSetCount - (long)g_espBitmapRelCount);
-    }
-    g_espBitmapSetCount = 0; g_espBitmapRelCount = 0;
-    g_espBitmapView = 0; g_espBitmapAddr = 0; g_espBitmapCtx = 0; g_espBitmapCS = 0;
-    g_espBitmapImage = 0; g_espBitmapPxW = g_espBitmapPxH = 0;
-    g_espBitmapHiddenCache = YES;
-    g_espBitmapWarmed = NO;
-}
-
-static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
-    if (!process || !process.trojanMem) return NO;
-    int sc = ds_esp_bitmap_target_scale();
-    int pxW = (int)(portraitBounds.size.width * sc + 0.5);
-    int pxH = (int)(portraitBounds.size.height * sc + 0.5);
-    if (pxW < 8 || pxH < 8 || pxW > 4096 || pxH > 4096) return NO;
-    if (g_espBitmapView && g_espBitmapCtx && g_espBitmapAddr &&
-        pxW == g_espBitmapPxW && pxH == g_espBitmapPxH) return YES;
-    // Size đổi/session mới -> dựng lại từ đầu.
-    ds_esp_bitmap_teardown(process);
-    if (!process.trojanMem) return NO;
-    void *mallocSym = ds_remote_system_symbol("malloc");
-    void *freeSym = ds_remote_system_symbol("free");
-    void *csSym = ds_remote_system_symbol("CGColorSpaceCreateDeviceRGB");
-    void *csRelSym = ds_remote_system_symbol("CGColorSpaceRelease");
-    void *ctxSym = ds_remote_system_symbol("CGBitmapContextCreate");
-    if (!mallocSym || !freeSym || !csSym || !ctxSym) return NO;
-    size_t bytes = (size_t)pxW * (size_t)pxH * 4;
-    uint64_t buf = (uint64_t)DSRemoteArbCallWithTimeout(2, process, mallocSym, (uint64_t)bytes);
-    if (!buf || !process.trojanMem) return NO;
-    // Fault-in toàn bộ pages trong SB (malloc mới là zero-fill chưa chạm —
-    // vmmapremotepage bên remote_write có thể không map được page chưa hiện).
-    void *memsetSym = ds_remote_system_symbol("memset");
-    if (memsetSym && process.trojanMem) {
-        DSRemoteArbCallWithTimeout(2, process, memsetSym, buf, (uint64_t)0, (uint64_t)bytes);
-        if (!process.trojanMem) {
-            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
-            return NO;
-        }
-    }
-    uint64_t cs = (uint64_t)DSRemoteArbCallWithTimeout(1, process, csSym, (uint64_t)0);
-    if (!cs || !process.trojanMem) {
-        DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
-        return NO;
-    }
-    // RGBA8888 premultiplied-last, row = w*4.
-    uint64_t ctx = (uint64_t)DSRemoteArbCallWithTimeout(
-        2, process, ctxSym, buf, (uint64_t)pxW, (uint64_t)pxH, (uint64_t)8,
-        (uint64_t)(pxW * 4), cs, (uint64_t)(1 | (4 << 12)));
-    if (!ctx || !process.trojanMem) {
-        if (process.trojanMem) {
-            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
-            if (csRelSym) DSRemoteArbCallWithTimeout(1, process, csRelSym, cs);
-        }
-        return NO;
-    }
-    // UIImageView phủ container (pattern như label: init + setFrame + addSubview).
-    uint64_t viewClass = ds_remote_class(process, "UIImageView");
-    uint64_t alloc = ds_remote_sel(process, "alloc");
-    uint64_t iv = viewClass && alloc ? remote_msg(process, viewClass, alloc, 0, 0, 0, 0) : 0;
-    BOOL ok = (iv && ds_remote_invoke_noarg_on_main(process, iv, "init"));
-    if (ok) {
-        uint64_t clear = ds_remote_get_object_on_main(process, ds_remote_class(process, "UIColor"), "clearColor");
-        ds_remote_set_rect_on_main(process, iv, "setFrame:", portraitBounds);
-        if (clear) ds_perform_on_springboard_main(process, iv, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
-        ds_remote_set_u64_on_main(process, iv, "setUserInteractionEnabled:", 0);
-        ds_remote_set_u64_on_main(process, iv, "setHidden:", 1);
-        ds_perform_on_springboard_main(process, g_espContainer, ds_remote_sel(process, "addSubview:"), iv, YES);
-        ok = (process.trojanMem != 0);
-    }
-    if (!ok || !process.trojanMem) {
-        if (process.trojanMem) {
-            void *ctxRelSym = ds_remote_system_symbol("CGBitmapContextRelease");
-            DSRemoteArbCallWithTimeout(1, process, freeSym, buf);
-            if (csRelSym) DSRemoteArbCallWithTimeout(1, process, csRelSym, cs);
-            if (ctxRelSym) DSRemoteArbCallWithTimeout(1, process, ctxRelSym, ctx);
-        }
-        return NO;
-    }
-    g_espBitmapView = iv; g_espBitmapAddr = buf; g_espBitmapCtx = ctx; g_espBitmapCS = cs;
-    g_espBitmapPxW = pxW; g_espBitmapPxH = pxH;
-    g_espBitmapImage = 0; g_espBitmapHiddenCache = YES; g_espBitmapFailStreak = 0;
-    g_espBitmapLastCount = -1;
-    g_espBitmapWarmed = NO;
-    s_bmpFirstShipLogged = NO;
-    s_bmpSlowStreak = 0;
-    s_bmpRemapGrace = YES; // frame đầu map ~hàng trăm page: miễn ngưỡng chậm
-    ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB, scale=%d)",
-           (double)portraitBounds.size.width, (double)portraitBounds.size.height,
-           pxW, pxH, (double)bytes / 1048576.0, sc);
-    // kernrw23: KHÔNG warm nền nữa (warmer thread revert cùng ship queue).
-    // Lần ship đầu map ~300 pages ngay trên bridge (kẹt 1-3s một lần, chấp
-    // nhận tạm — legacy/fallback vẫn sống nếu fail).
-    return YES;
-}
-
-// Context vẽ local (tái dùng theo size). Flip Y 1 lần lúc tạo để hệ tọa độ
-// trùng UIKit (gốc trên-trái) — không flip là ảnh ngược.
-static CGContextRef ds_esp_bitmap_local_ctx(int pxW, int pxH) {
-    if (g_espBitmapLocalCtx && g_espBitmapLocalW == pxW && g_espBitmapLocalH == pxH) {
-        return g_espBitmapLocalCtx;
-    }
-    if (g_espBitmapLocalCtx) { CGContextRelease(g_espBitmapLocalCtx); g_espBitmapLocalCtx = NULL; }
-    if (g_espBitmapLocal) { free(g_espBitmapLocal); g_espBitmapLocal = NULL; }
-    size_t bytes = (size_t)pxW * (size_t)pxH * 4;
-    g_espBitmapLocal = (uint8_t *)calloc(1, bytes);
-    if (!g_espBitmapLocal) return NULL;
-    static CGColorSpaceRef rgb = NULL;
-    if (!rgb) rgb = CGColorSpaceCreateDeviceRGB();
-    g_espBitmapLocalCtx = CGBitmapContextCreate(
-        g_espBitmapLocal, pxW, pxH, 8, pxW * 4, rgb,
-        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    if (!g_espBitmapLocalCtx) return NULL;
-    CGContextTranslateCTM(g_espBitmapLocalCtx, 0, pxH);
-    CGContextScaleCTM(g_espBitmapLocalCtx, 1, -1);
-    g_espBitmapLocalW = pxW; g_espBitmapLocalH = pxH;
-    return g_espBitmapLocalCtx;
-}
-
-static BOOL ds_esp_bitmap_boxes_same(ESPBox2D *a, ESPBox2D *b) {
-    return a->x == b->x && a->y == b->y && a->w == b->w && a->h == b->h &&
-           a->distance == b->distance && a->health == b->health &&
-           a->visible == b->visible && a->actor == b->actor;
-}
-
-static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int count,
-                                   CGRect portraitBounds, int orientation,
-                                   CGFloat landW, CGFloat landH, CGPoint winCenter, int mapOrient) {
-    if (g_espBitmapDisabled) return NO;
-    if (!process || !process.trojanMem) return NO;
-    // Toàn bộ batch remote của ship dưới 1 lock (render local ~1ms cũng nằm
-    // trong để đơn giản — bridge-legacy chờ vài ms là cùng).
-    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
-    if ((!g_espWindow || !g_espContainer) &&
-        !ds_esp_overlay_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure-full");
-    if (!ds_esp_bitmap_ensure(process, portraitBounds)) return ds_esp_bitmap_fail("ensure");
-    // Window show/hide mirror đường legacy.
-    BOOL wantHidden = (count <= 0);
-    if (wantHidden != g_espWindowHiddenCache) {
-        ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", wantHidden ? 1 : 0);
-        g_espWindowHiddenCache = wantHidden;
-    }
-    // Ẩn legacy views 1 lần (chế độ bitmap chúng không vẽ gì).
-    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        if (!g_espHiddenCache[i]) {
-            if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
-            if (g_espLabels[i]) ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
-            g_espHiddenCache[i] = YES;
-        }
-    }
-    int visN = 0;
-    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        ESPBox2D b = boxes[i];
-        if (!(b.visible == 0 || b.w < 1.0f || b.h < 2.0f)) visN++;
-    }
-    if (wantHidden || visN == 0) {
-        if (!g_espBitmapHiddenCache) {
-            ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 1);
-            g_espBitmapHiddenCache = YES;
-        }
-        memcpy(g_espBitmapLast, boxes, sizeof(g_espBitmapLast));
-        g_espBitmapLastCount = count;
-        g_espBitmapLastBounds = portraitBounds;
-        g_espBitmapLastOrient = orientation;
-        return YES;
-    }
-    // Frame giống hệt đã ship -> khỏi render+ship (tiết kiệm 5MB write).
-    BOOL same = (count == g_espBitmapLastCount &&
-                 orientation == g_espBitmapLastOrient &&
-                 CGRectEqualToRect(portraitBounds, g_espBitmapLastBounds));
-    for (int i = 0; same && i < ESPOverlayMaxBoxes; i++) {
-        if (!ds_esp_bitmap_boxes_same(&boxes[i], &g_espBitmapLast[i])) same = NO;
-    }
-    if (same) return YES;
-    // Rate cap (kernrw41 v2): ship liên tục là nguồn churn RAM SB. Frame giống
-    // đã skip ở trên; frame khác mà trong 33ms (30Hz) thì giữ frame cũ.
-    {
-        CFAbsoluteTime nowS = CFAbsoluteTimeGetCurrent();
-        if (s_bmpLastShipAt > 0 && nowS - s_bmpLastShipAt < (1.0 / ESP_BITMAP_SHIP_HZ)) {
-            return YES;
-        }
-        s_bmpLastShipAt = nowS;
-    }
-    // Render local vào buffer tái dùng (đỏ viền 2pt + chữ trắng 10pt bold,
-    // y hệt legacy: border đỏ, label trắng "12m 87%").
-    // Scale thật lấy từ buffer ĐÃ CẤP PHÁT (g_espBitmapPxW / bề rộng point) —
-    // luôn khớp canvas đang vẽ, kể cả sau khi tự hạ scale.
-    CGFloat ptW = portraitBounds.size.width > 1.0 ? portraitBounds.size.width : 1.0;
-    float sc = (float)((double)g_espBitmapPxW / (double)ptW);
-    CGContextRef ctx = ds_esp_bitmap_local_ctx(g_espBitmapPxW, g_espBitmapPxH);
-    if (!ctx) return ds_esp_bitmap_fail("localctx");
-    CGContextClearRect(ctx, CGRectMake(0, 0, g_espBitmapPxW, g_espBitmapPxH));
-    CGContextSetStrokeColorWithColor(ctx, [UIColor redColor].CGColor);
-    CGFloat lw = 2.0 * sc;
-    CGContextSetLineWidth(ctx, lw);
-    static UIFont *s_bmpFont = nil;
-    static NSDictionary *s_bmpAttrs = nil;
-    static dispatch_once_t s_bmpOnce;
-    dispatch_once(&s_bmpOnce, ^{
-        s_bmpFont = [UIFont boldSystemFontOfSize:10.0 * sc];
-        NSShadow *sh = [[NSShadow alloc] init];
-        sh.shadowColor = [UIColor blackColor];
-        sh.shadowOffset = CGSizeMake(0, 1.0 * sc);
-        sh.shadowBlurRadius = 1.0 * sc;
-        s_bmpAttrs = @{NSFontAttributeName: s_bmpFont,
-                       NSForegroundColorAttributeName: [UIColor whiteColor],
-                       NSShadowAttributeName: sh};
-    });
-    for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        ESPBox2D b = boxes[i];
-        if (b.visible == 0 || b.w < 1.0f || b.h < 2.0f) continue;
-        if (!isfinite(b.x) || !isfinite(b.y) || !isfinite(b.w) || !isfinite(b.h)) continue;
-        CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
-                                         landW, landH, winCenter, mapOrient);
-        CGRect r = CGRectMake(fullBox.origin.x * sc + lw * 0.5,
-                              fullBox.origin.y * sc + lw * 0.5,
-                              fullBox.size.width * sc - lw,
-                              fullBox.size.height * sc - lw);
-        if (r.size.width < 2 || r.size.height < 4) continue;
-        CGContextStrokeRect(ctx, r);
-        char distTxt[24] = {0};
-        if (b.health >= 0 && b.health <= 100) {
-            snprintf(distTxt, sizeof(distTxt), "%.0fm %d%%", b.distance, b.health);
-        } else {
-            snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
-        }
-        NSString *s = [NSString stringWithUTF8String:distTxt];
-        if (!s) continue;
-        CGSize ts = [s sizeWithAttributes:s_bmpAttrs];
-        CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
-        CGPoint lc = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
-                                      landW, landH, winCenter, mapOrient);
-        [s drawAtPoint:CGPointMake(lc.x * sc - ts.width * 0.5, lc.y * sc - ts.height * 0.5)
-        withAttributes:s_bmpAttrs];
-    }
-    // Pool riêng cho UIImage autorelease (bitmap branch chạy trước pool chung).
-    // Log stage khi ship đầu hoặc khi chậm bất thường (>100ms) để bắt đúng
-    // khâu kẹt (write mapping? createimage? setimage chờ SB main?).
-    CFAbsoluteTime tShip0 = CFAbsoluteTimeGetCurrent();
-    BOOL beganPool = (s_dsPoolDepth == 0);
-    ds_remote_pool_begin(process);
-    @try {
-        size_t bytes = (size_t)g_espBitmapPxW * (size_t)g_espBitmapPxH * 4;
-        if (![process remote_write:g_espBitmapAddr from:g_espBitmapLocal size:(uint64_t)bytes]) {
-            return ds_esp_bitmap_fail("write");
-        }
-        CFAbsoluteTime tShipW = CFAbsoluteTimeGetCurrent();
-        void *createImageSym = ds_remote_system_symbol("CGBitmapContextCreateImage");
-        void *cgRelSym = ds_remote_system_symbol("CGImageRelease");
-        if (!createImageSym) return ds_esp_bitmap_fail("sym");
-        uint64_t cg = (uint64_t)DSRemoteArbCallWithTimeout(2, process, createImageSym, g_espBitmapCtx);
-        if (!cg || !process.trojanMem) return ds_esp_bitmap_fail("createimage");
-        CFAbsoluteTime tShipC = CFAbsoluteTimeGetCurrent();
-        uint64_t uiClass = ds_remote_class(process, "UIImage");
-        // kernrw42: imageWithCGImage:scale:orientation: với scale = scale canvas
-        // -> image.size (point) == frame (point) nên UIKit vẽ 1:1 pixel vật lý,
-        // không resample. Bản cũ (imageWithCGImage: -> scale 1) biến ảnh
-        // 2436x1125 px thành "2436 point" rồi bị thu lại vào frame 812x375pt
-        // = resample 3:1 -> nhoè thêm lần nữa.
-        // Dùng bản RETAIN (không phải factory autorelease) để vòng đời ảnh
-        // khớp đúng 1 retain của mình — release frame sau là cân, không để lại
-        // entry autorelease trỏ vào ảnh đã chết.
-        uint64_t img = 0;
-        if (uiClass && process.trojanMem) {
-            double imgScale = (double)sc;
-            long long imgOrient = 0; // UIImageOrientationUp
-            DSRemoteArgument imgArgs[2] = {
-                { &imgScale, (uint64_t)sizeof(imgScale) },
-                { &imgOrient, (uint64_t)sizeof(imgOrient) },
-            };
-            img = ds_remote_get_retained_object_on_main(
-                process, uiClass, "imageWithCGImage:scale:orientation:", imgArgs, 2);
-        }
-        if (cgRelSym && process.trojanMem) DSRemoteArbCallWithTimeout(1, process, cgRelSym, cg);
-        if (!img || !process.trojanMem) return ds_esp_bitmap_fail("uiimage");
-        // kernrw41 v2: KIỂM TRA setImage (trước đây bỏ qua BOOL này — setImage
-        // fail mà vẫn release-old + store img mới (dangling, pool đã drain) ->
-        // frame sau release vào rác = crash/rò SB. Fail ở đây: giữ nguyên
-        // (old còn hiển thị, img mới pool dọn), về fallback.
-        BOOL setOK = ds_perform_on_springboard_main(process, g_espBitmapView, ds_remote_sel(process, "setImage:"), img, YES);
-        CFAbsoluteTime tShipS = CFAbsoluteTimeGetCurrent();
-        double totMs = (tShipS - tShip0) * 1000.0;
-        if (!s_bmpFirstShipLogged || totMs > 100.0) {
-            s_bmpFirstShipLogged = YES;
-            ESPLog("esp bitmap ship: total=%.0fms write=%.0f create=%.0f set=%.0f (scale=%d)",
-                   totMs, (tShipW - tShip0) * 1000.0,
-                   (tShipC - tShipW) * 1000.0, (tShipS - tShipC) * 1000.0,
-                   ds_esp_bitmap_target_scale());
-        }
-        if (!setOK || !process.trojanMem) {
-            // kernrw42: ảnh đang giữ 1 retain (bản retained) nhưng chưa lên view
-            // -> trả ngay, không thì rò 1 ảnh mỗi lần setImage fail.
-            if (img && process.trojanMem) {
-                remote_msg(process, img, ds_remote_sel(process, "release"), 0, 0, 0, 0);
-            }
-            return ds_esp_bitmap_fail("setimage");
-        }
-        // kernrw42: frame map lại (remap grace) hoặc ship đầu KHÔNG tính là
-        // nghẽn — map page qua exploit tốn hàng trăm ms một lần. Nhưng nếu quá
-        // đắt (>1.2s) thì đãi scale xuống cho các frame sau.
-        BOOL graceShip = s_bmpRemapGrace;
-        s_bmpRemapGrace = NO;
-        if (graceShip) {
-            if (totMs > 1200.0) ds_esp_bitmap_drop_scale("remap dat", totMs);
-        } else {
-            ds_esp_bitmap_note_ship_ms(totMs);
-            if (totMs > 250.0) {
-                if (ds_esp_bitmap_target_scale() > ESP_BITMAP_SCALE_MIN) {
-                    // Còn dư địa hạ nét: giữ ESP sống, đổi sang canvas nhẹ hơn.
-                    ds_esp_bitmap_drop_scale("ship rat cham", totMs);
-                } else {
-                    // Đã ở scale thấp nhất mà vẫn nghẽn: SB đơ thật -> tắt
-                    // bitmap cả session (bài học kernrw19-23). Frame này vẽ
-                    // lại hết đường legacy.
-                    g_espBitmapDisabled = YES;
-                    for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
-                    ESPLog("esp bitmap SLOW %.0fms -> OFF (anti-freeze)", totMs);
-                    return NO;
-                }
-            }
-        }
-        if (g_espBitmapImage) {
-            remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
-            g_espBitmapRelCount++;
-        }
-        g_espBitmapImage = img;
-        g_espBitmapSetCount++;
-        if (g_espBitmapHiddenCache) {
-            ds_remote_set_u64_on_main(process, g_espBitmapView, "setHidden:", 0);
-            g_espBitmapHiddenCache = NO;
-        }
-    } @finally {
-        if (beganPool) ds_remote_pool_end(process);
-    }
-    if (!process.trojanMem) return ds_esp_bitmap_fail("died");
-    g_espBitmapFailStreak = 0;
-    memcpy(g_espBitmapLast, boxes, sizeof(g_espBitmapLast));
-    g_espBitmapLastCount = count;
-    g_espBitmapLastBounds = portraitBounds;
-    g_espBitmapLastOrient = orientation;
-    return YES;
-}
-
 static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
-    // Legacy per-box chạy trên bridge; ship bitmap chạy queue riêng — chung
-    // lock batch (kernrw22). Bitmap branch đã chuyển hẳn sang ship queue
-    // (present_single enqueue), hàm này chỉ còn đường legacy/fallback.
+    // Vẽ per-box trực tiếp trên bridge dưới batch lock (kernrw43: bitmap đã
+    // bị xoá hẳn — xem ghi chú ds_finish_disable).
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
     // Hoist lên đầu hàm để pre-check idle (trước pool) dùng chung với vòng vẽ
@@ -2908,14 +2408,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                       orientation == UIInterfaceOrientationLandscapeRight))
                         ? orientation
                         : UIInterfaceOrientationPortrait;
-    // kernrw23: bitmap chạy TẠI CHỖ trên bridge (single RemoteCall thread).
-    // Ship queue nền (kernrw22) gây đơ máy vài giây sau khi ESP hiện — revert
-    // để an toàn, điều tra nguyên nhân qua panic log. Thành công/không đổi
-    // frame thì return (kể cả idle-skip); fail thì rơi xuống per-box.
-    if (!g_espBitmapDisabled) {
-        if (ds_esp_bitmap_present(process, boxes, count, portraitBounds, orientation,
-                                  landW, landH, winCenter, mapOrient)) return;
-    }
+    // kernrw43: bitmap overlay đã bị XOÁ HOÀN TOÀN (nó là nguồn gây đơ máy).
+    // ESP giờ chỉ vẽ per-box ở vòng lặp bên dưới.
     // Pre-check idle thuần CPU (0 remote call): frame nào không có gì đổi —
     // không box dịch/vẽ lại, không label/text đến hạn, không đổi container/
     // orient, không diag 1 lần — thì return luôn, khỏi mở pool (tiết kiệm
@@ -3269,7 +2763,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
 static void ds_update_rate(void) {
     if (!g_hudRequested.load() || !g_hudActive.load() || !g_springBoard || !g_remoteLabel) return;
-    // Rate 1Hz chạy bridge, ship bitmap chạy queue riêng -> chung batch lock.
+    // Rate 1Hz chạy bridge -> lấy batch lock.
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
 
     uint64_t input = 0;
@@ -3340,7 +2834,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw42"
+#define DS_ESP_BUILD_TAG "kernrw43"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3380,8 +2874,7 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     if (!frame) return;
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
-    // kernrw23: single-thread (ship queue revert). Bitmap branch nằm trong
-    // overlay_update bên dưới. Legacy/fallback chạy tại chỗ dưới batch lock.
+    // kernrw43: single-thread. Vẽ per-box chạy tại chỗ dưới batch lock.
     // kernrw41: backpressure — present trước chậm (>40ms, SB nghẽn) thì bỏ 1
     // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
     // không bao giờ thêm việc nên không thể gây kẹt.
@@ -3476,124 +2969,6 @@ static void ds_esp_schedule_present(DSESPFrame *frame) {
             ds_esp_presentation_loop();
         });
     }
-}
-
-// ---- Bitmap ship queue (kernrw22) ----
-// setImage: chờ SB main từng treo 10s (kernrw21: ship total=10008ms, set=
-// 10005) — chạy ship trên queue riêng để bridge (HUD text/rate/enable,
-// present pacing) không bao giờ kẹt theo. Bridge chỉ copy frame + retain proc
-// rồi return (µs). Ship lấy frame MỚI NHẤT (exchange, frame cũ vứt) nên SB
-// stall thì tự coalesce, hồi phục tự động. Mọi traffic RemoteCall (ship +
-// bridge + warmer) qua s_rcBatchMutex vì scratch/hijacked thread dùng chung.
-static dispatch_queue_t g_espShipQueue = NULL;
-static std::atomic_bool s_shipRunning{false};
-static std::atomic<uint32_t> s_shipEnqueued{0};
-typedef struct {
-    DSESPFrame frame; // copy theo giá trị
-    RemoteCall *proc; // unsafe_unretained trong malloc struct; retain tay lúc enqueue
-} DSShipItem;
-static std::atomic<DSShipItem *> s_shipLatest{nullptr};
-
-static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame); // fwd
-static void ds_esp_ship_heartbeat(void); // fwd
-
-static void ds_esp_ship_pump(void) {
-    while (true) {
-        DSShipItem *item = s_shipLatest.exchange(nullptr);
-        if (!item) {
-            s_shipRunning.store(false);
-            item = s_shipLatest.exchange(nullptr);
-            if (!item) break;
-            s_shipRunning.store(true);
-        }
-        RemoteCall *proc = item->proc;
-        @try {
-            if (proc && proc.trojanMem) {
-                ds_esp_bitmap_present_from_frame(proc, &item->frame);
-            }
-        } @catch (NSException *e) {
-            ESPLog("ESP ship pump exception: %@", e.reason);
-        }
-        if (proc) CFRelease((__bridge CFTypeRef)proc);
-        free(item);
-    }
-}
-
-static void ds_esp_ship_enqueue(DSESPFrame *frame, RemoteCall *process) {
-    if (!frame) return;
-    if (!process) { free(frame); return; }
-    if (!g_espShipQueue) {
-        g_espShipQueue = dispatch_queue_create("esp-bitmap-ship", DISPATCH_QUEUE_SERIAL);
-    }
-    DSShipItem *item = (DSShipItem *)malloc(sizeof(DSShipItem));
-    if (!item) { free(frame); return; }
-    item->frame = *frame;
-    item->proc = process;
-    CFRetain((__bridge CFTypeRef)process);
-    free(frame);
-    DSShipItem *old = s_shipLatest.exchange(item);
-    if (old) {
-        // Frame cũ chưa ship kịp -> vứt (coalesce khi SB stall).
-        if (old->proc) CFRelease((__bridge CFTypeRef)old->proc);
-        free(old);
-    }
-    s_shipEnqueued.fetch_add(1, std::memory_order_relaxed);
-    bool expected = false;
-    if (s_shipRunning.compare_exchange_strong(expected, true)) {
-        dispatch_async(g_espShipQueue, ^{
-            ds_esp_ship_pump();
-        });
-    }
-}
-
-// Ship 1 frame trên ship queue: tính geometry + vẽ + ship + đo cost vào
-// counter present chung + heartbeat riêng (phân biệt ship stall vs bridge stall).
-// (Định nghĩa ở đây vì cần DSESPFrame + counter khai báo phía trên.)
-static void ds_esp_bitmap_present_from_frame(RemoteCall *process, DSESPFrame *frame) {
-    if (!process || !frame) return;
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-    @try {
-        CGRect bounds = frame->bounds;
-        CGFloat landW = MAX(bounds.size.width, bounds.size.height);
-        CGFloat landH = MIN(bounds.size.width, bounds.size.height);
-        CGPoint winCenter = CGPointMake(CGRectGetMidX(bounds), CGRectGetMidY(bounds));
-        BOOL scenePortrait = bounds.size.height > bounds.size.width;
-        int mapOrient = (scenePortrait &&
-                         (frame->orient == UIInterfaceOrientationLandscapeLeft ||
-                          frame->orient == UIInterfaceOrientationLandscapeRight))
-                            ? frame->orient
-                            : UIInterfaceOrientationPortrait;
-        ds_esp_bitmap_present(process, frame->boxes, frame->count,
-                              bounds, frame->orient,
-                              landW, landH, winCenter, mapOrient);
-    } @catch (NSException *e) {
-        ESPLog("ESP ship frame failed: %@", e.reason);
-    }
-    double usP = (CFAbsoluteTimeGetCurrent() - t0) * 1000000.0;
-    if (usP < 0) usP = 0;
-    s_presentN.fetch_add(1, std::memory_order_relaxed);
-    s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
-    uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);
-    while (usP > (double)prevMax &&
-           !s_presentMaxUs.compare_exchange_weak(prevMax, (uint32_t)usP,
-                                                 std::memory_order_relaxed)) {
-    }
-    ds_esp_ship_heartbeat();
-}
-
-// Heartbeat từ SHIP QUEUE: mất dấu trong khi present hb (bridge) vẫn chạy =
-// ship kẹt (VD chờ SB main). Cả hai cùng mất = app/queue chết.
-static void ds_esp_ship_heartbeat(void) {
-    static CFAbsoluteTime s_lastShipHb = 0;
-    CFAbsoluteTime nowHb = CFAbsoluteTimeGetCurrent();
-    if (nowHb - s_lastShipHb < 5.0) return;
-    s_lastShipHb = nowHb;
-    uint32_t n = s_presentN.load(std::memory_order_relaxed);
-    uint64_t tot = s_presentUsTotal.load(std::memory_order_relaxed);
-    double avg = n ? (double)tot / (double)n / 1000.0 : 0.0;
-    ESPLog("ship hb: enq=%u n=%u pAvg=%.1f pMax=%.1fms",
-           s_shipEnqueued.load(std::memory_order_relaxed),
-           n, avg, (double)s_presentMaxUs.load(std::memory_order_relaxed) / 1000.0);
 }
 
 static void ds_esp_tick(void) {
@@ -4145,8 +3520,8 @@ BOOL DSBridgeBootstrap(void) {
 }
 
 static void ds_finish_disable(void) {
-    // Ship bitmap có thể đang giữ batch (VD kẹt chờ SB) -> disable chờ batch
-    // xong mới teardown/destroy (không bao giờ remote_write vào buffer vừa free).
+    // kernrw43: bitmap overlay đã bị xoá hẳn (nguồn gây đơ máy 19-42), nên
+    // không còn ship queue/buffer trong SB phải chờ trước khi destroy session.
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     ds_set_stage(ds_localized(@"Closing HUD"));
     ds_unregister_hud_notifications();
@@ -4157,11 +3532,6 @@ static void ds_finish_disable(void) {
     ESPProviderShutdown(); // reset degraded/counters của provider
     g_hudActive.store(false);
     if (process) {
-        @try {
-            // Nhả buffer/ctx bitmap trong SB trước khi huỷ session (kẻo rò
-            // ~5MB mỗi lần tắt/bật). UIImageView leak theo policy chung.
-            ds_esp_bitmap_teardown(process);
-        } @catch (__unused NSException *e) {}
         @try {
             ds_remove_springboard_hud(process);
         } @catch (NSException *exception) {
@@ -4201,7 +3571,6 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
-    g_espBitmapDisabled = NO; // kernrw41 v2 + kernrw42 (scale = màn hình thật)
     g_espPathDisabled = YES; // kernrw27: path batching đã chứng minh gây respring
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
