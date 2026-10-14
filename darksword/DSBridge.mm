@@ -2420,6 +2420,51 @@ static BOOL g_espBitmapWarmed = NO;
 static dispatch_queue_t g_espBitmapWarmQueue = NULL;
 static BOOL s_bmpFirstShipLogged = NO;
 
+// ---- ĐỘ NÉT canvas (kernrw42) ----
+// Canvas là 812x375 *point*. Ship ở scale 1 = ảnh 812x375 px, UIImageView phóng
+// 3x lên màn 3x -> viền/chữ nhoè ("mờ đục"). Scale vẽ = scale màn hình thật
+// (UIScreen.scale, đọc 1 lần) -> 1 px ảnh = 1 pixel vật lý. Tự hạ 1 bậc khi
+// ship chậm liên tục (hạ nét còn hơn đơ máy), không tự nâng lại trong session.
+static int g_espBitmapScale = 0;              // 0 = chưa init
+static BOOL s_bmpScaleInit = NO;
+static int s_bmpSlowStreak = 0;
+// Frame ngay sau khi (re)map buffer: chi phí map page qua exploit (hàng trăm
+// ms) là 1 lần, KHÔNG tính là "SB nghẽn" -> miễn kiểm ngưỡng chậm 1 frame.
+static BOOL s_bmpRemapGrace = NO;
+
+static int ds_esp_bitmap_target_scale(void) {
+    if (!s_bmpScaleInit) {
+        s_bmpScaleInit = YES;
+        CGFloat ss = 1.0;
+        @try { ss = UIScreen.mainScreen.scale; } @catch (__unused NSException *e) { ss = 1.0; }
+        int s = (int)(ss + 0.5);
+        if (s < ESP_BITMAP_SCALE_MIN) s = ESP_BITMAP_SCALE_MIN;
+        if (s > ESP_BITMAP_SCALE_MAX) s = ESP_BITMAP_SCALE_MAX;
+        g_espBitmapScale = s;
+        ESPLog("esp bitmap scale init: screen=%.0fx -> render=%dx (nan 812x375p = %dx%d px)",
+               (double)ss, s, (int)(812 * s), (int)(375 * s));
+    }
+    return g_espBitmapScale;
+}
+
+// Hạ 1 bậc scale (đổi size buffer -> ensure() sẽ teardown + map lại). Trả về
+// scale mới (giữ nguyên nếu đã ở min).
+static int ds_esp_bitmap_drop_scale(const char *why, double ms) {
+    int cur = ds_esp_bitmap_target_scale();
+    if (cur <= ESP_BITMAP_SCALE_MIN) return cur;
+    g_espBitmapScale = cur - 1;
+    s_bmpRemapGrace = YES;   // frame map lại tốn 1 lần, đừng tính là nghẽn
+    s_bmpSlowStreak = 0;
+    ESPLog("esp bitmap ha scale %d -> %d (%s %.0fms)", cur, g_espBitmapScale, why, ms);
+    return g_espBitmapScale;
+}
+
+static void ds_esp_bitmap_note_ship_ms(double ms) {
+    if (ms <= ESP_BITMAP_SLOW_MS) { s_bmpSlowStreak = 0; return; }
+    if (++s_bmpSlowStreak < ESP_BITMAP_SLOW_STREAK) return;
+    ds_esp_bitmap_drop_scale("ship cham", ms);
+}
+
 static BOOL ds_esp_bitmap_fail(const char *why) {
     ESPLog("esp bitmap fail: %s (streak=%d)", why, g_espBitmapFailStreak + 1);
     if (++g_espBitmapFailStreak >= 3) {
@@ -2501,8 +2546,9 @@ static void ds_esp_bitmap_teardown(RemoteCall *process) {
 
 static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
-    int pxW = (int)(portraitBounds.size.width * ESP_BITMAP_SCALE + 0.5);
-    int pxH = (int)(portraitBounds.size.height * ESP_BITMAP_SCALE + 0.5);
+    int sc = ds_esp_bitmap_target_scale();
+    int pxW = (int)(portraitBounds.size.width * sc + 0.5);
+    int pxH = (int)(portraitBounds.size.height * sc + 0.5);
     if (pxW < 8 || pxH < 8 || pxW > 4096 || pxH > 4096) return NO;
     if (g_espBitmapView && g_espBitmapCtx && g_espBitmapAddr &&
         pxW == g_espBitmapPxW && pxH == g_espBitmapPxH) return YES;
@@ -2573,9 +2619,11 @@ static BOOL ds_esp_bitmap_ensure(RemoteCall *process, CGRect portraitBounds) {
     g_espBitmapLastCount = -1;
     g_espBitmapWarmed = NO;
     s_bmpFirstShipLogged = NO;
-    ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB)",
+    s_bmpSlowStreak = 0;
+    s_bmpRemapGrace = YES; // frame đầu map ~hàng trăm page: miễn ngưỡng chậm
+    ESPLog("esp bitmap ON: canvas=%.0fx%.0f px=%dx%d (%.1fMB, scale=%d)",
            (double)portraitBounds.size.width, (double)portraitBounds.size.height,
-           pxW, pxH, (double)bytes / 1048576.0);
+           pxW, pxH, (double)bytes / 1048576.0, sc);
     // kernrw23: KHÔNG warm nền nữa (warmer thread revert cùng ship queue).
     // Lần ship đầu map ~300 pages ngay trên bridge (kẹt 1-3s một lần, chấp
     // nhận tạm — legacy/fallback vẫn sống nếu fail).
@@ -2671,7 +2719,10 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
     }
     // Render local vào buffer tái dùng (đỏ viền 2pt + chữ trắng 10pt bold,
     // y hệt legacy: border đỏ, label trắng "12m 87%").
-    float sc = (float)ESP_BITMAP_SCALE;
+    // Scale thật lấy từ buffer ĐÃ CẤP PHÁT (g_espBitmapPxW / bề rộng point) —
+    // luôn khớp canvas đang vẽ, kể cả sau khi tự hạ scale.
+    CGFloat ptW = portraitBounds.size.width > 1.0 ? portraitBounds.size.width : 1.0;
+    float sc = (float)((double)g_espBitmapPxW / (double)ptW);
     CGContextRef ctx = ds_esp_bitmap_local_ctx(g_espBitmapPxW, g_espBitmapPxH);
     if (!ctx) return ds_esp_bitmap_fail("localctx");
     CGContextClearRect(ctx, CGRectMake(0, 0, g_espBitmapPxW, g_espBitmapPxH));
@@ -2737,8 +2788,25 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
         if (!cg || !process.trojanMem) return ds_esp_bitmap_fail("createimage");
         CFAbsoluteTime tShipC = CFAbsoluteTimeGetCurrent();
         uint64_t uiClass = ds_remote_class(process, "UIImage");
-        uint64_t img = (uiClass && process.trojanMem)
-            ? remote_msg(process, uiClass, ds_remote_sel(process, "imageWithCGImage:"), cg, 0, 0, 0) : 0;
+        // kernrw42: imageWithCGImage:scale:orientation: với scale = scale canvas
+        // -> image.size (point) == frame (point) nên UIKit vẽ 1:1 pixel vật lý,
+        // không resample. Bản cũ (imageWithCGImage: -> scale 1) biến ảnh
+        // 2436x1125 px thành "2436 point" rồi bị thu lại vào frame 812x375pt
+        // = resample 3:1 -> nhoè thêm lần nữa.
+        // Dùng bản RETAIN (không phải factory autorelease) để vòng đời ảnh
+        // khớp đúng 1 retain của mình — release frame sau là cân, không để lại
+        // entry autorelease trỏ vào ảnh đã chết.
+        uint64_t img = 0;
+        if (uiClass && process.trojanMem) {
+            double imgScale = (double)sc;
+            long long imgOrient = 0; // UIImageOrientationUp
+            DSRemoteArgument imgArgs[2] = {
+                { &imgScale, (uint64_t)sizeof(imgScale) },
+                { &imgOrient, (uint64_t)sizeof(imgOrient) },
+            };
+            img = ds_remote_get_retained_object_on_main(
+                process, uiClass, "imageWithCGImage:scale:orientation:", imgArgs, 2);
+        }
         if (cgRelSym && process.trojanMem) DSRemoteArbCallWithTimeout(1, process, cgRelSym, cg);
         if (!img || !process.trojanMem) return ds_esp_bitmap_fail("uiimage");
         // kernrw41 v2: KIỂM TRA setImage (trước đây bỏ qua BOOL này — setImage
@@ -2750,20 +2818,42 @@ static BOOL ds_esp_bitmap_present(RemoteCall *process, ESPBox2D *boxes, int coun
         double totMs = (tShipS - tShip0) * 1000.0;
         if (!s_bmpFirstShipLogged || totMs > 100.0) {
             s_bmpFirstShipLogged = YES;
-            ESPLog("esp bitmap ship: total=%.0fms write=%.0f create=%.0f set=%.0f",
+            ESPLog("esp bitmap ship: total=%.0fms write=%.0f create=%.0f set=%.0f (scale=%d)",
                    totMs, (tShipW - tShip0) * 1000.0,
-                   (tShipC - tShipW) * 1000.0, (tShipS - tShipC) * 1000.0);
+                   (tShipC - tShipW) * 1000.0, (tShipS - tShipC) * 1000.0,
+                   ds_esp_bitmap_target_scale());
         }
         if (!setOK || !process.trojanMem) {
+            // kernrw42: ảnh đang giữ 1 retain (bản retained) nhưng chưa lên view
+            // -> trả ngay, không thì rò 1 ảnh mỗi lần setImage fail.
+            if (img && process.trojanMem) {
+                remote_msg(process, img, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+            }
             return ds_esp_bitmap_fail("setimage");
         }
-        if (totMs > 250.0) {
-            // SB nghẽn nặng: tắt bitmap cả session để khỏi đơ máy (bài học
-            // kernrw19-23). Vẽ lại hết đường legacy ở frame này.
-            g_espBitmapDisabled = YES;
-            for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
-            ESPLog("esp bitmap SLOW %.0fms -> OFF (anti-freeze)", totMs);
-            return NO;
+        // kernrw42: frame map lại (remap grace) hoặc ship đầu KHÔNG tính là
+        // nghẽn — map page qua exploit tốn hàng trăm ms một lần. Nhưng nếu quá
+        // đắt (>1.2s) thì đãi scale xuống cho các frame sau.
+        BOOL graceShip = s_bmpRemapGrace;
+        s_bmpRemapGrace = NO;
+        if (graceShip) {
+            if (totMs > 1200.0) ds_esp_bitmap_drop_scale("remap dat", totMs);
+        } else {
+            ds_esp_bitmap_note_ship_ms(totMs);
+            if (totMs > 250.0) {
+                if (ds_esp_bitmap_target_scale() > ESP_BITMAP_SCALE_MIN) {
+                    // Còn dư địa hạ nét: giữ ESP sống, đổi sang canvas nhẹ hơn.
+                    ds_esp_bitmap_drop_scale("ship rat cham", totMs);
+                } else {
+                    // Đã ở scale thấp nhất mà vẫn nghẽn: SB đơ thật -> tắt
+                    // bitmap cả session (bài học kernrw19-23). Frame này vẽ
+                    // lại hết đường legacy.
+                    g_espBitmapDisabled = YES;
+                    for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
+                    ESPLog("esp bitmap SLOW %.0fms -> OFF (anti-freeze)", totMs);
+                    return NO;
+                }
+            }
         }
         if (g_espBitmapImage) {
             remote_msg(process, g_espBitmapImage, ds_remote_sel(process, "release"), 0, 0, 0, 0);
@@ -3250,7 +3340,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw41"
+#define DS_ESP_BUILD_TAG "kernrw42"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4111,7 +4201,7 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
-    g_espBitmapDisabled = NO; // kernrw41 v2: thử lại bitmap có guard
+    g_espBitmapDisabled = NO; // kernrw41 v2 + kernrw42 (scale = màn hình thật)
     g_espPathDisabled = YES; // kernrw27: path batching đã chứng minh gây respring
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;

@@ -59,12 +59,22 @@
 // label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms.
 #define ESP_PRESENT_HZ 40
 
-// Bitmap overlay (kernrw41 v2, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
+// Bitmap overlay (kernrw19, theo DSGames): vẽ TẤT CẢ box vào 1 bitmap trong
 // suốt NGAY TRONG APP rồi ship 1 lần/frame (remote_write + setImage:).
-// Scale 1 = chữ/viền vừa đủ nét, ~1.2MB/frame (scale 2 gây churn 5MB/frame -
-// 1 phần nguyên nhân đơ máy 19-23). SHIP_HZ 30 = trần ship (rate-cap trong
-// code), frame giống hệt thì không ship.
-#define ESP_BITMAP_SCALE 1
+//
+// ĐỘ NÉT (kernrw42): bitmap PHẢI có đúng mật độ điểm ảnh của màn. Canvas là
+// 812x375 *point*; ship ở scale 1 nghĩa là ảnh 812x375 px bị UIImageView phóng
+// 3x lên màn 3x -> viền/chữ nhoè, mảnh như bị "mờ đục". Scale thật =
+// min(ESP_BITMAP_SCALE_MAX, UIScreen.mainScreen.scale) (3 trên iPhone màn 3x,
+// 2 trên màn 2x) -> 1 px ảnh = 1 pixel vật lý, nét tối đa.
+// Tự HẠ dần khi ship chậm (xem ds_esp_bitmap_note_ship_ms) — hạ nét còn hơn
+// đơ máy; không quay lại scale cũ trong 1 session.
+#define ESP_BITMAP_SCALE_MAX 3
+#define ESP_BITMAP_SCALE_MIN 1
+// Ngưỡng ship chậm (ms) để tự hạ scale, và số frame chậm liên tiếp cần có.
+#define ESP_BITMAP_SLOW_MS 80.0
+#define ESP_BITMAP_SLOW_STREAK 3
+// SHIP_HZ 30 = trần ship (rate-cap trong code), frame giống hệt thì không ship.
 #define ESP_BITMAP_SHIP_HZ 30
 
 // Chiều cao kẻ địch (cm) — CHỈ dùng làm mặc định khi không đọc được
