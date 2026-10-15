@@ -30,6 +30,7 @@
 // tick chỉ còn ~1-2ms (region-map memcpy + copy snapshot) nên vừa ngân sách
 // 16.7ms. kernrw43 đo được thực chỉ ~25-30Hz + stall 716ms (log box perf
 // n=224/7.5s) = box giật khi địch chạy; 60Hz cho step 16.7ms bám vận động.
+#define ESP_REFRESH_HZ 60
 
 // Vị trí actor giờ được đọc lại MỖI frame refresh: region map giữ sẵn mapping
 // nên mỗi lần đọc chỉ là memcpy (~µs) — không còn đọc thưa + ngoại suy, nhờ đó
@@ -50,7 +51,7 @@
 // Discover budget khi degraded (thường = ESP_DISCOVER_BUDGET).
 #define ESP_PROVIDER_DEGRADED_BUDGET 4
 
-// Nhịp cập nhật VỊ TRÍ label mét (Hz). Box bám 40Hz, chữ mét 10Hz là đủ mượt;
+// Nhịp cập nhật VỊ TRÍ label mét (Hz). Box bám 60Hz, chữ mét 10Hz là đủ mượt;
 // giảm tải số remote call vào SpringBoard.
 #define ESP_OVERLAY_LABEL_HZ 10
 
@@ -60,6 +61,7 @@
 // kernrw45: 40->60Hz cùng ESP_REFRESH_HZ. Gate = 1/60 − 4ms = 12.7ms < tick
 // 16.7ms -> present mỗi tick (~60/s); tải IPC ~300ms/s chấp nhận được nhờ
 // label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms (pAvg ~7ms log43).
+#define ESP_PRESENT_HZ 60
 
 // kernrw43: bitmap overlay (kernrw19-42) đã bị XOÁ HOÀN TOÀN — remote_write
 // vài MB + setImage: mỗi frame là nguồn gây đơ máy. ESP giờ chỉ vẽ per-box
