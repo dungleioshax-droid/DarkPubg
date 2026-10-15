@@ -1346,8 +1346,8 @@ typedef struct {
 // ---- Pool NSAutoreleasePool dùng chung ----
 // Mỗi ds_remote_invoke_on_main_result trước đây TẠO + DRAIN pool REMOTE riêng:
 // alloc + init + drain = 3 remote_msg thừa cho MỖI lời gọi. Một lượt present ESP
-// = 4 box × (setFrame viền + label) × 40Hz ≈ 1600 vòng/giây -> ~30% remote msg
-// chỉ là phí pool, và present chậm hơn 25ms là s_latestFrame.exchange ném frame
+// = 4 box × (setFrame viền + label) × 60Hz ≈ 2400 vòng/giây -> ~30% remote msg
+// chỉ là phí pool, và present chậm hơn 16.7ms là s_latestFrame.exchange ném frame
 // đi -> box giật. ds_remote_pool_begin/end giữ MỘT pool cho cả lượt; caller khác
 // (HUD, ensure…) không gọi begin nên depth=0 -> chạy y hệt code cũ.
 static thread_local int s_dsPoolDepth = 0;
@@ -2834,9 +2834,9 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw44"
+#define DS_ESP_BUILD_TAG "kernrw45"
 
-// ESP Box thật trên SpringBoard (RemoteCall) 20Hz: chỉ chạy khi toggle ESP Box
+// ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
 // đọc memory trên worker queue riêng để không nghẽn bridge queue, rồi async sang
 // bridge queue để IPC present lên SpringBoard.
@@ -2863,7 +2863,7 @@ static BOOL s_espHideSent = NO; // đã gửi hide lên bridge (tránh spam asyn
 // Chi phí PRESENT (toàn bộ IPC remote vào SpringBoard cho 1 frame box). Trước
 // đây chỉ đo refresh (box perf proc/cam/act) nên không bao giờ biết box giật do
 // đọc kernel hay do IPC. Trung bình > ~20ms nghĩa là present vượt ngân sách
-// 25ms của timer 40Hz -> frame bị s_latestFrame.exchange ném đi -> giật.
+// 16.7ms của timer 60Hz -> frame bị s_latestFrame.exchange ném đi -> giật.
 static std::atomic<uint64_t> s_presentUsTotal{0};
 static std::atomic<uint32_t> s_presentN{0};
 static std::atomic<uint32_t> s_presentMaxUs{0};
@@ -2872,7 +2872,7 @@ static void ds_esp_present_heartbeat(void);
 // kernrw44: đo TOÀN BỘ ds_esp_tick (refresh + slot + log + geometry + mọi lần
 // chờ lock TRƯỚC tBox0). box perf proc/cam/act chỉ đo bên trong
 // ESPEngineRefreshBoxes -> không thấy phần chờ lock tracked (trước tBox0) và
-// các khâu khác của tick. So tick(N/10s, avg, max) với ngân sách 25ms (40Hz)
+// các khâu khác của tick. So tick(N/10s, avg, max) với ngân sách 16.7ms (60Hz)
 // là biết ngay work queue có bị chặn không.
 static std::atomic<uint64_t> s_tickUsTotal{0};
 static std::atomic<uint32_t> s_tickN{0};
@@ -3060,7 +3060,7 @@ static void ds_esp_tick(void) {
         // Refresh MỖI tick. ESPEngineRefreshBoxes đọc vị trí TƯƠI của mọi
         // tracked mỗi tick + camera POV tươi (đều qua region-map memcpy).
         // kernrw17..kernrw23 đọc xoay vòng 1/2 tracked -> địch đang chạy chỉ
-        // cập nhật 20Hz trong khi frame ship 40Hz = box nhảy từng bước + trễ
+        // cập nhật 20Hz trong khi frame ship 60Hz = box nhảy từng bước + trễ
         // pha ("giật giật, không bám theo địch"); đã bỏ ở kernrw24.
         // Present mọi tick khi còn box.
         double minInterval = 0.5 / (double)ESP_REFRESH_HZ;

@@ -26,8 +26,10 @@
 #define ESP_DISCOVER_BUDGET 48
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
-// 40Hz: mượt mà, bám sát nhịp chuyển động mà không gây nghẽn runloop SpringBoard.
-#define ESP_REFRESH_HZ 40
+// kernrw45: 40->60Hz. Sau kernrw44 gỡ g_espClassifyMutex khỏi đường refresh,
+// tick chỉ còn ~1-2ms (region-map memcpy + copy snapshot) nên vừa ngân sách
+// 16.7ms. kernrw43 đo được thực chỉ ~25-30Hz + stall 716ms (log box perf
+// n=224/7.5s) = box giật khi địch chạy; 60Hz cho step 16.7ms bám vận động.
 
 // Vị trí actor giờ được đọc lại MỖI frame refresh: region map giữ sẵn mapping
 // nên mỗi lần đọc chỉ là memcpy (~µs) — không còn đọc thưa + ngoại suy, nhờ đó
@@ -54,10 +56,10 @@
 
 // Nhịp PRESENT lên SpringBoard (IPC remote — KHÔNG phải nội suy thuần CPU).
 // kernrw39: 30->40Hz lại. Bản 38 để 30Hz (present thực ~20/s) thì lia máy/
-// đi bộ thấy box bước từng nấc 50ms = "trôi/không khớp". Gate 21ms < tick
-// 25ms -> present mỗi tick (~35-40/s); tải IPC ~200ms/s chấp nhận được nhờ
-// label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms.
-#define ESP_PRESENT_HZ 40
+// đi bộ thấy box bước từng nấc 50ms = "trôi/không khớp".
+// kernrw45: 40->60Hz cùng ESP_REFRESH_HZ. Gate = 1/60 − 4ms = 12.7ms < tick
+// 16.7ms -> present mỗi tick (~60/s); tải IPC ~300ms/s chấp nhận được nhờ
+// label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms (pAvg ~7ms log43).
 
 // kernrw43: bitmap overlay (kernrw19-42) đã bị XOÁ HOÀN TOÀN — remote_write
 // vài MB + setImage: mỗi frame là nguồn gây đơ máy. ESP giờ chỉ vẽ per-box
