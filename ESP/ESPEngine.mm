@@ -2241,7 +2241,27 @@ BOOL ESPEngineCamera(uint64_t gameBase, ESPCamera *outCam) {
             aspect = tmp;
         }
     }
-    if (fov < 10 || fov > 170) return NO;
+    if (fov < 10 || fov > 170) {
+        // kernrw46: FOV rách (đọc kép 2/3 mẫu vẫn chọn nhầm khi cả 3 cùng hướng
+        // rách) -> đọc lại POV 1 lần nữa TRƯỚC khi fail. 1 tick camFail = box
+        // đứng yên grace 1.2s rồi ẩn ("đóng băng, phải xoay cam mới hồi").
+        uint8_t rawR[0x38] = {0};
+        if (ESPMemoryRead(vmMap, pov, rawR, sizeof(rawR))) {
+            float fovR = 0, aspR = 0;
+            memcpy(&fovR, rawR + ESPOff_POV_FOV, sizeof(fovR));
+            if (fovR >= 10 && fovR <= 170) {
+                memcpy(&loc, rawR + ESPOff_POV_Location, sizeof(loc));
+                memcpy(&rot, rawR + ESPOff_POV_Rotation, sizeof(rot));
+                memcpy(&fov, rawR + ESPOff_POV_FOV, sizeof(fov));
+                memcpy(&aspR, rawR + ESPOff_POV_Aspect, sizeof(aspR));
+                aspect = aspR;
+            } else {
+                return NO;
+            }
+        } else {
+            return NO;
+        }
+    }
     if (!(aspect > 0.3 && aspect < 4.0)) aspect = 0; // để caller fill từ screen
     outCam->location = loc;
     outCam->rotation = rot;
@@ -2613,8 +2633,32 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     uint64_t vmMap = ESPProcVMMap(NULL);
     if (!vmMap) { ESPBoxDiagSet("R noVmMap"); return 0; }
     CFAbsoluteTime tProc = CFAbsoluteTimeGetCurrent();
+    // kernrw46: s_lastCam nâng lên cấp hàm — dùng cả khi camera FAIL hẳn
+    // (fallback bên dưới), không chỉ khi giá trị rách (jump guard).
+    static ESPCamera s_lastCam = {0};
+    static CFAbsoluteTime s_lastCamAt = 0;
+    static BOOL s_lastCamValid = NO;
     ESPCamera cam;
-    if (!ESPEngineCamera(gameBase, &cam)) { ESPBoxDiagSet("R camFail"); return 0; }
+    CFAbsoluteTime nowCam = CFAbsoluteTimeGetCurrent();
+    if (!ESPEngineCamera(gameBase, &cam)) {
+        // kernrw46: chuỗi tick camFail (POV rách lúc xoay mạnh / chain gãy lẻ)
+        // trước đây return 0 -> rawCount=0 -> box đứng yên grace 1.2s rồi ẩn,
+        // "đóng băng cho tới khi xoay camera". Dùng lại camera gần nhất ≤1.5s:
+        // box VẪN bám địch từng tick (chậm đúng bằng tuổi mẫu), khỏi cần xoay
+        // cam để "đánh thức". Hết hạn 1.5s mới fail thật (world/possess đổi).
+        if (s_lastCamValid && s_lastCamAt > 0 && nowCam - s_lastCamAt <= 1.5) {
+            cam = s_lastCam;
+            static CFAbsoluteTime s_lastStaleLog = 0;
+            if (nowCam - s_lastStaleLog >= 2.0) {
+                s_lastStaleLog = nowCam;
+                ESPLog("camStale: camFail -> dung lai cam cu %.2fs (box van bam dich)",
+                       (double)(nowCam - s_lastCamAt));
+            }
+        } else {
+            ESPBoxDiagSet("R camFail");
+            return 0;
+        }
+    }
     if (!(cam.aspect > 0.3 && cam.aspect < 4.0)) cam.aspect = screenW / screenH;
     // Guard camera rách (kernrw31): POV đọc bằng 1 memcpy 0x38B trong lúc game
     // đang ghi -> yaw/pitch/loc có thể nửa cũ nửa mới trong đúng 1 tick. Dấu
@@ -2623,9 +2667,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     // Chặn bằng giới hạn tốc độ vật lý: flick tay ~800°/s, scope ~350°/s,
     // máy bay 100m/s. Rách -> dùng lại camera tốt gần nhất của tick này.
     {
-        static ESPCamera s_lastCam = {0};
-        static CFAbsoluteTime s_lastCamAt = 0;
-        static BOOL s_lastCamValid = NO;
         CFAbsoluteTime nowC = CFAbsoluteTimeGetCurrent();
         BOOL useLast = NO;
         if (s_lastCamValid && s_lastCamAt > 0) {
