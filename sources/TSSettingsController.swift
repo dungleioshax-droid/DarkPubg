@@ -38,19 +38,8 @@ import UIKit
         return delegate?.settingHighlighted(key: settingKey(index: index)) ?? false
     }
 
-    private var isFPSMode: Bool {
-        return delegate?.settingHighlighted(key: HUDUserDefaultsKeyDisplayMode) ?? false
-    }
-
     open override func settingEnabled(index: Int) -> Bool {
-        guard isFPSMode else { return true }
-        let setting = TSSettingsIndex.allCases[index]
-        switch setting {
-        case .singleLineMode, .usesArrowPrefixes, .usesBitrate:
-            return false
-        default:
-            return true
-        }
+        return true
     }
 
     open override func settingColorHighlighted(index: Int) -> UIColor {
@@ -69,16 +58,6 @@ import UIKit
         }
         delegate?.settingDidSelect(key: settingKey(index: index))
         completion()
-
-        // When display mode is toggled, update enabled/disabled state of affected cells in-place
-        if index == TSSettingsIndex.displayMode.rawValue {
-            for cell in collectionView.visibleCells {
-                if let settingCell = cell as? SPLarkSettingsCollectionViewCell,
-                   let indexPath = collectionView.indexPath(for: settingCell) {
-                    settingCell.setEnabled(settingEnabled(index: indexPath.row))
-                }
-            }
-        }
     }
 
     open override var supportedInterfaceOrientations: UIInterfaceOrientationMask {

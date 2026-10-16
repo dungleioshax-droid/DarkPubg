@@ -999,28 +999,6 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
     return number ? number.doubleValue : fallback;
 }
 
-static NSString *ds_format_speed(double bytes, BOOL bitrate, BOOL focused) {
-    double value = bitrate ? bytes * 8.0 : bytes;
-    double kilo = bitrate ? 1000.0 : 1024.0;
-    double mega = kilo * kilo;
-    double giga = mega * kilo;
-    NSString *suffix = focused ? @"" : @"/s";
-    NSString *kiloUnit = bitrate ? @"Kb" : @"KB";
-    NSString *megaUnit = bitrate ? @"Mb" : @"MB";
-    NSString *gigaUnit = bitrate ? @"Gb" : @"GB";
-
-    if (value < kilo) {
-        return [NSString stringWithFormat:@"0\u00a0%@%@", kiloUnit, suffix];
-    }
-    if (value < mega) {
-        return [NSString stringWithFormat:@"%.0f\u00a0%@%@", value / kilo, kiloUnit, suffix];
-    }
-    if (value < giga) {
-        return [NSString stringWithFormat:@"%.2f\u00a0%@%@", value / mega, megaUnit, suffix];
-    }
-    return [NSString stringWithFormat:@"%.2f\u00a0%@%@", value / giga, gigaUnit, suffix];
-}
-
 static UIInterfaceOrientation ds_interface_orientation(void) {
     UIInterfaceOrientation remoteOrientation =
         (UIInterfaceOrientation)g_remoteOrientation.load();
@@ -1061,18 +1039,6 @@ static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
     if (safeInsets) *safeInsets = currentInsets;
 }
 
-static NSString *ds_base_game_line_for_prefs(NSDictionary *preferences) {
-    if (!ds_show_base_game_from_prefs(preferences)) return nil;
-    ds_ensure_game_base(preferences);
-    if (g_gameBase) {
-        if (g_gamePid > 0) {
-            return [NSString stringWithFormat:@"Base: 0x%llX", (unsigned long long)g_gameBase];
-        }
-        return [NSString stringWithFormat:@"Base: 0x%llX (stale)", (unsigned long long)g_gameBase];
-    }
-    return @"Base: --";
-}
-
 static NSString *ds_esp_line_for_prefs(NSDictionary *preferences) {
     if (!ds_show_esp_from_prefs(preferences)) return nil;
     if (!ds_is_ready()) return @"ESP: wait…";
@@ -1087,51 +1053,14 @@ static NSString *ds_esp_line_for_prefs(NSDictionary *preferences) {
 }
 
 static NSString *ds_display_text(NSDictionary *preferences,
-                                 BOOL centered,
-                                 BOOL focused,
-                                 double down,
-                                 double up) {
-    NSString *main = nil;
-    if (ds_pref_bool(preferences, HUDUserDefaultsKeyDisplayMode)) {
-        CFIndex current = CARenderServerGetDirtyFrameCount(NULL);
-        if (g_needsFPSBaselineReset) {
-            g_previousDirtyFrameCount = current;
-            g_needsFPSBaselineReset = NO;
-            main = @"0 FPS";
-        } else {
-            CFIndex frameDiff = MAX((CFIndex)0, current - g_previousDirtyFrameCount);
-            g_previousDirtyFrameCount = current;
-            CGFloat maximumFPS = UIScreen.mainScreen.maximumFramesPerSecond;
-            main = [NSString stringWithFormat:@"%.0f FPS", MIN((CGFloat)frameDiff, maximumFPS)];
-        }
-    } else {
-        BOOL bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
-        BOOL alternateArrows = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
-        BOOL incomingOnly = ds_pref_bool(preferences, HUDUserDefaultsKeySingleLineMode);
-        NSString *downloadPrefix = alternateArrows ? @"↓" : @"▼";
-        NSString *uploadPrefix = alternateArrows ? @"↑" : @"▲";
-        NSString *download = [NSString stringWithFormat:@"%@\u00a0%@",
-                              downloadPrefix, ds_format_speed(down, bitrate, focused)];
-        if (incomingOnly) {
-            main = download;
-        } else {
-            NSString *upload = [NSString stringWithFormat:@"%@\u00a0%@",
-                                uploadPrefix, ds_format_speed(up, bitrate, focused)];
-            main = centered
-                ? [NSString stringWithFormat:@"%@\t%@", download, upload]
-                : [NSString stringWithFormat:@"%@\n%@", upload, download];
-        }
-    }
-
-    NSString *baseLine = ds_base_game_line_for_prefs(preferences);
-    if (baseLine) {
-        main = [main stringByAppendingFormat:@"\n%@", baseLine];
-    }
+                                 BOOL __unused centered,
+                                 BOOL __unused focused,
+                                 double __unused down,
+                                 double __unused up) {
+    // kernrw48: app chỉ còn ESP — speed/FPS + Base Game line đã gỡ.
+    // text 1Hz giờ = duy nhất dòng trạng thái ESP (hoặc rỗng khi toggle OFF).
     NSString *espLine = ds_esp_line_for_prefs(preferences);
-    if (espLine) {
-        main = [main stringByAppendingFormat:@"\n%@", espLine];
-    }
-    return main;
+    return espLine ?: @"";
 }
 
 static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
@@ -1150,13 +1079,14 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     presentation.centered =
         mode == HUDPresetPositionTopCenter || mode == HUDPresetPositionTopCenterMost;
     presentation.centeredMost = mode == HUDPresetPositionTopCenterMost;
-    presentation.singleLine = ds_pref_bool(preferences, HUDUserDefaultsKeySingleLineMode);
-    presentation.bitrate = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesBitrate);
-    presentation.arrowPrefixes = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesArrowPrefixes);
-    presentation.inverted = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesInvertedColor);
-    presentation.followsRotation = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesRotation);
+    // kernrw48: speed/FPS/base-feature OFF cứng; giữ cấu trúc shell + passthrough.
+    presentation.singleLine = NO;
+    presentation.bitrate = NO;
+    presentation.arrowPrefixes = NO;
+    presentation.inverted = NO;
+    presentation.followsRotation = NO;
     presentation.hideAtSnapshot = ds_pref_bool(preferences, HUDUserDefaultsKeyHideAtSnapshot);
-    presentation.displayFPS = ds_pref_bool(preferences, HUDUserDefaultsKeyDisplayMode);
+    presentation.displayFPS = NO;
     presentation.passthrough = ds_pref_bool(preferences, HUDUserDefaultsKeyPassthroughMode);
 
     BOOL customFont = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomFontSize);
@@ -1165,14 +1095,12 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
             preferences, HUDUserDefaultsKeyRealCustomFontSize, kDSHUDMinFontSize), 8.0), 12.0);
         presentation.cornerRadius = presentation.fontSize / 2.0;
     } else {
-        BOOL large = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesLargeFont);
-        presentation.fontSize = large ? kDSHUDMaxFontSize : kDSHUDMinFontSize;
-        presentation.cornerRadius = large ? kDSHUDMaxCornerRadius : kDSHUDMinCornerRadius;
+        presentation.fontSize = kDSHUDMinFontSize;
+        presentation.cornerRadius = kDSHUDMinCornerRadius;
     }
     presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
-    NSInteger baseLines = ds_show_base_game_from_prefs(preferences) ? 1 : 0;
     NSInteger espLines = ds_show_esp_from_prefs(preferences) ? 1 : 0;
-    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + baseLines + espLines;
+    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + espLines;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
     presentation.maskedCorners =
         presentation.centeredMost && !presentation.landscape
@@ -2834,7 +2762,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw47"
+#define DS_ESP_BUILD_TAG "kernrw48"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3430,11 +3358,11 @@ static void ds_register_hud_notifications(void) {
         if (!g_hudActive.load()) return;
         NSDictionary *preferences = ds_hud_preferences();
         ds_append_checkpoint([NSString stringWithFormat:
-            @"HUD settings refreshed position=%@ size=%@ snapshot=%@",
+            @"HUD settings refreshed position=%@ esp=%@ snapshot=%@",
             preferences[UIInterfaceOrientationIsLandscape(ds_interface_orientation())
                 ? HUDUserDefaultsKeySelectedModeLandscape
                 : HUDUserDefaultsKeySelectedMode] ?: @"default",
-            preferences[HUDUserDefaultsKeyUsesLargeFont] ?: @NO,
+            preferences[HUDUserDefaultsKeyShowESPBox] ?: @NO,
             preferences[HUDUserDefaultsKeyHideAtSnapshot] ?: @NO]);
         g_focusUntil = CFAbsoluteTimeGetCurrent() + kDSHUDFocusDuration;
         g_needsFPSBaselineReset = YES;

@@ -602,26 +602,11 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         __strong typeof(weakSelf) strongSelf = weakSelf;
         [strongSelf->_mainButton setTitle:(strongSelf->_isRemoteHUDActive ? NSLocalizedString(@"Exit HUD", nil) : NSLocalizedString(@"Open HUD", nil)) forState:UIControlStateNormal];
         NSString *bridgeError = DSBridgeCompiledIn() ? DSBridgeLastError() : @"";
-        // Base Game + ESP status — show in app so users can
-        // verify without looking at the SpringBoard HUD.
+        // kernrw48: chỉ còn ESP — Base Game status đã gỡ.
         [strongSelf loadUserDefaults:NO];
-        BOOL showBase = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowBaseGame] boolValue];
         BOOL showESP = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowESPBox] boolValue];
-        NSString *baseStatus = nil;
-        NSString *baseProc = nil;
         NSString *espStatus = nil;
         NSString *espScan = nil;
-        if (showBase && DSBridgeCompiledIn()) {
-            @try {
-                // Dùng cached (không quét trên main thread để tránh treo).
-                baseStatus = DSBridgeGameCachedStatus();
-                baseProc = DSBridgeGameProcessName();
-            } @catch (__unused NSException *e) {
-                baseStatus = nil;
-            }
-            if (baseStatus.length == 0) baseStatus = @"Base: --";
-            if (baseProc.length == 0) baseProc = @"ShadowTrackerExtra";
-        }
         if (showESP && DSBridgeCompiledIn()) {
             @try {
                 // Dùng cached (không quét trên main thread để tránh treo).
@@ -633,10 +618,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             if (espStatus.length == 0) espStatus = @"ESP: --";
         }
         NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
-        if (baseStatus) {
-            [extraLines addObject:baseProc ?: @"ShadowTrackerExtra"];
-            [extraLines addObject:baseStatus];
-        }
+        NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
         if (espStatus) [extraLines addObject:espStatus];
         if (espScan) [extraLines addObject:espScan];
         NSString *extraText = extraLines.count ? [extraLines componentsJoinedByString:@"\n"] : nil;

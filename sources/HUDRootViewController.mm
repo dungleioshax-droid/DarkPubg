@@ -6,10 +6,7 @@
 //
 
 #import <notify.h>
-#import <net/if.h>
-#import <ifaddrs.h>
 #import <objc/runtime.h>
-#import <mach/vm_param.h>
 #import <Foundation/Foundation.h>
 
 #import "HUDPresetPosition.h"
@@ -18,13 +15,6 @@
 #import "DSBridge.h"
 #import "DarkSpeed-Swift.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-CFIndex CARenderServerGetDirtyFrameCount(void *);
-#ifdef __cplusplus
-}
-#endif
 
 #pragma mark -
 
@@ -37,9 +27,6 @@ CFIndex CARenderServerGetDirtyFrameCount(void *);
 
 #define NOTIFY_UI_LOCKSTATE    "com.apple.springboard.lockstate"
 #define NOTIFY_LS_APP_CHANGED  "com.apple.LaunchServices.ApplicationsChanged"
-
-static BOOL needsBaselineReset = YES;
-static BOOL needsFPSBaselineReset = YES;
 
 static void LaunchServicesApplicationStateChanged
 (CFNotificationCenterRef center,
@@ -90,8 +77,6 @@ static void SpringBoardLockStatusChanged
 
         if (!isLocked)
         {
-            needsBaselineReset = YES;
-            needsFPSBaselineReset = YES;
             [rootViewController.view setHidden:NO];
             [rootViewController resetLoopTimer];
         }
@@ -103,252 +88,20 @@ static void SpringBoardLockStatusChanged
     }
 }
 
-#pragma mark - NetworkSpeed13
+#pragma mark - DarkSpeed ESP-only HUD shell (kernrw48)
 
-#define KILOBITS 1000
-#define MEGABITS 1000000
-#define GIGABITS 1000000000
-#define KILOBYTES (1 << 10)
-#define MEGABYTES (1 << 20)
-#define GIGABYTES (1 << 30)
+// kernrw48: toàn bộ HUD speed/FPS (getUpDownBytes/formattedSpeed/FPS/…) đã
+// gỡ — app chỉ còn ESP. Cửa sổ shell này giờ chỉ hiển thị 1 dòng trạng thái
+// ESP (bật qua toggle ESP Box).
+
 #define UPDATE_INTERVAL 1.0
-#define SHOW_ALWAYS 1
-#define INLINE_SEPARATOR "\t"
 #define IDLE_INTERVAL 3.0
 
-static const double HUD_MIN_FONT_SIZE = 9.0;
-static const double HUD_MAX_FONT_SIZE = 10.0;
+static const double HUD_FONT_SIZE_DEFAULT = 9.0;
 static const double HUD_MIN_CORNER_RADIUS = 4.5;
-static const double HUD_MAX_CORNER_RADIUS = 5.0;
-static double HUD_FONT_SIZE = 8.0;
-static UIFontWeight HUD_FONT_WEIGHT = UIFontWeightRegular;
+static double HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
 static CGFloat HUD_INACTIVE_OPACITY = 0.667;
-static uint8_t HUD_DATA_UNIT = 0;
-static uint8_t HUD_SHOW_UPLOAD_SPEED = 1;
-static uint8_t HUD_SHOW_DOWNLOAD_SPEED = 1;
-static uint8_t HUD_SHOW_DOWNLOAD_SPEED_FIRST = 1;
-static uint8_t HUD_SHOW_SECOND_SPEED_IN_NEW_LINE = 0;
-static const char *HUD_UPLOAD_PREFIX = "▲";
-static const char *HUD_DOWNLOAD_PREFIX = "▼";
-static uint8_t HUD_DISPLAY_MODE = 0;  // 0=Speed, 1=FPS
-static uint8_t HUD_SHOW_BASE_GAME = 0;  // 0=hide, 1=show ShadowTrackerExtra base
-static uint8_t HUD_SHOW_ESP_BOX = 0;    // 0=hide, 1=show ESP status
-
-typedef struct {
-    uint64_t inputBytes;
-    uint64_t outputBytes;
-} UpDownBytes;
-
-static NSString *formattedSpeed(uint64_t bytes, BOOL isFocused)
-{
-    if (isFocused)
-    {
-        if (0 == HUD_DATA_UNIT)
-        {
-            if (bytes < KILOBYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"0 KB", @"formattedSpeed");
-                });
-                return _string;
-            }
-            else if (bytes < MEGABYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.0f KB", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / KILOBYTES];
-            }
-            else if (bytes < GIGABYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f MB", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / MEGABYTES];
-            }
-            else {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f GB", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / GIGABYTES];
-            }
-        }
-        else
-        {
-            if (bytes < KILOBITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"0 Kb", @"formattedSpeed");
-                });
-                return _string;
-            }
-            else if (bytes < MEGABITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.0f Kb", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / KILOBITS];
-            }
-            else if (bytes < GIGABITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f Mb", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / MEGABITS];
-            }
-            else {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f Gb", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / GIGABITS];
-            }
-        }
-    }
-    else {
-        if (0 == HUD_DATA_UNIT)
-        {
-            if (bytes < KILOBYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"0 KB/s", @"formattedSpeed");
-                });
-                return _string;
-            }
-            else if (bytes < MEGABYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.0f KB/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / KILOBYTES];
-            }
-            else if (bytes < GIGABYTES) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f MB/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / MEGABYTES];
-            }
-            else {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f GB/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / GIGABYTES];
-            }
-        }
-        else
-        {
-            if (bytes < KILOBITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"0 Kb/s", @"formattedSpeed");
-                });
-                return _string;
-            }
-            else if (bytes < MEGABITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.0f Kb/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / KILOBITS];
-            }
-            else if (bytes < GIGABITS) {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f Mb/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / MEGABITS];
-            }
-            else {
-                static NSString *_string = nil;
-                static dispatch_once_t onceToken;
-                dispatch_once(&onceToken, ^{
-                    _string = NSLocalizedString(@"%.2f Gb/s", @"formattedSpeed");
-                });
-                return [NSString stringWithFormat:_string, (double)bytes / GIGABITS];
-            }
-        }
-    }
-}
-
-static UpDownBytes getUpDownBytes()
-{
-    struct ifaddrs *ifa_list = 0, *ifa;
-    UpDownBytes upDownBytes;
-    upDownBytes.inputBytes = 0;
-    upDownBytes.outputBytes = 0;
-
-    if (getifaddrs(&ifa_list) == -1) return upDownBytes;
-
-    for (ifa = ifa_list; ifa; ifa = ifa->ifa_next)
-    {
-        /* Skip invalid interfaces */
-        if (ifa->ifa_name == NULL || ifa->ifa_addr == NULL || ifa->ifa_data == NULL)
-            continue;
-
-        /* Skip interfaces that are not link level interfaces */
-        if (AF_LINK != ifa->ifa_addr->sa_family)
-            continue;
-
-        /* Skip interfaces that are not up or running */
-        if (!(ifa->ifa_flags & IFF_UP) && !(ifa->ifa_flags & IFF_RUNNING))
-            continue;
-
-        /* Skip interfaces that are not ethernet or cellular */
-        if (strncmp(ifa->ifa_name, "en", 2) && strncmp(ifa->ifa_name, "pdp_ip", 6))
-            continue;
-
-        struct if_data *if_data = (struct if_data *)ifa->ifa_data;
-
-        upDownBytes.inputBytes += if_data->ifi_ibytes;
-        upDownBytes.outputBytes += if_data->ifi_obytes;
-    }
-
-    freeifaddrs(ifa_list);
-    return upDownBytes;
-}
-
-static BOOL shouldUpdateSpeedLabel;
-static uint64_t prevOutputBytes = 0, prevInputBytes = 0;
-static CFIndex prevDirtyFrameCount = 0;
-static NSAttributedString *attributedUploadPrefix = nil;
-static NSAttributedString *attributedDownloadPrefix = nil;
-static NSAttributedString *attributedInlineSeparator = nil;
-static NSAttributedString *attributedLineSeparator = nil;
-
-static NSString *legacyBaseGameLine(void)
-{
-    if (!HUD_SHOW_BASE_GAME) return nil;
-    NSString *status = nil;
-    @try {
-        status = DSBridgeGameStatus();
-    } @catch (__unused NSException *e) {
-        status = nil;
-    }
-    if (status.length == 0) {
-        // DarkSword not compiled in or disabled — still show placeholder
-        // so SpringBoard HUD proves the toggle is ON.
-        status = @"Base: --";
-    }
-    return status;
-}
+static uint8_t HUD_SHOW_ESP_BOX = 0; // 0=hide, 1=show ESP status
 
 static NSString *legacyESPLine(void)
 {
@@ -363,171 +116,15 @@ static NSString *legacyESPLine(void)
     return status;
 }
 
-static NSAttributedString *formattedAttributedString(BOOL isFocused)
+static NSAttributedString *formattedNSAttributedString(BOOL __unused isFocused)
 {
     @autoreleasepool
     {
-        if (!attributedUploadPrefix)
-            attributedUploadPrefix = [[NSAttributedString alloc] initWithString:[[NSString stringWithUTF8String:HUD_UPLOAD_PREFIX] stringByAppendingString:@" "] attributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:HUD_FONT_SIZE] }];
-        if (!attributedDownloadPrefix)
-            attributedDownloadPrefix = [[NSAttributedString alloc] initWithString:[[NSString stringWithUTF8String:HUD_DOWNLOAD_PREFIX] stringByAppendingString:@" "] attributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:HUD_FONT_SIZE] }];
-        if (!attributedInlineSeparator)
-            attributedInlineSeparator = [[NSAttributedString alloc] initWithString:[NSString stringWithUTF8String:INLINE_SEPARATOR] attributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:HUD_FONT_SIZE] }];
-        if (!attributedLineSeparator)
-            attributedLineSeparator = [[NSAttributedString alloc] initWithString:@"\n" attributes:@{ NSFontAttributeName: [UIFont boldSystemFontOfSize:HUD_FONT_SIZE] }];
-
-        NSMutableAttributedString *mutableString = [[NSMutableAttributedString alloc] init];
-
-        UpDownBytes upDownBytes = getUpDownBytes();
-
-        uint64_t upDiff;
-        uint64_t downDiff;
-
-        if (needsBaselineReset && !isFocused)
-        {
-            prevOutputBytes = upDownBytes.outputBytes;
-            prevInputBytes = upDownBytes.inputBytes;
-            needsBaselineReset = NO;
-            shouldUpdateSpeedLabel = NO;
-            return nil;
-        }
-
-        if (isFocused)
-        {
-            upDiff = upDownBytes.outputBytes;
-            downDiff = upDownBytes.inputBytes;
-        }
-        else
-        {
-            if (upDownBytes.outputBytes > prevOutputBytes)
-                upDiff = upDownBytes.outputBytes - prevOutputBytes;
-            else
-                upDiff = 0;
-
-            if (upDownBytes.inputBytes > prevInputBytes)
-                downDiff = upDownBytes.inputBytes - prevInputBytes;
-            else
-                downDiff = 0;
-        }
-
-        prevOutputBytes = upDownBytes.outputBytes;
-        prevInputBytes = upDownBytes.inputBytes;
-
-        if (!SHOW_ALWAYS && (upDiff < 2 * KILOBYTES && downDiff < 2 * KILOBYTES))
-        {
-            shouldUpdateSpeedLabel = NO;
-            return nil;
-        }
-        else shouldUpdateSpeedLabel = YES;
-
-        if (HUD_DATA_UNIT == 1)
-        {
-            upDiff *= BYTE_SIZE;
-            downDiff *= BYTE_SIZE;
-        }
-
-        if (HUD_SHOW_DOWNLOAD_SPEED_FIRST)
-        {
-            if (HUD_SHOW_DOWNLOAD_SPEED)
-            {
-                [mutableString appendAttributedString:attributedDownloadPrefix];
-                [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:formattedSpeed(downDiff, isFocused) attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-            }
-
-            if (HUD_SHOW_UPLOAD_SPEED)
-            {
-                if ([mutableString length] > 0)
-                {
-                    if (HUD_SHOW_SECOND_SPEED_IN_NEW_LINE) [mutableString appendAttributedString:attributedLineSeparator];
-                    else [mutableString appendAttributedString:attributedInlineSeparator];
-                }
-
-                [mutableString appendAttributedString:attributedUploadPrefix];
-                [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:formattedSpeed(upDiff, isFocused) attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-            }
-        }
-        else
-        {
-            if (HUD_SHOW_UPLOAD_SPEED)
-            {
-                [mutableString appendAttributedString:attributedUploadPrefix];
-                [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:formattedSpeed(upDiff, isFocused) attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-            }
-            if (HUD_SHOW_DOWNLOAD_SPEED)
-            {
-                if ([mutableString length] > 0)
-                {
-                    if (HUD_SHOW_SECOND_SPEED_IN_NEW_LINE) [mutableString appendAttributedString:attributedLineSeparator];
-                    else [mutableString appendAttributedString:attributedInlineSeparator];
-                }
-
-                [mutableString appendAttributedString:attributedDownloadPrefix];
-                [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:formattedSpeed(downDiff, isFocused) attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-            }
-        }
-
-        NSString *baseLine = legacyBaseGameLine();
-        if (baseLine) {
-            if ([mutableString length] > 0) {
-                [mutableString appendAttributedString:attributedLineSeparator];
-            }
-            [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:baseLine attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-        }
         NSString *espLine = legacyESPLine();
-        if (espLine) {
-            if ([mutableString length] > 0) {
-                [mutableString appendAttributedString:attributedLineSeparator];
-            }
-            [mutableString appendAttributedString:[[NSAttributedString alloc] initWithString:espLine attributes:@{ NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT] }]];
-        }
-
-        return [mutableString copy];
-    }
-}
-
-static NSAttributedString *formattedFPSAttributedString(BOOL isFocused)
-{
-    @autoreleasepool
-    {
-        CFIndex dirtyFrameCount = CARenderServerGetDirtyFrameCount(NULL);
-
-        if (needsFPSBaselineReset)
-        {
-            prevDirtyFrameCount = dirtyFrameCount;
-            needsFPSBaselineReset = NO;
-            shouldUpdateSpeedLabel = YES;
-
-            NSString *fpsString = @"0 FPS";
-            return [[NSAttributedString alloc] initWithString:fpsString attributes:@{
-                NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
-            }];
-        }
-
-        CFIndex frameDiff = dirtyFrameCount - prevDirtyFrameCount;
-        prevDirtyFrameCount = dirtyFrameCount;
-
-        if (frameDiff < 0) frameDiff = 0;
-
-        double fps = (double)frameDiff / UPDATE_INTERVAL;
-        double maxFPS = (double)[UIScreen mainScreen].maximumFramesPerSecond;
-        if (fps > maxFPS) fps = maxFPS;
-
-        shouldUpdateSpeedLabel = YES;
-
-        NSString *fpsString = [NSString stringWithFormat:@"%.0f FPS", fps];
-        NSString *baseLine = legacyBaseGameLine();
-        if (baseLine) {
-            fpsString = [fpsString stringByAppendingFormat:@"\n%@", baseLine];
-        }
-        NSString *espLine = legacyESPLine();
-        if (espLine) {
-            fpsString = [fpsString stringByAppendingFormat:@"\n%@", espLine];
-        }
-        NSAttributedString *attributedString = [[NSAttributedString alloc] initWithString:fpsString attributes:@{
-            NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:HUD_FONT_WEIGHT]
+        if (!espLine) return nil;
+        return [[NSAttributedString alloc] initWithString:espLine attributes:@{
+            NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightRegular]
         }];
-
-        return attributedString;
     }
 }
 
@@ -631,33 +228,15 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     [self loadUserDefaults:YES];
 
-    BOOL singleLineMode = [self singleLineMode];
-    HUD_SHOW_UPLOAD_SPEED = !singleLineMode;
-
-    BOOL usesBitrate = [self usesBitrate];
-    HUD_DATA_UNIT = usesBitrate;
-
-    BOOL usesArrowPrefixes = [self usesArrowPrefixes];
-    HUD_UPLOAD_PREFIX = (usesArrowPrefixes ? "↑" : "▲");
-    HUD_DOWNLOAD_PREFIX = (usesArrowPrefixes ? "↓" : "▼");
-
+    // Custom font/offset = setting cấu trúc của shell — giữ nguyên.
     BOOL usesCustomFontSize = [self usesCustomFontSize];
-    if (!usesCustomFontSize) {
-        BOOL usesLargeFont = [self usesLargeFont];
-        HUD_FONT_SIZE = (usesLargeFont ? HUD_MAX_FONT_SIZE : HUD_MIN_FONT_SIZE);
-        [_blurView.layer setCornerRadius:(usesLargeFont ? HUD_MAX_CORNER_RADIUS : HUD_MIN_CORNER_RADIUS)];
+    if (usesCustomFontSize) {
+        HUD_FONT_SIZE = MIN(MAX([self realCustomFontSize], 8), 12);
+        [_blurView.layer setCornerRadius:HUD_FONT_SIZE / 2.0];
     } else {
-        CGFloat realCustomFontSize = MIN(MAX([self realCustomFontSize], 8), 12);
-        HUD_FONT_SIZE = realCustomFontSize;
-        [_blurView.layer setCornerRadius:realCustomFontSize / 2.0];
+        HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
+        [_blurView.layer setCornerRadius:HUD_MIN_CORNER_RADIUS];
     }
-
-    BOOL usesInvertedColor = [self usesInvertedColor];
-    HUD_FONT_WEIGHT = (usesInvertedColor ? UIFontWeightMedium : UIFontWeightRegular);
-    HUD_INACTIVE_OPACITY = (usesInvertedColor ? 1.0 : 0.667);
-    [_blurView setEffect:(usesInvertedColor ? nil : _blurEffect)];
-    [_speedLabel setColorInvertEnabled:usesInvertedColor];
-    [_lockedView setHidden:usesInvertedColor];
 
     BOOL hideAtSnapshot = [self hideAtSnapshot];
     if (hideAtSnapshot) {
@@ -666,22 +245,8 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
         [_containerView setupContainerAsDisplayContentInScreenshots];
     }
 
-    BOOL displayMode = [self displayMode];
-    HUD_DISPLAY_MODE = displayMode;
-
-    BOOL showBaseGame = [self showBaseGame];
-    HUD_SHOW_BASE_GAME = showBaseGame;
-
-    BOOL showESP = [self showESPBox];
-    HUD_SHOW_ESP_BOX = showESP;
-
-    prevInputBytes = 0;
-    prevOutputBytes = 0;
-    needsBaselineReset = YES;
-    prevDirtyFrameCount = 0;
-    needsFPSBaselineReset = YES;
-    attributedUploadPrefix = nil;
-    attributedDownloadPrefix = nil;
+    BOOL showESPBox = [self showESPBox];
+    HUD_SHOW_ESP_BOX = showESPBox;
 
     [self removeAllAnimations];
     [self resetGestureRecognizers];
@@ -875,12 +440,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 - (void)updateSpeedLabel
 {
     log_debug(OS_LOG_DEFAULT, "updateSpeedLabel");
-    NSAttributedString *attributedText;
-    if (HUD_DISPLAY_MODE == 1) {
-        attributedText = formattedFPSAttributedString(_isFocused);
-    } else {
-        attributedText = formattedAttributedString(_isFocused);
-    }
+    NSAttributedString *attributedText = formattedNSAttributedString(_isFocused);
     if (attributedText) {
         [_speedLabel setAttributedText:attributedText];
     }
@@ -982,8 +542,6 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     BOOL isCenteredMost = (selectedMode == HUDPresetPositionTopCenterMost);
     BOOL isPad = ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad);
 
-    HUD_SHOW_DOWNLOAD_SPEED_FIRST = isCentered;
-    HUD_SHOW_SECOND_SPEED_IN_NEW_LINE = !isCentered;
     [_speedLabel setTextAlignment:(isCentered ? NSTextAlignmentCenter : NSTextAlignmentLeft)];
     [_lockedView setImage:[UIImage systemImageNamed:(isCentered ? @"hand.raised.slash.fill" : @"lock.fill")]];
     [_blurView.layer setMaskedCorners:((isCenteredMost && !isLandscape) ? kCornerMaskBottom : kCornerMaskAll)];
