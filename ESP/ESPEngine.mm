@@ -2491,7 +2491,17 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             topY > screenH + 50.0f || topY + boxH < -50.0f) {
             cW2s++; continue;
         }
-        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, ESPHPPercent(vmMap, actor, (team == ESPTeam_Dummy) ? 3 : 1), 1, actor };
+        // kernrw49: nick + kind cho đường scan đầy đủ (giống RefreshBoxes).
+        ESPBox2D box = { centerX - boxW*0.5f, topY, boxW, boxH, dist, ESPHPPercent(vmMap, actor, (team == ESPTeam_Dummy) ? 3 : 1), 1, actor, {0}, 0 };
+        box.kind = (team == ESPTeam_Dummy) ? 3 : 1;
+        if (box.kind == 3) {
+            strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
+        } else if (ESPPlayerNickName(vmMap, actor, box.nick)) {
+        } else {
+            strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
+        }
+        box.nick[sizeof(box.nick) - 1] = '\0';
+        outBoxes[n++] = box;
     }
     ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
@@ -2891,7 +2901,20 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             topY > screenH + 50.0f || topY + boxH < -50.0f) {
             cW2s++; continue;
         }
-        outBoxes[n++] = (ESPBox2D){ centerX - boxW*0.5f, topY, boxW, boxH, dist, h->hpPct, 1, tr->actor };
+        // kernrw49: nickname + kind cho style Kernel (health/name/distance/line).
+        // Nick là FString (pawn+0x960, cache 3s trong ESPPlayerNickName) nên đọc
+        // mỗi tick gần như free; hỏng thì "Unknown" như Kernel GetPlayerName.
+        ESPBox2D box = { centerX - boxW*0.5f, topY, boxW, boxH, dist, h->hpPct, 1, tr->actor, {0}, 0 };
+        box.kind = (uint8_t)tr->kind;
+        if (tr->kind == 3) {
+            strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
+        } else if (ESPPlayerNickName(vmMap, tr->actor, box.nick)) {
+            // giữ nguyên nick
+        } else {
+            strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
+        }
+        box.nick[sizeof(box.nick) - 1] = '\0';
+        outBoxes[n++] = box;
     }
     ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,

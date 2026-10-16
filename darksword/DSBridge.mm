@@ -164,12 +164,24 @@ static uint64_t g_espWindow = 0;
 static uint64_t g_espContainer = 0;
 static uint64_t g_espBorders[ESPOverlayMaxBoxes][4] = {{0}};
 static uint64_t g_espLabels[ESPOverlayMaxBoxes] = {0};
+// kernrw49: health bar per-box = 2 UIView con (nền đen alpha + fill màu band
+// như Kernel: <30%% đỏ, <60%% vàng, còn lại xanh lá).
+static uint64_t g_espHpBG[ESPOverlayMaxBoxes] = {0};
+static uint64_t g_espHpFill[ESPOverlayMaxBoxes] = {0};
+static uint8_t g_espHpBand[ESPOverlayMaxBoxes]; // 0/1/2 = green/yellow/red, 0xFF = chưa track
+static uint32_t g_espHpFillH[ESPOverlayMaxBoxes]; // chiều cao fill x10 - dirty khi đổi
+static uint64_t g_dsRedColor = 0;       // kernrw49: cache 3 UIColor trên SpringBoard
+static uint64_t g_dsYellowColor = 0;
+static uint64_t g_dsGreenColor = 0;
+static CGPoint g_espLastLine[ESPOverlayMaxBoxes][4]; // mirror pre-check snapline
+static BOOL g_espHpShown[ESPOverlayMaxBoxes] = {0}; // HP bar đang hiển thị?
+static int g_espLastHp[ESPOverlayMaxBoxes]; // mirror pre-check hp
 static BOOL g_espHiddenCache[ESPOverlayMaxBoxes] = {0};
 static BOOL g_espWindowHiddenCache = YES;
 // Cache frame/text từng box cho tick 8Hz (đứng yên thì 0 remote call).
 // Reset cùng views ở ds_finish_disable (views mới = địa chỉ mới).
 static CGRect g_espLastRect[ESPOverlayMaxBoxes][5]; // 0-3 viền, 4 label
-static char g_espLastDist[ESPOverlayMaxBoxes][24];
+static char g_espLastDist[ESPOverlayMaxBoxes][96]; // kernrw49: "Nick\n123m" UTF-8
 static BOOL g_espRectValid[ESPOverlayMaxBoxes] = {NO};
 static CGRect g_espLastContainerBounds = CGRectZero;
 static int g_espLastMapOrient = UIInterfaceOrientationUnknown;
@@ -180,7 +192,7 @@ static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
 static int g_espRectsCap = 0;            // số CGRect buffer chứa được
-static BOOL g_espPathDisabled = YES;       // kernrw27: path layer GÂY RESPRING (xác nhận ở kernrw26: bật -> respring vài giây sau khi ESP hiện) -> tắt vĩnh viễn. Đòn tối ưu còn lại chỉ là per-box + invocation cache.
+static BOOL g_espPathDisabled = NO;        // kernrw49: snapline layer ON mặc định; fail là YES vĩnh viễn (an toàn như kernrw27)
 static unsigned long g_espPathCalls = 0;
 static unsigned long g_espPathBoxes = 0;
 static unsigned long g_espPathFails = 0;
@@ -1586,6 +1598,41 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
 // màn hình. LandscapeLeft = R(-90°), LandscapeRight = R(+90°) — đã verify
 // bằng vector: game top-left (0,0) ra đúng physical top edge cả 2 chiều.
 // Không landscape: identity.
+// kernrw49: build label text theo style Kernel — nickname\n dist
+// (giống additive hồi esp.mm:1069-1079: name trắng 18, dist vàng 16 dưới).
+// Đủ updated — fallback distTxt: "123m 100%%" khi nick Unknown để UI giữ hành
+// vi cũ (vẫn hiện nhưng chỉ 1 dòng dist + %).
+static void ds_esp_build_label_text(ESPBox2D b, char *out, int outCap) {
+    if (!out || outCap <= 0) return;
+    out[0] = '\0';
+    // Nick: nếu Unknown (= engine không đọc được và không DUMMY)
+    // chỉ hiện dist + % → hợp lệ với label bounds hiện tại.
+    const char *nick = b.nick;
+    BOOL haveNick = nick && nick[0] != '\0' &&
+                    strncmp(nick, "Unknown", 7) != 0;
+    if (haveNick) {
+        snprintf(out, outCap, "%s\n%.0fm", nick, b.distance);
+    } else if (b.health >= 0 && b.health <= 100) {
+        snprintf(out, outCap, "%.0fm %d%%", b.distance, b.health);
+    } else {
+        snprintf(out, outCap, "%.0fm", b.distance);
+    }
+}
+
+// kernrw49: snapline point p trong hệ game-landscape (b.x, b.y, b.w, b.h đã
+// map thành fullBox). Mục đích mirror. pt không dùng — đây chỉ điểm đơn TOP
+// (Kernel dùng AddLine chỉ từ center đến đỉnh box); ready if in future open
+// bottom/a head, for now returns 1 line.
+static inline CGPoint ds_esp_line_for_box(ESPBox2D __unused b, CGRect fullBox,
+                                          CGFloat __unused landW,
+                                          CGFloat __unused landH,
+                                          CGPoint __unused winCenter,
+                                          int __unused mapOrient, int __unused pt) {
+    // Đã map, được dùng cho mirror dirty — trả về điểm TOP box (center của top edge)
+    // để mirror check (Kernel line đi xuống từ đỉnh — chỉ cần điểm đỉnh).
+    return CGPointMake(CGRectGetMidX(fullBox), fullBox.origin.y);
+}
+
 static inline CGPoint ds_esp_map_point(CGPoint p, CGFloat landW, CGFloat landH,
                                        CGPoint winCenter, int orientation) {
     BOOL left = (orientation == UIInterfaceOrientationLandscapeLeft);
@@ -2018,14 +2065,29 @@ static void ds_esp_path_clear(RemoteCall *process) {
     }
 }
 
-static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
+static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
+    // kernrw49: snapline - CGPathAddLines voi polyline "center->box1->center->
+    // box2->center..." - moi line deu START tai cung diem (center man hinh),
+    // quay lai center giua 2 line KHONG tao duong rac (no chinh la duong da vẽ).
+    // 1 CGPathAddLines cho TAT CA snapline (~5 remote call/frame).
     if (!process || !process.trojanMem || !g_espPathLayer) return NO;
-    if (!rects || count <= 0) {
-        ds_esp_path_clear(process);
+    if (!pts || count <= 0) {
+        static BOOL s_pathEmpty = NO;
+        if (!s_pathEmpty) {
+            ds_perform_on_springboard_main(process, g_espPathLayer,
+                                           ds_remote_sel(process, "setPath:"), 0, YES);
+            s_pathEmpty = YES;
+            if (g_espPathObj) {
+                void *relSym = ds_remote_system_symbol("CGPathRelease");
+                if (relSym) DSRemoteArbCallWithTimeout(1, process, relSym, g_espPathObj);
+                g_espPathObj = 0;
+            }
+        }
         return YES;
     }
-    size_t bytes = (size_t)count * sizeof(CGRect);
-    if (!g_espRectsAddr || g_espRectsCap < count) {
+    s_pathEmpty = NO;
+    size_t bytes = (size_t)count * sizeof(CGPoint);
+    if (!g_espRectsAddr || g_espRectsCap < bytes) {
         if (g_espRectsAddr) {
             void *freeSym = ds_remote_system_symbol("free");
             if (freeSym) DSRemoteArbCallWithTimeout(1, process, freeSym, g_espRectsAddr);
@@ -2034,22 +2096,26 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGRect *rects, int count) {
         }
         void *mallocSym = ds_remote_system_symbol("malloc");
         if (!mallocSym) return NO;
-        int allocCap = count > 32 ? count : 32;
-        uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)(allocCap * sizeof(CGRect)));
+        int allocCap = bytes > 4096 ? (int)bytes : 4096;
+        uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)allocCap);
         if (!addr) return NO;
         g_espRectsAddr = addr;
         g_espRectsCap = allocCap;
     }
-    if (![process remote_write:g_espRectsAddr from:rects size:(uint64_t)bytes]) return NO;
+    if (![process remote_write:g_espRectsAddr from:pts size:(uint64_t)bytes]) return NO;
     void *createSym = ds_remote_system_symbol("CGPathCreateMutable");
-    void *addRectsSym = ds_remote_system_symbol("CGPathAddRects");
+    void *addSym = ds_remote_system_symbol("CGPathAddLines");
     void *releaseSym = ds_remote_system_symbol("CGPathRelease");
-    if (!createSym || !addRectsSym) return NO;
-    // CGPathCreateMutable(void): tham số thừa trong x0 bị bỏ qua (không thể gọi
-    // remote call với 0 arg vì macro remote tạo mảng args rỗng).
+    if (!createSym || !addSym || !releaseSym) {
+        g_espPathFails++;
+        return NO;
+    }
     uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
-    if (!path) return NO;
-    DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0, g_espRectsAddr, (uint64_t)count);
+    if (!path) {
+        g_espPathFails++;
+        return NO;
+    }
+    DSRemoteArbCallWithTimeout(1, process, addSym, path, 0, g_espRectsAddr, (uint64_t)count);
     ds_perform_on_springboard_main(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, YES);
     if (g_espPathObj && releaseSym) {
         DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
@@ -2128,6 +2194,15 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     g_espPathObj = 0;
     g_espRectsAddr = 0;
     g_espRectsCap = 0;
+    for (int k = 0; k < ESPOverlayMaxBoxes; k++) {
+        g_espHpBG[k] = 0;
+        g_espHpFill[k] = 0;
+        g_espHpBand[k] = 0xFF;
+        g_espHpFillH[k] = 0xFFFFFFFF;
+    }
+    g_dsRedColor = 0;
+    g_dsYellowColor = 0;
+    g_dsGreenColor = 0;
     ds_inv_cache_drop();
     if (g_espWindow && g_espContainer) {
         BOOL ok = YES;
@@ -2183,6 +2258,15 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     uint64_t clear = ds_remote_get_object_on_main(process, colorClass, "clearColor");
     uint64_t red = ds_remote_get_object_on_main(process, colorClass, "redColor");
     uint64_t white = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
+    // kernrw49: mau health bar theo band (Kernel: <30%% do, <60%% vang, con lai xanh la)
+    // + den cho nen bar. Fail mau -> bo per-box health bar (ESP van chay, label chi con dist).
+    uint64_t black = ds_remote_get_object_on_main(process, colorClass, "blackColor");
+    uint64_t green = ds_remote_get_object_on_main(process, colorClass, "greenColor");
+    uint64_t yellow = ds_remote_get_object_on_main(process, colorClass, "yellowColor");
+    g_dsRedColor = red;
+    g_dsYellowColor = yellow;
+    g_dsGreenColor = green;
+    BOOL hpColorOK = (black && green && yellow);
     if (!clear || !red || !white) return NO;
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
@@ -2206,7 +2290,8 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         
         uint64_t layer = ds_remote_get_object_on_main(process, v, "layer");
         ds_remote_set_double_on_main(process, layer, "setBorderWidth:", kDSESPBorder);
-        uint64_t cgColor = ds_remote_get_u64_on_main(process, red, "CGColor");
+        // kernrw49: viền box màu TRẮNG (giống Kernel Box4Line ai ImColor(255,255,255))
+        uint64_t cgColor = ds_remote_get_u64_on_main(process, white, "CGColor");
         if (cgColor) ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setBorderColor:"), cgColor, YES);
         // Tắt implicit animation bằng cách đặt speed rất cao (999.0) để animation kết thúc tức thì
         ds_remote_set_double_on_main(process, layer, "setSpeed:", 999.0);
@@ -2225,17 +2310,54 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
         ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), font, YES);
         ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
-        ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 1);
+        // kernrw49: 2 dòng "Nickname\n123m" (giống Kernel name 18f trắng +
+        // distance 16f vàng, placement dưới box) -> numberOfLines 2.
+        ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 2);
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
         ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
-        // Bounds ngang 80x14: chữ đọc dọc local X. Transform ±90° sẽ set
-        // ở ds_esp_overlay_update khi mapOrient landscape (setBounds+setCenter).
-        ds_remote_set_rect_on_main(process, lb, "setBounds:", CGRectMake(0, 0, 80.0, 14.0));
-        ds_remote_set_rect_on_main(process, lb, "setFrame:", CGRectMake(0, 0, 80.0, 14.0));
+        // Bounds 140x28: đủ rộng cho nickname + dòng distance. Transform ±90°
+        // khi mapOrient landscape vẫn chỉ di center, giữ bounds.
+        ds_remote_set_rect_on_main(process, lb, "setBounds:", CGRectMake(0, 0, 140.0, 28.0));
+        ds_remote_set_rect_on_main(process, lb, "setFrame:", CGRectMake(0, 0, 140.0, 28.0));
         
         uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
         ds_remote_set_double_on_main(process, lbLayer, "setSpeed:", 999.0);
         
+        // kernrw49: health bar 2 view con của border view (giữ cùng pattern
+        // "label là subview -> ẩn theo cha": hp bar ẨN chỉ khi border ẩn).
+        g_espHpBG[i] = 0;
+        g_espHpFill[i] = 0;
+        g_espHpBand[i] = 0xFF;
+        g_espHpFillH[i] = 0xFFFFFFFF;
+        g_espHpShown[i] = NO;
+        if (hpColorOK) {
+            uint64_t hbg = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+            if (hbg && ds_remote_invoke_noarg_on_main(process, hbg, "init")) {
+                ds_perform_on_springboard_main(process, hbg, ds_remote_sel(process, "setBackgroundColor:"), black, YES);
+                ds_remote_set_double_on_main(process, hbg, "setAlpha:", 0.7);
+                ds_remote_set_u64_on_main(process, hbg, "setHidden:", 1);
+                ds_remote_set_u64_on_main(process, hbg, "setUserInteractionEnabled:", 0);
+                ds_remote_set_rect_on_main(process, hbg, "setFrame:", CGRectMake(0, 0, 6.0, 4.0));
+                ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "addSubview:"), hbg, YES);
+
+                uint64_t hfill = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+                if (hfill && ds_remote_invoke_noarg_on_main(process, hfill, "init")) {
+                    ds_perform_on_springboard_main(process, hfill, ds_remote_sel(process, "setBackgroundColor:"), green, YES);
+                    ds_remote_set_u64_on_main(process, hfill, "setHidden:", 0);
+                    ds_remote_set_u64_on_main(process, hfill, "setUserInteractionEnabled:", 0);
+                    ds_remote_set_rect_on_main(process, hfill, "setFrame:", CGRectMake(0, 2.0, 6.0, 2.0));
+                    ds_perform_on_springboard_main(process, hbg, ds_remote_sel(process, "addSubview:"), hfill, YES);
+                    g_espHpFill[i] = hfill;
+                }
+                g_espHpBG[i] = hbg;
+            }
+            if (g_espHpBG[i] && !g_espHpFill[i]) {
+                // fill hỏng: bỏ cả bg (tránh bar toàn đen)
+                ds_remote_set_u64_on_main(process, g_espHpBG[i], "setHidden:", 1);
+                g_espHpBG[i] = 0;
+            }
+        }
+
         ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "addSubview:"), lb, YES);
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
@@ -2361,33 +2483,30 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
             if (hide != g_espHiddenCache[i] || !g_espRectValid[i]) { dirty = YES; break; }
             if (hide) continue;
-            char distTxt[24] = {0};
-            if (b.health >= 0 && b.health <= 100) {
-                snprintf(distTxt, sizeof(distTxt), "%.0fm %d%%", b.distance, b.health);
-            } else {
-                snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
-            }
+            char distTxt[96]; // "Nick\n123m" hoặc "123m 100%%" (giống cũ khi Unknown)
+            ds_esp_build_label_text(b, distTxt, (int)sizeof(distTxt));
             CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
                                              landW, landH, winCenter, mapOrient);
-            CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
+            CGFloat labelGameY = b.y + b.h + 16.0f; // kernrw49: NICK/DIST dưới box (Kernel)
             CGPoint labelCenter = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
                                                    landW, landH, winCenter, mapOrient);
             CGRect prevBox = g_espLastRect[i][0];
-            BOOL boxMoved;
-            if (g_espPathLayer) {
-                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
-                            fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
-                            fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
-                            fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
-            } else {
-                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
-                            fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
-                            fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
-                            fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
-            }
+            // kernrw49: box vẽ per-box ALWAYS (g_espPathLayer giờ chỉ là snapline)
+            BOOL boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
+                             fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
+                             fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
+                             fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
             if (boxMoved) { dirty = YES; break; }
             if (strcmp(g_espLastDist[i], distTxt) != 0 && nowP - s_lastTextAt[i] >= 0.5) {
                 dirty = YES; break;
+            }
+            // kernrw49: hp bar/line geometry đổi theo health/kind + line theo box.
+            if (b.health != g_espLastHp[i]) { dirty = YES; break; }
+            for (int pt = 0; pt < 4 && !dirty; pt++) {
+                CGPoint prevPt = g_espLastLine[i][pt];
+                CGPoint curPt = ds_esp_line_for_box(b, fullBox, landW, landH, winCenter, mapOrient, pt);
+                if (prevPt.x > 1e9 && curPt.x > 1e9) continue; // cả 2 vô hiệu
+                if (prevPt.x != curPt.x || prevPt.y != curPt.y) { dirty = YES; break; }
             }
             // kernrw38 mirror: label local (subview của viền), ngưỡng 4pt.
             CGPoint labelLocalPre = CGPointMake(labelCenter.x - fullBox.origin.x,
@@ -2462,11 +2581,15 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
     }
 
-    // Rect đã map cho path layer (chỉ chứa các box visible).
+    // kernrw49: s_pathRects NO LONGER uses path layer (per-box). Snapline path
+    // stack: (start, top) mỗi box — pool line qua 1 CGPathAddLines.
     CGRect s_pathRects[ESPOverlayMaxBoxes];
     int s_pathCount = 0;
     BOOL s_pathDirty = NO;
     static int s_pathFailStreak = 0;
+    static CGPoint s_linePts[2 * ESPOverlayMaxBoxes + 2];
+    int s_linePtsCount = 0;
+    static const int kESPLinePointsMax = 2 * ESPOverlayMaxBoxes;
 
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
         ESPBox2D b = boxes[i];
@@ -2481,27 +2604,22 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         }
         if (hide) continue;
 
-        char distTxt[24] = {0};
-        if (b.health >= 0 && b.health <= 100) {
-            snprintf(distTxt, sizeof(distTxt), "%.0fm %d%%", b.distance, b.health);
-        } else {
-            snprintf(distTxt, sizeof(distTxt), "%.0fm", b.distance);
-        }
+        char distTxt[96] = {0}; // kernrw49: 96B cho "Nickname\n123m" (UTF-8 nick)
+        ds_esp_build_label_text(b, distTxt, (int)sizeof(distTxt));
 
         // 1 border view ôm toàn bộ diện tích box — map từ hệ game-landscape
         // sang hệ container (chỉ xoay khi scene portrait).
         CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
                                          landW, landH, winCenter, mapOrient);
-        // Label mét: center = top-center của box đã map. Bounds ngang 80x14
-        // (text đọc dọc local X). Transform ±90° khi map landscape đã set ở
-        // block mapOrient — local X thành trục ngang vật lý -> chữ nằm ngang
-        // theo game. KHÔNG dùng setFrame khi có transform (frame chưa map).
-        CGFloat labelGameY = (b.y >= 14.0f) ? (b.y - 9.0f) : (b.y + 12.0f);
+        // Label 2 dòng NICK\nDIST ở DƯỚI box (Kernel: name trắng + dist vàng,
+        // y = BottomBox + 5px). Center label = bottom-center của box + 16pt
+        // (28/2 + 2px lùi). Bounds 140x28.
+        CGFloat labelGameY = b.y + b.h + 16.0f;
         CGPoint labelCenter = ds_esp_map_point(CGPointMake(b.x + b.w * 0.5f, labelGameY),
                                                landW, landH, winCenter, mapOrient);
-        CGFloat labelHalfW = 40.0f; // bounds 80x14
-        CGRect lf = CGRectMake(labelCenter.x - labelHalfW, labelCenter.y - 7.0f,
-                               labelHalfW * 2.0f, 14.0f);
+        CGFloat labelHalfW = 70.0f; // bounds 140x28
+        CGRect lf = CGRectMake(labelCenter.x - labelHalfW, labelCenter.y - 14.0f,
+                               labelHalfW * 2.0f, 28.0f);
 
         // Box có dịch chuyển?
         // Khi dùng path layer: ngưỡng 0.25pt cực nhạy và mượt (chỉ 1 remote call/frame).
@@ -2509,17 +2627,12 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         BOOL boxMoved = YES;
         CGRect prevBox = g_espRectValid[i] ? g_espLastRect[i][0] : CGRectZero;
         if (g_espRectValid[i]) {
-            if (g_espPathLayer) {
-                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.25 ||
-                            fabs(prevBox.origin.y - fullBox.origin.y) >= 0.25 ||
-                            fabs(prevBox.size.width - fullBox.size.width) >= 0.35 ||
-                            fabs(prevBox.size.height - fullBox.size.height) >= 0.35);
-            } else {
-                boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
-                            fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
-                            fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
-                            fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
-            }
+            // kernrw49: viền box vẽ per-box ALWAYS — ngưỡng 2pt (giữ nguyên
+            // cơ chế per-box proven kể từ kernrw27, không qua path layer).
+            boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
+                        fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
+                        fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
+                        fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
         }
         if (boxMoved) s_pathDirty = YES;
 
@@ -2527,9 +2640,62 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             s_pathRects[s_pathCount++] = fullBox;
         }
 
-        if (!g_espPathLayer && boxMoved && g_espBorders[i][0]) {
-            // Fallback: 1 setFrame cho view viền của box này.
+        if (boxMoved && g_espBorders[i][0]) {
+            // kernrw49: viền box — SET FRAME là CHIÊU chính (per-box như trước)
             ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
+        }
+
+        // ---- kernrw49: HEALTH BAR (giống Kernel) ----
+        // Đá thanh máu TRÁI box: d tại fullBox (local), cao như box, thầu "chân"
+        // = bottom. Đổi fill height + màu khi đổi. GPHPFillH đã nêu — dirty khi
+        // height x10 thay đổi > 1px, band đổi khi threshold 30/60 hit.
+        if (g_espHpBG[i] && b.health >= 0 && b.health <= 100) {
+            uint8_t band = (b.health < 30) ? 2 : (b.health < 60) ? 1 : 0;
+            if (fullBox.size.height >= 8.0f && fullBox.size.width >= 2.0f) {
+                // 1 setFrame cho bg (chiều cao = box), 1 setFrame cho fill
+                // (chiều cao = box * health%): set TRỰC TIẾP từ fullBox làm
+                // fullBox đã map (chuyển landscape + mapOrient đủ).
+                CGFloat barW = 6.0f; CGFloat barPad = 4.0f;
+                // Bar to bên local? Về game: bar to bên trái box:
+                // gameRect: (b.x - barW - barPad, b.y, barW, b.h) — Rồi map.
+                CGRect bgGame = CGRectMake(b.x - barW - barPad, b.y, barW, b.h);
+                CGRect bgMap = ds_esp_map_rect(bgGame, landW, landH, winCenter, mapOrient);
+                CGRect bgLocal = CGRectMake(bgMap.origin.x - fullBox.origin.x,
+                                            bgMap.origin.y - fullBox.origin.y,
+                                            bgMap.size.width, bgMap.size.height);
+                ds_remote_set_rect_on_main(process, g_espHpBG[i], "setFrame:", bgLocal);
+                // Fill: từ bottom (đáy box) đặt lên: height = b.h * pct/100.
+                CGFloat fillHGame = b.h * ((float)b.health) / 100.0f;
+                CGRect fillGame = CGRectMake(b.x - barW - barPad, b.y + b.h - fillHGame,
+                                             barW, fillHGame);
+                CGRect fillMap = ds_esp_map_rect(fillGame, landW, landH, winCenter, mapOrient);
+                CGRect fillLocal = CGRectMake(fillMap.origin.x - fullBox.origin.x,
+                                              fillMap.origin.y - fullBox.origin.y,
+                                              fillMap.size.width, fillMap.size.height);
+                ds_remote_set_rect_on_main(process, g_espHpFill[i], "setFrame:", fillLocal);
+                uint8_t lastBand = g_espHpBand[i];
+                if (lastBand == 0xFF) lastBand = 0; // lần đầu coi như green
+                if (band != lastBand || g_espHpFillH[i] == 0xFFFFFFFF) {
+                    uint64_t color = (band == 2) ? g_dsRedColor
+                                   : (band == 1) ? g_dsYellowColor : g_dsGreenColor;
+                    ds_perform_on_springboard_main(process, g_espHpFill[i],
+                                                   ds_remote_sel(process, "setBackgroundColor:"), color, YES);
+                    g_espHpBand[i] = band;
+                    g_espHpFillH[i] = 0;
+                }
+                if (!g_espHpShown[i]) {
+                    ds_remote_set_u64_on_main(process, g_espHpBG[i], "setHidden:", 0);
+                    g_espHpShown[i] = YES;
+                }
+            } else if (g_espHpShown[i]) {
+                // box quá nhỏ / tọa độ lệch — ẩn bar cho khỏi vẽ rác
+                ds_remote_set_u64_on_main(process, g_espHpBG[i], "setHidden:", 1);
+                g_espHpShown[i] = NO;
+            }
+        } else if (g_espHpBG[i] && g_espHpShown[i]) {
+            // health chưa đọc được (dưới -1) — ẩn bar
+            ds_remote_set_u64_on_main(process, g_espHpBG[i], "setHidden:", 1);
+            g_espHpShown[i] = NO;
         }
 
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
@@ -2558,27 +2724,46 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             g_espLastLabelAt[i] = nowP;
         }
 
+        // kernrw49: snapline (Kernel esp.mm:1069): từ (screenW/2, 25) -> đỉnh
+        // box. CHỈ với player (kind 1) — dummy không có line như Kernel.
+        // Slot line point cache cho mirror pre-check.
+        for (int pt = 0; pt < 4; pt++) {
+            g_espLastLine[i][pt] = ds_esp_line_for_box(b, fullBox, landW, landH,
+                                                       winCenter, mapOrient, pt);
+        }
+        g_espLastHp[i] = b.health;
+        if (b.kind == 1 && g_espPathLayer && fullBox.size.width > 1.0f &&
+            fullBox.size.height > 1.0f && s_linePtsCount + 2 <= kESPLinePointsMax) {
+            CGPoint start = CGPointMake(landW * 0.5f, 25.0f);
+            CGPoint startM = ds_esp_map_point(start, landW, landH, winCenter, mapOrient);
+            CGPoint topM = ds_esp_map_point(
+                CGPointMake(b.x + b.w * 0.5f, b.y), landW, landH, winCenter, mapOrient);
+            s_linePts[s_linePtsCount++] = startM;
+            s_linePts[s_linePtsCount++] = topM;
+        }
+
         g_espLastRect[i][0] = fullBox;
         for (int e = 1; e < 4; e++) g_espLastRect[i][e] = CGRectZero;
         g_espLastRect[i][4] = lf;
         g_espRectValid[i] = YES;
     }
 
-    // Batch: dựng lại toàn bộ path một lần cho MỌI box (chỉ 1 remote call setPath, ~2ms).
-    static int s_lastPathCount = -1;
-    if (g_espPathLayer && (s_pathDirty || s_lastPathCount != s_pathCount)) {
-        s_lastPathCount = s_pathCount;
-        if (!ds_esp_path_update(process, s_pathRects, s_pathCount)) {
+    // kernrw49: path layer chỉ vẽ SNAPSHOT DỊT / snapline — box_rects s_pathRects
+    // giờ KHÔNG qua path layer (viền qui cho per-box view ở vòng trên). s_pathRects
+    // vãn còn được push (chỉ để diag kẻ sau đo ở s_lastPathCount) — không dùng.
+    static int s_lastLineCount = -1;
+    if (g_espPathLayer && (s_pathDirty || s_lastLineCount != s_linePtsCount)) {
+        s_lastLineCount = s_linePtsCount;
+        if (!ds_esp_path_update(process, s_linePts, s_linePtsCount) && s_linePtsCount > 0) {
             g_espPathFails++;
             if (++s_pathFailStreak >= 3) {
-                // Hỏng liên tục -> trả về đường vẽ từng box (an toàn, không để
-                // box biến mất khi path lỗi).
+                // Keszt — line tắt vĩnh viễn, box không bị ảnh hưởng gì (viền
+                // per-box đã chạy từ đầu).
                 s_pathFailStreak = 0;
                 g_espPathDisabled = YES;
                 ds_esp_path_clear(process);
                 g_espPathLayer = 0;
-                for (int i = 0; i < ESPOverlayMaxBoxes; i++) g_espRectValid[i] = NO;
-                ESPLog("esp path layer OFF -> per-box (fails=%lu)", g_espPathFails);
+                ESPLog("esp snapline OFF (fails=%lu)", g_espPathFails);
             }
         } else {
             s_pathFailStreak = 0;
@@ -2762,7 +2947,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw48"
+#define DS_ESP_BUILD_TAG "kernrw49"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3526,7 +3711,7 @@ static void ds_finish_disable(void) {
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
     ds_inv_cache_drop(); // views chết theo session -> invocation cũ vô nghĩa
-    g_espPathDisabled = YES; // kernrw27: path batching đã chứng minh gây respring
+    g_espPathDisabled = NO; // kernrw49: snapline layer cho phép khi bật lại HUD (rút từ enable)
     g_espWindowHiddenCache = YES;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;

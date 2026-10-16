@@ -29,6 +29,13 @@ BOOL ESPIsPlayerCharacterName(const char *name);
 // So tên với list hình nhân huấn luyện (ShootingPracticeTarget...).
 BOOL ESPIsTrainingDummyName(const char *name);
 
+// kernrw49: nickname người chơi — Character+0x960 (FString PlayerName, đường
+// Kernel kPlayerName), fallback Pawn→APlayerState (0x4D0) → 0x4B8 FString.
+// Đọc UTF-16LE → UTF-8 (do FString là UTF-16, nickname tiếng Việt/Trung
+// đứng được). Cache theo pawn, TTL 3s (nick hiếm khi đổi giữa trận).
+// NO nếu đọc fail (caller hiển thị "Unknown" như Kernel).
+BOOL ESPPlayerNickName(uint64_t vmMap, uint64_t pawn, char outNick[64]);
+
 // Xoá cache khi đổi base/world.
 void ESPNameReset(uint64_t gameBase);
 

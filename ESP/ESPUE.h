@@ -31,12 +31,16 @@ typedef struct {
 
 // Box 2D đã project ra màn hình game (landscape points).
 // (x,y) là góc trên-trái, w/h là size. distance mét.
+// kernrw49: thêm nick (UTF-8, hiển thị dưới box giống Kernel) + kind
+// (1 = player, 3 = hình nhân) để bridge vẽ style đúng (line chỉ với player).
 typedef struct {
     float x, y, w, h;
     float distance;
     int health; // percent 0-100 cho thanh máu kiểu Source Kernel, -1 chưa đọc
     uint8_t visible; // 1 = đang trong tầm nhìn camera (mesh bRecentlyRendered)
     uint64_t actor; // AActor* pointer for stable slot tracking
+    char nick[64];  // nickname UTF-8 ("Unknown" nếu đọc không được, "DUMMY" cho hình nhân)
+    uint8_t kind;   // 1 = player character, 3 = hình nhân huấn luyện; 0 = khác
 } ESPBox2D;
 
 // Actor đã phân loại để refresh vị trí nhanh giữa 2 lượt quét đầy đủ.

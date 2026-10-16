@@ -432,6 +432,99 @@ BOOL ESPActorNameByID(uint64_t vmMap, uint64_t uname, uint32_t fid, char outName
     return YES;
 }
 
+// ---------------------------------------------------------------------------
+// kernrw49: nickname người chơi — giống Kernel GetPlayerName (esp.mm:352):
+// FString là pointer đến UTF-16 data. TECHE Character-0x960 = FString
+// PlayerName (offset.h kernrw1); nếu fail thì fallback Pawn+0x4D0 →
+// APlayerState+0x4B8 (SDK dump AIOHeader.hpp). UTF-16LE → UTF-8.
+// ---------------------------------------------------------------------------
+// convert bộ UCS-2LE (little endian, không có surrogate trong nickname 16 دوره)
+// -> UTF-8 vì UILabel chỉ hiểu NSString UTF-8.
+static int ESPUcs2ToUtf8(const uint8_t *raw, int chars, char *out, int outCap) {
+    if (!out || outCap <= 0) return 0;
+    int o = 0;
+    out[0] = '\0';
+    for (int i = 0; i < chars && o < outCap - 4; i++) {
+        uint16_t u = (uint16_t)(raw[i*2] | (raw[i*2+1] << 8));
+        if (u == 0) break;
+        if (u == 0x0A) { out[o++] = '\n'; continue; }
+        if (u == '\r' || u < 0x20) continue; // bỏ control ký tự lạ
+        if (u < 0x80) {
+            out[o++] = (char)u;
+        } else if (u < 0x800) {
+            out[o++] = (char)(0xC0 | (u >> 6));
+            out[o++] = (char)(0x80 | (u & 0x3F));
+        } else {
+            out[o++] = (char)(0xE0 | (u >> 12));
+            out[o++] = (char)(0x80 | ((u >> 6) & 0x3F));
+            out[o++] = (char)(0x80 | (u & 0x3F));
+        }
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static BOOL ESPReadFStringNick(uint64_t vmMap, uint64_t fstr, char *out, int outCap) {
+    if (!fstr || fstr < 0x100000000ULL || fstr >= 0x300000000000ULL) return NO;
+    BOOL ok = NO;
+    uint64_t dataPtr = ESPReadU64(vmMap, fstr, &ok);
+    if (!ok) return NO;
+    int32_t num = (int32_t)ESPReadU32(vmMap, fstr + 8, &ok);
+    if (!ok) return NO;
+    if (!dataPtr || dataPtr < 0x100000000ULL || dataPtr >= 0x300000000000ULL) return NO;
+    // Num của FString = số TCHAR + null. Ngược lại: nickname PUBG ≤ ~16 ký tự.
+    if (num < 2 || num > 32) return NO;
+    uint8_t raw[64];
+    uint64_t want = (uint64_t)num * 2;
+    if (want > sizeof(raw)) want = sizeof(raw);
+    if (!ESPMemoryRead(vmMap, dataPtr, raw, want)) return NO;
+    int n = ESPUcs2ToUtf8(raw, (int)(want / 2), out, outCap);
+    if (n <= 0) return NO;
+    // strip ký tự non-ASCII rác nếu n quá ngắn
+    if (n < 2) return NO;
+    return YES;
+}
+
+BOOL ESPPlayerNickName(uint64_t vmMap, uint64_t pawn, char outNick[64]) {
+    if (outNick) outNick[0] = '\0';
+    if (!pawn || pawn < 0x100000000ULL || pawn >= 0x300000000000ULL) return NO;
+    static std::map<uint64_t, std::pair<CFAbsoluteTime, std::string>> s_nickCache;
+    if (s_nickCache.size() > 2000) s_nickCache.clear();
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    auto it = s_nickCache.find(pawn);
+    if (it != s_nickCache.end()) {
+        const std::pair<CFAbsoluteTime, std::string> &entry = it->second;
+        if (now - entry.first < 3.0) {
+            if (outNick && entry.second.length() > 0) {
+                strncpy(outNick, entry.second.c_str(), 63);
+                outNick[63] = '\0';
+                return YES;
+            }
+            return NO; // cache đếm "read fail" 3s để đỡ spam đọc lại rác
+        }
+    }
+    char nk[64] = {0};
+    BOOL got = NO;
+    // Path 1: Character+0x960 — FString PlayerName (Kernel kPlayerName).
+    if (ESPReadFStringNick(vmMap, pawn + 0x960, nk, (int)sizeof(nk))) {
+        got = YES;
+    } else {
+        // Path 2: Pawn+0x4D0 → APlayerState* +0x4B8 FString PlayerName.
+        BOOL ok = NO;
+        uint64_t ps = ESPReadU64(vmMap, pawn + 0x4D0, &ok);
+        if (ok && ps >= 0x100000000ULL && ps < 0x300000000000ULL) {
+            got = ESPReadFStringNick(vmMap, ps + 0x4B8, nk, (int)sizeof(nk));
+        }
+    }
+    if (s_nickCache.size() > 2000) s_nickCache.clear();
+    s_nickCache[pawn] = { now, got ? std::string(nk) : std::string() }; // TTL 3s so với now
+    if (got && outNick) {
+        strncpy(outNick, nk, 63);
+        outNick[63] = '\0';
+    }
+    return got;
+}
+
 // Hình nhân huấn luyện. Object ShootingPracticeTarget chỉ dài ~0x4F8 (field
 // cuối MoveComp 0x4F0), nên không thể nhận diện bằng field (ví dụ đọc 0x510
 // để check "không có skeletal Mesh" là đọc rác ngoài object). Tên thì đúng.
