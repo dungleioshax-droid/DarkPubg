@@ -2666,9 +2666,26 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     // 1-1.5s (slot age 0.9-1.7s, box tắt rồi hiện lại chỗ mới = "giật giật").
     // Chặn bằng giới hạn tốc độ vật lý: flick tay ~800°/s, scope ~350°/s,
     // máy bay 100m/s. Rách -> dùng lại camera tốt gần nhất của tick này.
+    //
+    // kernrw47 CHỐNG LATCH khi quay camera nhanh (log của user: "quay nhanh thì
+    // ESP không dính địch, phải xoay tiếp nó mới bám tiếp"): flick PUBG mobile
+    // dễ vượt 1200°/s (25°/tick) và vì s_lastCam KHÔNG được update khi reject,
+    // Δyaw so với cam cũ cộng dồn mỗi tick nhanh hơn phần cho phép (1200·dt)
+    // -> reject NỐI TIẾP hàng chục tick -> box bám theo camera cũ/trôi lệch
+    // tới khi thôi quay + dYaw tụt dưới ngưỡng (hàng trăm ms). Giờ khi mẫu
+    // vượt ngưỡng: ĐỌC LẠI POV ngay trong cùng tick (~µs):
+    //  - 2 lần đọc KHỚP (dYaw ≤ 2°, dLoc ≤ 0.5m) -> dữ liệu nhất quán, KHÔNG
+    //    rách, là flick thật -> CHẤP NHẬN + update s_lastCam (hết latch).
+    //  - cam rách nhưng POV retry tự nó vượt ngưỡng so với cam cũ (flick thật
+    //    + rách cùng lúc) -> dùng camR (sạch) và update s_lastCam.
+    //  - còn lại (retry cũng lệch / đọc fail) -> giữ cam cũ ĐÚNG 1 tick.
+    // Torn-read (lý do guard tồn tại) vẫn bị chặn: 2 lần đọc cách nhau ~µs
+    // không thể rách TRÙNG NHAU về cùng 1 giá trị lạ; 2/3-vote ở
+    // ESPEngineCamera vẫn chạy trước nên camera vào guard vốn đã sạch.
     {
         CFAbsoluteTime nowC = CFAbsoluteTimeGetCurrent();
-        BOOL useLast = NO;
+        BOOL useLast = NO;       // giữ cam cũ đúng 1 tick
+        BOOL handled = NO;       // đã quyết trong nhánh flash (không nhánh accept thường)
         if (s_lastCamValid && s_lastCamAt > 0) {
             double dt = nowC - s_lastCamAt;
             if (dt > 0.001 && dt < 5.0) {
@@ -2685,18 +2702,68 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                 float maxLoc = 600.0f * (float)dt + 2.0f;
                 float maxFov = 600.0f * (float)dt + 3.0f;
                 if (dYaw > maxDeg || dPitch > maxDeg || dLoc > maxLoc || dFov > maxFov) {
-                    static CFAbsoluteTime s_lastCamRejLog = 0;
-                    if (nowC - s_lastCamRejLog >= 1.0) {
-                        s_lastCamRejLog = nowC;
-                        ESPLog("cam jump rejected dYaw=%.1f dPitch=%.1f dLoc=%.1f dFov=%.1f dt=%.3f",
+                    handled = YES;
+                    static CFAbsoluteTime s_lastFlashOkLog = 0;
+                    static CFAbsoluteTime s_lastFlashRejLog = 0;
+                    ESPCamera camR;
+                    if (ESPEngineCamera(gameBase, &camR)) {
+                        float dYr = fabsf(cam.rotation.yaw - camR.rotation.yaw);
+                        if (dYr > 180.0f) dYr = 360.0f - dYr;
+                        float dPr = fabsf(cam.rotation.pitch - camR.rotation.pitch);
+                        if (dPr > 180.0f) dPr = 360.0f - dPr;
+                        float dxr = cam.location.x - camR.location.x;
+                        float dyr = cam.location.y - camR.location.y;
+                        float dzr = cam.location.z - camR.location.z;
+                        float dLr = sqrtf(dxr*dxr + dyr*dyr + dzr*dzr) / 100.0f;
+                        if (dYr <= 2.0f && dPr <= 2.0f && dLr <= 0.5f) {
+                            // 2 lần đọc cách ~µs cho CÙNG giá trị -> POV ổn định,
+                            // không rách -> flick thật -> chấp nhận ngay, update
+                            // s_lastCam để tick sau so tốc độ từ điểm mới.
+                            s_lastCam = cam;
+                            s_lastCamAt = nowC;
+                            s_lastCamValid = YES;
+                            if (nowC - s_lastFlashOkLog >= 1.0) {
+                                s_lastFlashOkLog = nowC;
+                                ESPLog("camFlash: quay nhanh dYaw=%.1f -> 2 doc khop -> chap nhan (het latch)",
+                                       dYaw);
+                            }
+                        } else {
+                            float dYraw = fabsf(camR.rotation.yaw - s_lastCam.rotation.yaw);
+                            if (dYraw > 180.0f) dYraw = 360.0f - dYraw;
+                            float dPraw = fabsf(camR.rotation.pitch - s_lastCam.rotation.pitch);
+                            if (dPraw > 180.0f) dPraw = 360.0f - dPraw;
+                            float dxraw = camR.location.x - s_lastCam.location.x;
+                            float dyraw = camR.location.y - s_lastCam.location.y;
+                            float dzraw = camR.location.z - s_lastCam.location.z;
+                            float dLraw = sqrtf(dxraw*dxraw + dyraw*dyraw + dzraw*dzraw) / 100.0f;
+                            if (dYraw <= maxDeg && dPraw <= maxDeg && dLraw <= maxLoc &&
+                                fabsf(camR.fov - s_lastCam.fov) <= maxFov) {
+                                // cam rách, POV retry sạch + vừa tốc độ -> dùng retry.
+                                cam = camR;
+                                s_lastCam = camR;
+                                s_lastCamAt = nowC;
+                                s_lastCamValid = YES;
+                                if (nowC - s_lastFlashOkLog >= 1.0) {
+                                    s_lastFlashOkLog = nowC;
+                                    ESPLog("camFlash: cam rách dYaw=%.1f -> retry POV sạch, chap nhan", dYaw);
+                                }
+                            } else {
+                                useLast = YES;
+                            }
+                        }
+                    } else {
+                        useLast = YES;
+                    }
+                    if (useLast && nowC - s_lastFlashRejLog >= 1.0) {
+                        s_lastFlashRejLog = nowC;
+                        ESPLog("camFlash reject dYaw=%.1f dPitch=%.1f dLoc=%.1f dFov=%.1f dt=%.3f -> giu cam cu 1 tick",
                                dYaw, dPitch, dLoc, dFov, dt);
                     }
-                    useLast = YES;
                 }
             }
         }
-        if (useLast) {
-            cam = s_lastCam;
+        if (handled) {
+            if (useLast) cam = s_lastCam; // s_lastCam đã update trong nhánh flash nếu chấp nhận
         } else {
             s_lastCam = cam;
             s_lastCamAt = nowC;
