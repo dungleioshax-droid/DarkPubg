@@ -618,7 +618,6 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             if (espStatus.length == 0) espStatus = @"ESP: --";
         }
         NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
-        NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
         if (espStatus) [extraLines addObject:espStatus];
         if (espScan) [extraLines addObject:espScan];
         NSString *extraText = extraLines.count ? [extraLines componentsJoinedByString:@"\n"] : nil;
