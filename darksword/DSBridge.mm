@@ -2071,8 +2071,8 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
     // quay lai center giua 2 line KHONG tao duong rac (no chinh la duong da vẽ).
     // 1 CGPathAddLines cho TAT CA snapline (~5 remote call/frame).
     if (!process || !process.trojanMem || !g_espPathLayer) return NO;
+    static BOOL s_pathEmpty = NO;
     if (!pts || count <= 0) {
-        static BOOL s_pathEmpty = NO;
         if (!s_pathEmpty) {
             ds_perform_on_springboard_main(process, g_espPathLayer,
                                            ds_remote_sel(process, "setPath:"), 0, YES);
