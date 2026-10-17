@@ -42,6 +42,19 @@ import UIKit
         return true
     }
 
+    open override func settingIcon(index: Int) -> String? {
+        switch TSSettingsIndex.allCases[index] {
+        case .passthroughMode:
+            return "arrow.triangle.2.circlepath"
+        case .keepInPlace:
+            return "pin.fill"
+        case .hideAtSnapshot:
+            return "eye.slash.fill"
+        case .showESPBox:
+            return "viewfinder"
+        }
+    }
+
     open override func settingColorHighlighted(index: Int) -> UIColor {
         return UIColor { traitCollection in
             if traitCollection.userInterfaceStyle == .dark {

@@ -27,6 +27,7 @@ public class SPLarkSettingsCollectionViewCell: UICollectionViewCell {
     let titleLabel = UILabel()
     let subtitleLabel = UILabel()
     let backgroundColorView = UIView()
+    let iconImageView = UIImageView()
 
     private static let pressDownScale: CGFloat = 0.92
     private static let animationDuration: TimeInterval = 0.4
@@ -78,6 +79,10 @@ public class SPLarkSettingsCollectionViewCell: UICollectionViewCell {
         self.backgroundColorView.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
         self.contentView.addSubview(self.backgroundColorView)
 
+        self.iconImageView.contentMode = .scaleAspectFit
+        self.iconImageView.tintColor = UIColor.white.withAlphaComponent(0.9)
+        self.contentView.addSubview(self.iconImageView)
+
         self.titleLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
         self.titleLabel.numberOfLines = 0
         self.titleLabel.textAlignment = .left
@@ -116,32 +121,37 @@ public class SPLarkSettingsCollectionViewCell: UICollectionViewCell {
         super.layoutSubviews()
 
         self.backgroundColorView.frame = self.contentView.bounds
-        
+
+        let sideInset: CGFloat = 14
+        let iconSize: CGFloat = 22
+        let iconX: CGFloat = sideInset
+        let textX: CGFloat = sideInset + iconSize + 10
+
+        self.iconImageView.frame = CGRect(x: iconX, y: (self.contentView.frame.height - iconSize) / 2, width: iconSize, height: iconSize)
+
         if self.subtitleLabel.text == nil {
-            let topInset: CGFloat = 19 / 2
-            let sideInset: CGFloat = 19 / 1.5
-            
-            self.titleLabel.sizeToFit()
-            self.titleLabel.frame = CGRect.init(
-                x: sideInset,
-                y: topInset,
-                width: self.contentView.frame.width - sideInset * 2,
-                height: self.contentView.frame.height - topInset * 2
+            self.titleLabel.frame = CGRect(
+                x: textX,
+                y: 0,
+                width: self.contentView.frame.width - textX - sideInset,
+                height: self.contentView.frame.height
             )
         } else {
-            let topInset: CGFloat = 19 / 2
-            let sideInset: CGFloat = 19 / 1.5
-            
+            let topInset: CGFloat = 10
             self.subtitleLabel.sizeToFit()
-            self.subtitleLabel.frame.origin.x = sideInset
-            self.subtitleLabel.frame = CGRect.init(x: self.subtitleLabel.frame.origin.x, y: self.subtitleLabel.frame.origin.y, width: self.contentView.frame.width - sideInset * 2, height: self.subtitleLabel.frame.height)
-            self.subtitleLabel.frame.origin.y = self.contentView.frame.height - topInset * 1.2 - self.subtitleLabel.frame.height
-            
-            self.titleLabel.sizeToFit()
-            self.titleLabel.frame = CGRect.init(x: self.titleLabel.frame.origin.x, y: self.titleLabel.frame.origin.y, width: self.contentView.frame.width - sideInset * 2, height: self.subtitleLabel.frame.origin.y - topInset - topInset / 2)
-            
-            self.titleLabel.frame.origin.x = sideInset
-            self.titleLabel.frame.origin.y = topInset * 1.3
+            self.subtitleLabel.frame = CGRect(
+                x: textX,
+                y: self.contentView.frame.height - topInset - self.subtitleLabel.frame.height,
+                width: self.contentView.frame.width - textX - sideInset,
+                height: self.subtitleLabel.frame.height
+            )
+
+            self.titleLabel.frame = CGRect(
+                x: textX,
+                y: topInset,
+                width: self.contentView.frame.width - textX - sideInset,
+                height: self.subtitleLabel.frame.minY - topInset
+            )
         }
     }
 }

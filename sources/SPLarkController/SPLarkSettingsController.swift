@@ -49,6 +49,10 @@ open class SPLarkSettingsController: UIViewController {
     open func settingColorHighlighted(index: Int) -> UIColor {
         fatalError("SPLarkSettingsController - Need implement function")
     }
+
+    open func settingIcon(index: Int) -> String? {
+        return nil
+    }
     
     open func settingDidSelect(index: Int, completion: @escaping () -> ()) {
         fatalError("SPLarkSettingsController - Need implement function")
@@ -123,6 +127,13 @@ extension SPLarkSettingsController: UICollectionViewDataSource, UICollectionView
             let enabled = self.settingEnabled(index: indexPath.row)
             cell.titleLabel.text = self.settingTitle(index: indexPath.row, highlighted: highlighted)
             cell.subtitleLabel.text = self.settingSubtitle(index: indexPath.row, highlighted: highlighted)
+            if let iconName = self.settingIcon(index: indexPath.row) {
+                cell.iconImageView.image = UIImage(systemName: iconName)
+                cell.iconImageView.isHidden = false
+            } else {
+                cell.iconImageView.image = nil
+                cell.iconImageView.isHidden = true
+            }
             cell.setHighlighted(
                 highlighted,
                 color: highlighted ? self.settingColorHighlighted(index: indexPath.row) : UIColor.white.withAlphaComponent(0.1)
