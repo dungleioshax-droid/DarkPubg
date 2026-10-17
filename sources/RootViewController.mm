@@ -6,6 +6,7 @@
 //
 
 #import <notify.h>
+#import <QuartzCore/QuartzCore.h>
 
 #import "HUDHelper.h"
 #import "DSBridge.h"
@@ -27,6 +28,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
 @implementation RootViewController {
     NSMutableDictionary *_userDefaults;
+    CAGradientLayer *_backgroundGradient;
     MainButton *_mainButton;
     UIButton *_settingsButton;
     UIButton *_topLeftButton;
@@ -95,22 +97,24 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     CGRect bounds = UIScreen.mainScreen.bounds;
 
     self.view = [[UIView alloc] initWithFrame:bounds];
-#if USE_DARKSWORD
-    // Solid background for normal app presentation (no translucent HUD chrome).
-    self.view.backgroundColor = [UIColor colorWithRed:26/255.0 green:188/255.0 blue:156/255.0 alpha:1.0];
-#else
-    self.view.backgroundColor = [UIColor colorWithRed:0.0f / 255.0f green:0.0f / 255.0f blue:0.0f / 255.0f alpha:.580f / 1.0f];  // rgba(0, 0, 0, 0.580)
-#endif
+    self.view.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
 
     self.backgroundView = [[UIView alloc] initWithFrame:bounds];
     self.backgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.backgroundView.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor * _Nonnull(UITraitCollection * _Nonnull traitCollection) {
-        if ([traitCollection userInterfaceStyle] == UIUserInterfaceStyleDark) {
-            return [UIColor colorWithRed:28/255.0 green:74/255.0 blue:82/255.0 alpha:1.0];  // rgba(28, 74, 82, 1.0)
-        } else {
-            return [UIColor colorWithRed:26/255.0 green:188/255.0 blue:156/255.0 alpha:1.0];  // rgba(26, 188, 156, 1.0)
-        }
-    }];
+    self.backgroundView.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
+
+    _backgroundGradient = [CAGradientLayer layer];
+    _backgroundGradient.colors = @[
+        (id)[UIColor colorWithRed:12/255.0 green:18/255.0 blue:40/255.0 alpha:1.0].CGColor,
+        (id)[UIColor colorWithRed:8/255.0 green:48/255.0 blue:72/255.0 alpha:1.0].CGColor,
+        (id)[UIColor colorWithRed:14/255.0 green:92/255.0 blue:110/255.0 alpha:1.0].CGColor
+    ];
+    _backgroundGradient.locations = @[@0.0, @0.55, @1.0];
+    _backgroundGradient.startPoint = CGPointMake(0.0, 0.0);
+    _backgroundGradient.endPoint = CGPointMake(1.0, 1.0);
+    _backgroundGradient.frame = bounds;
+    [self.backgroundView.layer insertSublayer:_backgroundGradient atIndex:0];
+
     [self.view addSubview:self.backgroundView];
 
     _topLeftButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -126,6 +130,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     {
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
         [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
+        config.background.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        config.background.cornerRadius = 20;
         [_topLeftButton setConfiguration:config];
     }
     UILayoutGuide *safeArea = self.backgroundView.safeAreaLayoutGuide;
@@ -151,6 +157,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     {
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
         [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
+        config.background.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        config.background.cornerRadius = 20;
         [_topRightButton setConfiguration:config];
     }
     [_topRightButton setTranslatesAutoresizingMaskIntoConstraints:NO];
@@ -175,6 +183,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     {
         UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
         [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
+        config.background.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        config.background.cornerRadius = 20;
         [_topCenterButton setConfiguration:config];
     }
     [_topCenterButton setTranslatesAutoresizingMaskIntoConstraints:NO];
@@ -193,14 +203,22 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [_mainButton addTarget:self action:@selector(tapMainButton:) forControlEvents:UIControlEventTouchUpInside];
     if (@available(iOS 15.0, *))
     {
-        UIButtonConfiguration *config = [UIButtonConfiguration tintedButtonConfiguration];
+        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+        config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+        config.baseForegroundColor = [UIColor whiteColor];
         [config setTitleTextAttributesTransformer:^NSDictionary <NSAttributedStringKey, id> * _Nonnull(NSDictionary <NSAttributedStringKey, id> * _Nonnull textAttributes) {
             NSMutableDictionary *newAttributes = [textAttributes mutableCopy];
-            [newAttributes setObject:[UIFont boldSystemFontOfSize:32.0] forKey:NSFontAttributeName];
+            [newAttributes setObject:[UIFont systemFontOfSize:28.0 weight:UIFontWeightBold] forKey:NSFontAttributeName];
             return newAttributes;
         }];
         [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
+        config.contentInsets = NSDirectionalEdgeInsetsMake(22, 44, 22, 44);
         [_mainButton setConfiguration:config];
+        _mainButton.layer.shadowColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:0.45].CGColor;
+        _mainButton.layer.shadowOpacity = 0.45;
+        _mainButton.layer.shadowRadius = 18;
+        _mainButton.layer.shadowOffset = CGSizeMake(0, 8);
+        _mainButton.layer.masksToBounds = NO;
     }
     else
     {
@@ -223,6 +241,8 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     {
         UIButtonConfiguration *config = [UIButtonConfiguration tintedButtonConfiguration];
         [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
+        config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+        config.baseForegroundColor = [UIColor whiteColor];
         [_settingsButton setConfiguration:config];
     }
     [_settingsButton setTranslatesAutoresizingMaskIntoConstraints:NO];
@@ -236,8 +256,12 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     _authorLabel = [[UILabel alloc] init];
     [_authorLabel setNumberOfLines:0];
     [_authorLabel setTextAlignment:NSTextAlignmentCenter];
-    [_authorLabel setTextColor:[UIColor whiteColor]];
-    [_authorLabel setFont:[UIFont systemFontOfSize:14.0]];
+    [_authorLabel setTextColor:[UIColor colorWithWhite:1.0 alpha:0.88]];
+    [_authorLabel setFont:[UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium]];
+    _authorLabel.layer.shadowColor = [UIColor blackColor].CGColor;
+    _authorLabel.layer.shadowOpacity = 0.35;
+    _authorLabel.layer.shadowRadius = 4;
+    _authorLabel.layer.shadowOffset = CGSizeMake(0, 1);
     [_authorLabel sizeToFit];
     [self.backgroundView addSubview:_authorLabel];
 
@@ -259,6 +283,9 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     _supportsCenterMost = CGRectGetMinY(self.view.window.safeAreaLayoutGuide.layoutFrame) >= 51;
+    if (_backgroundGradient) {
+        _backgroundGradient.frame = self.backgroundView.bounds;
+    }
 }
 
 - (void)viewDidLoad {

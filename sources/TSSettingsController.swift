@@ -45,9 +45,9 @@ import UIKit
     open override func settingColorHighlighted(index: Int) -> UIColor {
         return UIColor { traitCollection in
             if traitCollection.userInterfaceStyle == .dark {
-                return UIColor(red: 28/255.0, green: 74/255.0, blue: 82/255.0, alpha: 1.0)
+                return UIColor(red: 16/255.0, green: 185/255.0, blue: 170/255.0, alpha: 1.0)
             } else {
-                return UIColor(red: 22/255.0, green: 160/255.0, blue: 133/255.0, alpha: 1.0)
+                return UIColor(red: 14/255.0, green: 160/255.0, blue: 145/255.0, alpha: 1.0)
             }
         }
     }

@@ -44,8 +44,8 @@ public class SPLarkSettingsCloseButton: UIButton {
     init() {
         super.init(frame: .zero)
         self.iconView.isUserInteractionEnabled = false
-        self.backgroundColor = UIColor.white.withAlphaComponent(0.15)
-        self.color = UIColor.lightGray
+        self.backgroundColor = UIColor.white.withAlphaComponent(0.18)
+        self.color = UIColor.white.withAlphaComponent(0.85)
         self.addSubview(self.iconView)
     }
     

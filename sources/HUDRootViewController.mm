@@ -98,7 +98,7 @@ static void SpringBoardLockStatusChanged
 #define IDLE_INTERVAL 3.0
 
 static const double HUD_FONT_SIZE_DEFAULT = 9.0;
-static const double HUD_MIN_CORNER_RADIUS = 4.5;
+static const double HUD_MIN_CORNER_RADIUS = 8.0;
 static double HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
 static CGFloat HUD_INACTIVE_OPACITY = 0.667;
 static uint8_t HUD_SHOW_ESP_BOX = 0; // 0=hide, 1=show ESP status

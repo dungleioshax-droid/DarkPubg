@@ -65,8 +65,17 @@ open class SPLarkSettingsController: UIViewController {
     override open func viewDidLoad() {
         super.viewDidLoad()
         
+        self.view.backgroundColor = UIColor(red: 12/255.0, green: 18/255.0, blue: 36/255.0, alpha: 0.96)
+        self.view.layer.cornerRadius = 24
+        self.view.layer.masksToBounds = true
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .dark))
+        blur.frame = self.view.bounds
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        self.view.insertSubview(blur, at: 0)
+
         self.titleLabel.text = NSLocalizedString("Settings", comment: "")
-        self.titleLabel.font = UIFont.systemFont(ofSize: 23, weight: .bold)
+        self.titleLabel.font = UIFont.systemFont(ofSize: 24, weight: .bold)
         self.titleLabel.textAlignment = .left
         self.titleLabel.textColor = UIColor.white
         self.titleLabel.numberOfLines = 0

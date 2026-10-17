@@ -73,18 +73,20 @@ public class SPLarkSettingsCollectionViewCell: UICollectionViewCell {
         self.backgroundColor = .clear
 
         self.backgroundColorView.layer.masksToBounds = true
-        self.backgroundColorView.layer.cornerRadius = 13
+        self.backgroundColorView.layer.cornerRadius = 18
+        self.backgroundColorView.layer.borderWidth = 1
+        self.backgroundColorView.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
         self.contentView.addSubview(self.backgroundColorView)
 
-        self.titleLabel.font = UIFont.systemFont(ofSize: 13, weight: .regular)
+        self.titleLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
         self.titleLabel.numberOfLines = 0
         self.titleLabel.textAlignment = .left
         self.titleLabel.baselineAdjustment = .alignBaselines
-        self.titleLabel.textColor = UIColor.white
+        self.titleLabel.textColor = UIColor.white.withAlphaComponent(0.75)
         self.titleLabel.text = "Title"
         self.contentView.addSubview(self.titleLabel)
-        
-        self.subtitleLabel.font = UIFont.systemFont(ofSize: 15, weight: .medium)
+
+        self.subtitleLabel.font = UIFont.systemFont(ofSize: 16, weight: .bold)
         self.subtitleLabel.numberOfLines = 1
         self.subtitleLabel.textAlignment = .left
         self.subtitleLabel.textColor = UIColor.white
