@@ -198,6 +198,47 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
     [self reloadModeButtonState];
 
+    // Hero title
+    UILabel *heroTitleLabel = [[UILabel alloc] init];
+    heroTitleLabel.text = @"DarkSpeed";
+    heroTitleLabel.font = [UIFont systemFontOfSize:40.0 weight:UIFontWeightHeavy];
+    heroTitleLabel.textColor = [UIColor whiteColor];
+    heroTitleLabel.textAlignment = NSTextAlignmentCenter;
+    heroTitleLabel.shadowColor = [UIColor colorWithWhite:0.0 alpha:0.35];
+    heroTitleLabel.shadowOffset = CGSizeMake(0, 2);
+    [heroTitleLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [self.backgroundView addSubview:heroTitleLabel];
+
+    UILabel *heroSubtitleLabel = [[UILabel alloc] init];
+    heroSubtitleLabel.text = NSLocalizedString(@"Network-speed HUD for SpringBoard", nil);
+    heroSubtitleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightMedium];
+    heroSubtitleLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.72];
+    heroSubtitleLabel.textAlignment = NSTextAlignmentCenter;
+    [heroSubtitleLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [self.backgroundView addSubview:heroSubtitleLabel];
+
+    // Glass card behind the main action button
+    UIVisualEffectView *heroCard = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    heroCard.layer.cornerRadius = 36.0;
+    heroCard.layer.masksToBounds = YES;
+    heroCard.layer.borderWidth = 1.0;
+    heroCard.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    heroCard.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.backgroundView insertSubview:heroCard atIndex:1];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [heroTitleLabel.topAnchor constraintEqualToAnchor:safeArea.topAnchor constant:86.0f],
+        [heroTitleLabel.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+
+        [heroSubtitleLabel.topAnchor constraintEqualToAnchor:heroTitleLabel.bottomAnchor constant:6.0f],
+        [heroSubtitleLabel.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+
+        [heroCard.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+        [heroCard.centerYAnchor constraintEqualToAnchor:self.backgroundView.centerYAnchor],
+        [heroCard.widthAnchor constraintEqualToConstant:260.0f],
+        [heroCard.heightAnchor constraintEqualToConstant:150.0f],
+    ]];
+
     _mainButton = [MainButton buttonWithType:UIButtonTypeSystem];
     [_mainButton setTintColor:[UIColor whiteColor]];
     [_mainButton addTarget:self action:@selector(tapMainButton:) forControlEvents:UIControlEventTouchUpInside];
