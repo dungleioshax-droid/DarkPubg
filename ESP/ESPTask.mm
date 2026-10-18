@@ -130,7 +130,7 @@ BOOL ESPGameTaskEnsure(void) {
     }
     // Throttle attempt full (Ensure chạy mỗi tick 40Hz).
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - s_lastTryAt < 2.0) {
+    if (now - s_lastTryAt < 5.0) {
         pthread_mutex_unlock(&s_taskMutex);
         return NO;
     }
