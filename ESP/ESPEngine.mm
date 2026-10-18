@@ -1217,7 +1217,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.hasSamplePos = hasPos;
     // kernrw52g: bỏ log scan done (I/O mỗi scan)
            (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
-           (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -1502,7 +1501,6 @@ NSString *ESPEngineScanInfoText(void) {
         // ngay con hình nhân nào bị lọt khỏi bộ lọc. "B %d" = số box đang vẽ
         // trên SpringBoard (cam+track OK). B=0 mà P>0 thì camera/track lỗi.
         if (g_espTrackedCount > 0 || g_espLastBoxes > 0) {
-                    g_espLastScanEnemies, g_espLastScanDummies, g_espLastBoxes,
         }
     }
     return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
@@ -1931,7 +1929,6 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
     }
     g_espLPNegInst = gameInst;
     g_espLPNegAt = now;
-             (unsigned long long)gameInst, best);
     ESPLog("camLP FAIL %s", g_espLPDiag);
     return 0;
 }
@@ -1965,7 +1962,6 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
         ? ESPReadU64(vmMap, engine + ESPOff_GameEngine_GameInstance, &ok) : 0;
     if (!ok) gi3 = 0;
     // kernrw52g: bỏ log giDump (I/O mỗi scan)
-           (unsigned long long)gi1, (unsigned long long)gi2, (unsigned long long)gi3);
     uint64_t gi = gi1 ? gi1 : (gi2 ? gi2 : gi3);
     if (!ESPIsUserPtr(gi)) {
         ESPLog("giDump no valid GameInstance");
@@ -1978,12 +1974,11 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
         uint64_t data = ESPReadU64(vmMap, gi + off, &okd);
         uint32_t n = ESPReadU32(vmMap, gi + off + 8, &okn);
         if (okd && okn && ESPIsUserPtr(data) && n >= 1 && n <= 8) {
-                           off, (unsigned long long)data, (unsigned)n);
             if (bl > (int)sizeof(buf) - 48) break;
             found++;
         }
     }
-    ESPLog("giDump gi=0x%llx tarray(%d)%s", (unsigned long long)gi, found, buf);
+    // kernrw52g: bỏ log giDump (I/O)
 }
 
 // Perf refresh box: đo ms mỗi lần RefreshBoxes/Boxes chạy xong, TÁCH 3 khâu
