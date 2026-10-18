@@ -248,7 +248,7 @@ static const size_t kDSRemoteTextScratchCapacity = 0x800;
 static CFAbsoluteTime g_hudEnabledAt = 0;
 // Hoãn phần ESP sau khi bật HUD để không dồn hàng trăm remote call dựng overlay
 // vào đúng lúc SpringBoard vừa attach cửa sổ HUD.
-static const NSTimeInterval kDSESPSettleDelay = 2.5;
+static const NSTimeInterval kDSESPSettleDelay = 1.5;
 
 static void ds_trace(const char *fmt, ...) {
     if (g_hudEnabledAt <= 0) return;

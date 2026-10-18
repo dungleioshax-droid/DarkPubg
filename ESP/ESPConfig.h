@@ -14,23 +14,23 @@
 // TTL này là độ trễ phụ của quét ĐẦY ĐỦ (re-validate verdict/address reuse).
 // Phát hiện địch MỚI không còn lệ thuộc TTL này — xem ESPEngineDiscoverTick
 // (phân loại riêng actor chưa biết mỗi ~120ms). TTL 0.8s chỉ là nhịp quét nền.
-#define ESP_CACHE_TTL 0.8 // quét nền 0.8s/lần — re-validate + địch mới qua discover
+#define ESP_CACHE_TTL 1.5 // quét nền 1.5s/lần — giảm tần suất full scan (trước 0.8s gây spike 59ms)
 
 // Discover địch mới: khoảng (giây) giữa 2 lần + budget phân loại full/lần.
 // 0.12s ~= 8Hz; budget 16 actor unknown mỗi lượt (page cache warm thì ~vài ms).
-#define ESP_DISCOVER_INTERVAL 0.12
+#define ESP_DISCOVER_INTERVAL 0.2 // khoảng (giây) giữa 2 lần discover — giảm tần suất scan enemy mới
 // Budget unknown mỗi vòng: từ kernrw33 mỗi unknown quen chỉ tốn ~2 read
 // (fields window + VTable check, FName walk chỉ cho VTable lạ) nên nâng 16->48
 // để quét sạch ~100 unknown trong ~2 vòng (~0.24s) thay vì ~6 vòng (~0.8-2s).
 // Địch mới (class đã biết) hiện sau ~1 vòng (~0.12s) thay vì 1-2s.
-#define ESP_DISCOVER_BUDGET 48
+#define ESP_DISCOVER_BUDGET 24 // budget unknown mỗi vòng — giảm tải scan actor
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
 // kernrw45: 40->60Hz. Sau kernrw44 gỡ g_espClassifyMutex khỏi đường refresh,
 // tick chỉ còn ~1-2ms (region-map memcpy + copy snapshot) nên vừa ngân sách
 // 16.7ms. kernrw43 đo được thực chỉ ~25-30Hz + stall 716ms (log box perf
 // n=224/7.5s) = box giật khi địch chạy; 60Hz cho step 16.7ms bám vận động.
-#define ESP_REFRESH_HZ 60
+#define ESP_REFRESH_HZ 30
 
 // Vị trí actor giờ được đọc lại MỖI frame refresh: region map giữ sẵn mapping
 // nên mỗi lần đọc chỉ là memcpy (~µs) — không còn đọc thưa + ngoại suy, nhờ đó
@@ -53,7 +53,7 @@
 
 // Nhịp cập nhật VỊ TRÍ label mét (Hz). Box bám 60Hz, chữ mét 10Hz là đủ mượt;
 // giảm tải số remote call vào SpringBoard.
-#define ESP_OVERLAY_LABEL_HZ 10
+#define ESP_OVERLAY_LABEL_HZ 5
 
 // Nhịp PRESENT lên SpringBoard (IPC remote — KHÔNG phải nội suy thuần CPU).
 // kernrw39: 30->40Hz lại. Bản 38 để 30Hz (present thực ~20/s) thì lia máy/
