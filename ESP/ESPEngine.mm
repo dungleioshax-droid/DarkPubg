@@ -1219,7 +1219,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
            (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
            (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
-           (unsigned)nFiltered, (unsigned)nCached, (unsigned)nearChar,
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -1258,6 +1257,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     }
     if (verbose) {
         std::vector<std::pair<uint64_t, uint32_t>> vts(vtHist.begin(), vtHist.end());
+        std::sort(vts.begin(), vts.end(), [](const std::pair<uint64_t,uint32_t> &a,
                                              const std::pair<uint64_t,uint32_t> &b) {
             return a.second > b.second;
         });
@@ -1379,9 +1379,7 @@ static NSString *ESPCacheText(void) {
     // Một lượt quét giờ đã phân loại hết actor, nên chỉ lượt đầu tiên mới cần
     // đánh dấu ~ (đang warmup) — lượt sau là số chính thức.
     if (g_espCachePasses < 2) {
-                (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
     }
-            (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
 }
 
 // Quét NHẸ đồng bộ (~15 lần đọc kernel): world -> level -> actors count.
