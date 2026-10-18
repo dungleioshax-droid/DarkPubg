@@ -983,8 +983,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.actorCluster = 0;
     r.actorCount = actorsCount;
     // kernrw52g: bỏ log scan start (I/O mỗi scan)
-           (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase,
-           (unsigned long long)actorsData);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
     // GNames/UName không còn ở đây. Đo được: scan đầu mất 13.0s thì ~11s là
@@ -1057,7 +1055,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                (unsigned long long)myPawn, inList, myTeam, (unsigned long long)pf.vtable,
                pf.nameID, (unsigned long long)pf.mesh, pf.hp, pf.hpMax,
                (unsigned)pf.bHidden, (unsigned)pf.bDead, (unsigned long long)pf.tMesh,
-               pf.tMax, pf.tCur, (unsigned)pf.tIsUp, pf.window ? 1 : 0);
         // Camera: chẩn đoán tại sao không vẽ được box (chain toàn bộ).
         ESPCamera camProbe;
         BOOL camOK = ESPEngineCamera(gameBase, &camProbe);
@@ -1065,7 +1062,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             // kernrw52g: bỏ log diag cam OK (I/O mỗi scan)
                    camProbe.fov, camProbe.location.x, camProbe.location.y,
                    camProbe.location.z, camProbe.rotation.pitch,
-                   camProbe.rotation.yaw, camProbe.rotation.roll);
         } else {
             // Soi cả 2 nguồn PC: NetDriver chain (Kernel) + GameInstance resolver.
             BOOL okn = NO;
@@ -1109,7 +1105,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
         if ((i & 63) == 0 && i > 0 && CFAbsoluteTimeGetCurrent() - t0 > 0.5) {
             // kernrw52g: bỏ log scan budget cut (I/O mỗi scan)
-                   (unsigned)i, (unsigned)scanN);
             scanCompleted = false;
             break;
         }
@@ -1148,7 +1143,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                    i, (unsigned long long)actor, dg.rule, dg.win, (unsigned long long)dg.vt,
                    dg.nameID, (unsigned long long)dg.mesh, dg.hp, dg.hpMax, dg.team,
                    (unsigned long long)dg.tMesh, dg.tMax, dg.tCur, dg.tIsUp,
-                   dg.nearChar, dg.nearDummy);
             logged++;
         }
         if (!isEnemy) continue;
