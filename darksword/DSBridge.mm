@@ -170,6 +170,7 @@ static uint64_t g_espHpBG[ESPOverlayMaxBoxes] = {0};
 static uint64_t g_espHpFill[ESPOverlayMaxBoxes] = {0};
 static uint8_t g_espHpBand[ESPOverlayMaxBoxes]; // 0/1/2 = green/yellow/red, 0xFF = chưa track
 static uint32_t g_espHpFillH[ESPOverlayMaxBoxes]; // chiều cao fill x10 - dirty khi đổi
+static BOOL g_espLabelShown[ESPOverlayMaxBoxes] = {0}; // kernrw51: label đang hiện? (cờ riêng vì label có hidden=1 riêng)
 static uint64_t g_dsRedColor = 0;       // kernrw49: cache 3 UIColor trên SpringBoard
 static uint64_t g_dsYellowColor = 0;
 static uint64_t g_dsGreenColor = 0;
@@ -827,6 +828,17 @@ static BOOL ds_show_esp_from_prefs(NSDictionary *prefs) {
     NSNumber *n = prefs ? prefs[HUDUserDefaultsKeyShowESPBox] : nil;
     if (n) return n.boolValue;
     return [NSUserDefaults.standardUserDefaults boolForKey:HUDUserDefaultsKeyShowESPBox];
+}
+
+// kernrw51: toggles từng thành phần ESP (Line/Name/Health). Key chưa có -> ON
+// (giữ thói quen cũ: bật ESP Box nghĩa là thấy đầy đủ như trước).
+static BOOL ds_esp_feature_pref(NSDictionary *prefs, NSString *key) {
+    NSNumber *n = prefs ? prefs[key] : nil;
+    if (n) return n.boolValue;
+    NSNumber *direct = nil;
+    @try { direct = [NSUserDefaults.standardUserDefaults objectForKey:key]; } @catch (__unused NSException *e) {}
+    if (direct) return direct.boolValue;
+    return YES;
 }
 
 NSString *DSBridgeESPStatus(void) {
@@ -2315,6 +2327,9 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 2);
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
         ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+        // kernrw51: label cache cờ — setHidden:1 riêng của label (unhide cha
+        // không unhide con) => hội tụ qua g_espLabelShown trong vòng vẽ.
+        g_espLabelShown[i] = NO;
         // Bounds 140x28: đủ rộng cho nickname + dòng distance. Transform ±90°
         // khi mapOrient landscape vẫn chỉ di center, giữ bounds.
         ds_remote_set_rect_on_main(process, lb, "setBounds:", CGRectMake(0, 0, 140.0, 28.0));
@@ -2361,6 +2376,11 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_perform_on_springboard_main(process, v, ds_remote_sel(process, "addSubview:"), lb, YES);
         g_espLabels[i] = lb;
         g_espHiddenCache[i] = YES;
+        g_espLabelShown[i] = NO;
+        // kernrw51: hp cache cũng reset khi rebuild views (ensure mới).
+        g_espHpShown[i] = NO;
+        g_espHpBand[i] = 0xFF;
+        g_espHpFillH[i] = 0xFFFFFFFF;
 
     }
     ds_trace("esp ensure: %d box views built", ESPOverlayMaxBoxes);
@@ -2439,6 +2459,23 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     // chính bên dưới — 1 nguồn sự thật cho gate text/diag.
     static BOOL s_espBoundsLogged = NO;
     static CFAbsoluteTime s_lastTextAt[ESPOverlayMaxBoxes] = {0};
+    // kernrw51: cache toggle ESP Line/Name/Health 1s — đọc từ NSUserDefaults
+    // (Source: Setting app). "ESP Box" là công tắc chính (như cũ, gate ở tick);
+    // ba toggle này dàng riêng từng thành phần trên overlay. Đổi toggle => buộc
+    // frame sau chạy vòng vẽ (s_featDirty) để label/hp hội tụ trạng thái mới.
+    static CFAbsoluteTime s_featPrefAt = 0;
+    static BOOL s_featLine = YES, s_featName = YES, s_featHealth = YES;
+    static BOOL s_featDirty = NO;
+    if (nowP - s_featPrefAt > 1.0) {
+        s_featPrefAt = nowP;
+        NSDictionary *featPrefs = nil;
+        @try { featPrefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+        BOOL nl = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowLine);
+        BOOL nn = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowName);
+        BOOL nh = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowHealth);
+        if (nl != s_featLine || nn != s_featName || nh != s_featHealth) s_featDirty = YES;
+        s_featLine = nl; s_featName = nn; s_featHealth = nh;
+    }
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
     }
@@ -2475,7 +2512,11 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             }
         }
         if (!dirty && !s_espBoundsLogged) dirty = YES;
-        if (!dirty && g_espPathLayer) dirty = YES;
+        // kernrw51: BỎ always-dirty-when-path-layer — nó ép MỌI frame chạy full
+        // vòng vẽ (setFrame HP mỗi tick ~960 IPC/s) kể cả khi không đổi gì, lâ
+        // bão NSInvocation -> respring. Line giờ đã dirty riêng qua s_pathDirty /
+        // s_lastLineCount != count (như vòng vẽ bên dưới), không cần always.
+        if (!dirty && s_featDirty) dirty = YES;
         if (!dirty && (!CGRectEqualToRect(g_espLastContainerBounds, portraitBounds) ||
                        mapOrient != g_espLastMapOrient)) dirty = YES;
         for (int i = 0; i < ESPOverlayMaxBoxes && !dirty; i++) {
@@ -2502,22 +2543,27 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             }
             // kernrw49: hp bar/line geometry đổi theo health/kind + line theo box.
             if (b.health != g_espLastHp[i]) { dirty = YES; break; }
-            for (int pt = 0; pt < 4 && !dirty; pt++) {
+            // kernrw51: mirror line chỉ cần khi toggle Line đang ON.
+            if (s_featLine) for (int pt = 0; pt < 4 && !dirty; pt++) {
                 CGPoint prevPt = g_espLastLine[i][pt];
                 CGPoint curPt = ds_esp_line_for_box(b, fullBox, landW, landH, winCenter, mapOrient, pt);
                 if (prevPt.x > 1e9 && curPt.x > 1e9) continue; // cả 2 vô hiệu
                 if (prevPt.x != curPt.x || prevPt.y != curPt.y) { dirty = YES; break; }
             }
             // kernrw38 mirror: label local (subview của viền), ngưỡng 4pt.
-            CGPoint labelLocalPre = CGPointMake(labelCenter.x - fullBox.origin.x,
-                                                labelCenter.y - fullBox.origin.y);
-            if ((fabs(g_espLastLabelCenter[i].x - labelLocalPre.x) > 4.0 ||
-                 fabs(g_espLastLabelCenter[i].y - labelLocalPre.y) > 4.0) &&
-                nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ)) {
-                dirty = YES; break;
+            // kernrw51: chỉ dirty khi toggle Name đang ON.
+            if (s_featName) {
+                CGPoint labelLocalPre = CGPointMake(labelCenter.x - fullBox.origin.x,
+                                                    labelCenter.y - fullBox.origin.y);
+                if ((fabs(g_espLastLabelCenter[i].x - labelLocalPre.x) > 4.0 ||
+                     fabs(g_espLastLabelCenter[i].y - labelLocalPre.y) > 4.0) &&
+                    nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ)) {
+                    dirty = YES; break;
+                }
             }
         }
         if (!dirty) return;
+        s_featDirty = NO; // đã tiêu: vòng vẽ dưới hội tụ label/hp theo toggle mới
     }
     // 1 pool cho TOÀN BỘ lượt present: mỗi setFrame/setText trước đây tự tạo
     // + drain pool (3 remote_msg thừa). Bọc @try/@finally để pool LUÔN được
@@ -2596,14 +2642,13 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
             if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
-            // Label khởi tạo setHidden:1 (ensure) — khi box hiện phải bật label
-            // TƯỜNG MINH (hidden là cờ riêng của view, unhide cha không tự unhide
-            // con). Hiện label khi box bật; khi box ẨN label theo cha, khỏi IPC.
-            if (!hide) ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 0);
-            // kernrw38: label là subview của viền -> ẩn theo cha, khỏi IPC riêng.
+            // label/hp là subview của viền — cache cờ về NO để vòng sau hội tụ
+            // lại đúng theo toggle (kernrw51: converge qua g_espLabelShown).
             g_espHiddenCache[i] = hide;
             if (hide) {
                 g_espRectValid[i] = NO;
+                g_espLabelShown[i] = NO;
+                g_espHpShown[i] = NO;
             }
         }
         if (hide) continue;
@@ -2649,17 +2694,19 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
         }
 
-        // ---- kernrw49: HEALTH BAR (giống Kernel) ----
+        // ---- kernrw49/51: HEALTH BAR (giống Kernel) ----
         // Đá thanh máu TRÁI box: d tại fullBox (local), cao như box, thầu "chân"
-        // = bottom. Đổi fill height + màu khi đổi. GPHPFillH đã nêu — dirty khi
-        // height x10 thay đổi > 1px, band đổi khi threshold 30/60 hit.
+        // = bottom. kernrw51: 1) gate theo toggle(s) ESP Health; 2) setFrame chỉ
+        // khi box FLÚC/rect chưa hợp lệ (trước đây setFrame chạy mỗi frame
+        // bất kể => ~960 IPC/s, bão NSInvocation + CA transaction -> respring).
         if (g_espHpBG[i] && b.health >= 0 && b.health <= 100) {
             uint8_t band = (b.health < 30) ? 2 : (b.health < 60) ? 1 : 0;
-            if (fullBox.size.height >= 8.0f && fullBox.size.width >= 2.0f) {
+            if (s_featHealth && fullBox.size.height >= 8.0f && fullBox.size.width >= 2.0f) {
+                CGFloat barW = 6.0f; CGFloat barPad = 4.0f;
+                if (boxMoved || !g_espRectValid[i] || b.health != g_espLastHp[i]) {
                 // 1 setFrame cho bg (chiều cao = box), 1 setFrame cho fill
                 // (chiều cao = box * health%): set TRỰC TIẾP từ fullBox làm
                 // fullBox đã map (chuyển landscape + mapOrient đủ).
-                CGFloat barW = 6.0f; CGFloat barPad = 4.0f;
                 // Bar to bên local? Về game: bar to bên trái box:
                 // gameRect: (b.x - barW - barPad, b.y, barW, b.h) — Rồi map.
                 CGRect bgGame = CGRectMake(b.x - barW - barPad, b.y, barW, b.h);
@@ -2677,6 +2724,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                               fillMap.origin.y - fullBox.origin.y,
                                               fillMap.size.width, fillMap.size.height);
                 ds_remote_set_rect_on_main(process, g_espHpFill[i], "setFrame:", fillLocal);
+                }
                 uint8_t lastBand = g_espHpBand[i];
                 if (lastBand == 0xFF) lastBand = 0; // lần đầu coi như green
                 if (band != lastBand || g_espHpFillH[i] == 0xFFFFFFFF) {
@@ -2692,7 +2740,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                     g_espHpShown[i] = YES;
                 }
             } else if (g_espHpShown[i]) {
-                // box quá nhỏ / tọa độ lệch — ẩn bar cho khỏi vẽ rác
+                // box quá nhỏ / toggle Health OFF / tọa độ lệch — ẩn bar
                 ds_remote_set_u64_on_main(process, g_espHpBG[i], "setHidden:", 1);
                 g_espHpShown[i] = NO;
             }
@@ -2702,12 +2750,19 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             g_espHpShown[i] = NO;
         }
 
+        // kernrw51: label hội tụ theo toggle ESP Name — cờ g_espLabelShown riêng
+        // (label có hidden=1 riêng từ ensure; unhide CHA không unhide CON).
+        if (s_featName != g_espLabelShown[i]) {
+            if (g_espLabels[i]) ds_remote_set_u64_on_main(process, g_espLabels[i],
+                                                          "setHidden:", s_featName ? 0 : 1);
+            g_espLabelShown[i] = s_featName;
+        }
         // Chỉ cập nhật setText khi text mét thực sự đổi để giảm tải IPC mach
         // Rate-limit setText: tối đa 2Hz (500ms, kernrw38 từ 5Hz) — mét/HP đọc
         // bằng mắt không cần nhanh hơn, mỗi setText là alloc+set+release IPC.
         // (s_lastTextAt hoist ở đầu hàm, dùng chung với pre-check idle).
         BOOL textChanged = (!g_espRectValid[i] || strcmp(g_espLastDist[i], distTxt) != 0);
-        if (textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.5)) {
+        if (s_featName && textChanged && (!g_espRectValid[i] || nowP - s_lastTextAt[i] >= 0.5)) {
             s_lastTextAt[i] = nowP;
             NSString *dist = [NSString stringWithUTF8String:distTxt];
             ds_remote_set_text_on_main(process, g_espLabels[i], dist);
@@ -2722,10 +2777,15 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         BOOL labelMoved = !g_espRectValid[i] ||
             fabs(g_espLastLabelCenter[i].x - labelLocal.x) > 4.0 ||
             fabs(g_espLastLabelCenter[i].y - labelLocal.y) > 4.0;
-        if (labelMoved && (!g_espRectValid[i] || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
+        if (s_featName && labelMoved &&
+            (!g_espRectValid[i] || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
             ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelLocal);
             g_espLastLabelCenter[i] = labelLocal;
             g_espLastLabelAt[i] = nowP;
+        } else if (!s_featName) {
+            // Name OFF: giữ mirror với giá trị hiện hành để pre-check không
+            // không dirty hoài khi toggle lại ON.
+            g_espLastLabelCenter[i] = labelLocal;
         }
 
         // kernrw49: snapline (Kernel esp.mm:1069): từ (screenW/2, 25) -> đỉnh
@@ -2736,7 +2796,9 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                                        winCenter, mapOrient, pt);
         }
         g_espLastHp[i] = b.health;
-        if (b.kind == 1 && g_espPathLayer && fullBox.size.width > 1.0f &&
+        // kernrw51: snapline chỉ với toggle Line ON (Kernel chỉ vẽ line cho
+        // player kind 1 — dummy không có line).
+        if (s_featLine && b.kind == 1 && g_espPathLayer && fullBox.size.width > 1.0f &&
             fullBox.size.height > 1.0f && s_linePtsCount + 2 <= kESPLinePointsMax) {
             CGPoint start = CGPointMake(landW * 0.5f, 25.0f);
             CGPoint startM = ds_esp_map_point(start, landW, landH, winCenter, mapOrient);
@@ -3711,6 +3773,11 @@ static void ds_finish_disable(void) {
         g_espLabels[i] = 0;
         g_espHiddenCache[i] = YES;
         g_espRectValid[i] = NO;
+        // kernrw51: reset cache toggle-convergence để session mới hội tụ lại.
+        g_espLabelShown[i] = NO;
+        g_espHpShown[i] = NO;
+        g_espHpBand[i] = 0xFF;
+        g_espHpFillH[i] = 0xFFFFFFFF;
     }
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ

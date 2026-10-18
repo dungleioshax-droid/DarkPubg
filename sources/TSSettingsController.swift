@@ -52,6 +52,12 @@ import UIKit
             return "eye.slash.fill"
         case .showESPBox:
             return "viewfinder"
+        case .espShowLine:
+            return "scribble"
+        case .espShowName:
+            return "person.text.rectangle"
+        case .espShowHealth:
+            return "heart.fill"
         }
     }
 

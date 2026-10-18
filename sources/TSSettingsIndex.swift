@@ -15,6 +15,9 @@ enum TSSettingsIndex: Int, CaseIterable {
     case keepInPlace
     case hideAtSnapshot
     case showESPBox
+    case espShowLine
+    case espShowName
+    case espShowHealth
 
     var key: String {
         switch self {
@@ -26,6 +29,12 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyHideAtSnapshot
         case .showESPBox:
             return HUDUserDefaultsKeyShowESPBox
+        case .espShowLine:
+            return HUDUserDefaultsKeyESPShowLine
+        case .espShowName:
+            return HUDUserDefaultsKeyESPShowName
+        case .espShowHealth:
+            return HUDUserDefaultsKeyESPShowHealth
         }
     }
 
@@ -39,6 +48,12 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("Hide @snapshot", comment: "TSSettingsIndex")
         case .showESPBox:
             return NSLocalizedString("ESP Box", comment: "TSSettingsIndex")
+        case .espShowLine:
+            return NSLocalizedString("ESP Line", comment: "TSSettingsIndex")
+        case .espShowName:
+            return NSLocalizedString("ESP Name", comment: "TSSettingsIndex")
+        case .espShowHealth:
+            return NSLocalizedString("ESP Health", comment: "TSSettingsIndex")
         }
     }
 
@@ -51,8 +66,12 @@ enum TSSettingsIndex: Int, CaseIterable {
                 return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
             }
         case .keepInPlace: fallthrough
-        case .hideAtSnapshot: fallthrough
-        case .showESPBox:
+        case .hideAtSnapshot:
+            return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
+        case .showESPBox: fallthrough
+        case .espShowLine: fallthrough
+        case .espShowName: fallthrough
+        case .espShowHealth:
             return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
         }
     }

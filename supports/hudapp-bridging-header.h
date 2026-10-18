@@ -33,6 +33,10 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyDisplayMode = @"displayMode";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyShowBaseGame = @"showBaseGame";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyBaseGameName = @"baseGameName";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyShowESPBox = @"showESPBox";
+// kernrw51: toggles ESP riêng từng thành phần (Kernel-style)
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowLine = @"espShowLine";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowName = @"espShowName";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowHealth = @"espShowHealth";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";
