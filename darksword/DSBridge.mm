@@ -2533,10 +2533,10 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                                                    landW, landH, winCenter, mapOrient);
             CGRect prevBox = g_espLastRect[i][0];
             // kernrw49: box vẽ per-box ALWAYS (g_espPathLayer giờ chỉ là snapline)
-            BOOL boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
-                             fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
-                             fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
-                             fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
+            BOOL boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.5 ||
+                             fabs(prevBox.origin.y - fullBox.origin.y) >= 0.5 ||
+                             fabs(prevBox.size.width - fullBox.size.width) >= 0.5 ||
+                             fabs(prevBox.size.height - fullBox.size.height) >= 0.5);
             if (boxMoved) { dirty = YES; break; }
             if ((s_featName || s_featDist) && strcmp(g_espLastDist[i], distTxt) != 0 &&
                 nowP - s_lastTextAt[i] >= 0.5) {
@@ -3445,7 +3445,7 @@ static void ds_esp_tick(void) {
             ESPBoxCounterSet(count);
 
             static CFAbsoluteTime s_lastBoxSummaryLog = 0;
-            if (now2 - s_lastBoxSummaryLog >= 1.0) {
+            if (now2 - s_lastBoxSummaryLog >= 30.0) {
                 s_lastBoxSummaryLog = now2;
                 ESPLog("BOX-SUM: %s raw=%d act=%d ori=%d land=%.0fx%.0f %s",
                        DS_ESP_BUILD_TAG, rawCount, count, orient,

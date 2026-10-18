@@ -97,10 +97,10 @@ static void SpringBoardLockStatusChanged
 #define UPDATE_INTERVAL 1.0
 #define IDLE_INTERVAL 3.0
 
-static const double HUD_FONT_SIZE_DEFAULT = 13.0;
-static const double HUD_MIN_CORNER_RADIUS = 10.0;
+static const double HUD_FONT_SIZE_DEFAULT = 22.0;
+static const double HUD_MIN_CORNER_RADIUS = 0.0;
 static double HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
-static CGFloat HUD_INACTIVE_OPACITY = 0.667;
+static CGFloat HUD_INACTIVE_OPACITY = 0.9;
 static uint8_t HUD_SHOW_ESP_BOX = 0; // 0=hide, 1=show ESP status
 
 static NSAttributedString *formattedNSAttributedString(BOOL __unused isFocused)
@@ -127,44 +127,21 @@ static NSAttributedString *formattedNSAttributedString(BOOL __unused isFocused)
 
         BOOL isWaiting = ([status containsString:@"wait"] || [status containsString:@"--"]);
 
-        NSMutableAttributedString *attributedString = [[NSMutableAttributedString alloc] init];
-
-        UIFont *iconFont = [UIFont systemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightBold];
-        UIFont *countFont = [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE + 2 weight:UIFontWeightHeavy];
-        UIFont *labelFont = [UIFont systemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightBold];
-
-        // Biểu tượng tâm ngắm
-        NSAttributedString *iconAttr = [[NSAttributedString alloc] initWithString:@"🎯 " attributes:@{
-            NSFontAttributeName: iconFont,
-            NSForegroundColorAttributeName: [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0]
-        }];
-        [attributedString appendAttributedString:iconAttr];
-
+        NSString *numStr = nil;
         if (isWaiting && count == 0) {
-            NSAttributedString *waitAttr = [[NSAttributedString alloc] initWithString:@"-- ĐỊCH" attributes:@{
-                NSFontAttributeName: labelFont,
-                NSForegroundColorAttributeName: [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0]
-            }];
-            [attributedString appendAttributedString:waitAttr];
+            numStr = @"--";
         } else {
-            // Số lượng địch: Màu đỏ nổi bật nếu có địch, màu xanh ngọc nếu an toàn (0 địch)
-            UIColor *numColor = (count > 0) ? [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0]
-                                            : [UIColor colorWithRed:16/255.0 green:185/255.0 blue:129/255.0 alpha:1.0];
-
-            NSAttributedString *countAttr = [[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"%u", (unsigned)count] attributes:@{
-                NSFontAttributeName: countFont,
-                NSForegroundColorAttributeName: numColor
-            }];
-            [attributedString appendAttributedString:countAttr];
-
-            NSAttributedString *textAttr = [[NSAttributedString alloc] initWithString:@" ĐỊCH" attributes:@{
-                NSFontAttributeName: labelFont,
-                NSForegroundColorAttributeName: [UIColor whiteColor]
-            }];
-            [attributedString appendAttributedString:textAttr];
+            numStr = [NSString stringWithFormat:@"%u", (unsigned)count];
         }
 
-        return attributedString;
+        UIFont *font = [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightHeavy];
+        // Chỉ hiện số địch màu đỏ nổi bật, rõ ràng
+        UIColor *redColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+
+        return [[NSAttributedString alloc] initWithString:numStr attributes:@{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: redColor
+        }];
     }
 }
 
@@ -271,12 +248,12 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     // Custom font/offset = setting cấu trúc của shell — giữ nguyên.
     BOOL usesCustomFontSize = [self usesCustomFontSize];
     if (usesCustomFontSize) {
-        HUD_FONT_SIZE = MIN(MAX([self realCustomFontSize], 8), 12);
-        [_blurView.layer setCornerRadius:HUD_FONT_SIZE / 2.0];
+        HUD_FONT_SIZE = MIN(MAX([self realCustomFontSize], 14), 40);
     } else {
         HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
-        [_blurView.layer setCornerRadius:HUD_MIN_CORNER_RADIUS];
     }
+    _blurView.layer.cornerRadius = 0.0;
+    _blurView.backgroundColor = [UIColor clearColor];
 
     BOOL hideAtSnapshot = [self hideAtSnapshot];
     if (hideAtSnapshot) {
@@ -483,9 +460,11 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     NSAttributedString *attributedText = formattedNSAttributedString(_isFocused);
     if (attributedText) {
         [_speedLabel setAttributedText:attributedText];
+        _speedLabel.hidden = NO;
         _blurView.hidden = NO;
     } else {
         [_speedLabel setAttributedText:[[NSAttributedString alloc] initWithString:@""]];
+        _speedLabel.hidden = YES;
         _blurView.hidden = YES;
     }
     [_speedLabel sizeToFit];
@@ -501,23 +480,29 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     _contentView.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_contentView];
 
-    _blurEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
-    _blurView = [[UIVisualEffectView alloc] initWithEffect:_blurEffect];
-    _blurView.layer.cornerRadius = HUD_MIN_CORNER_RADIUS;
-    _blurView.layer.masksToBounds = YES;
-    _blurView.layer.borderWidth = 1.0;
-    _blurView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:0.8].CGColor;
-    _blurView.backgroundColor = [UIColor colorWithRed:13/255.0 green:15/255.0 blue:20/255.0 alpha:0.85];
+    // Nền hoàn toàn trong suốt không có khung hộp đen
+    _blurView = [[UIVisualEffectView alloc] initWithEffect:nil];
+    _blurView.layer.cornerRadius = 0.0;
+    _blurView.layer.masksToBounds = NO;
+    _blurView.layer.borderWidth = 0.0;
+    _blurView.layer.borderColor = nil;
+    _blurView.backgroundColor = [UIColor clearColor];
     _blurView.translatesAutoresizingMaskIntoConstraints = NO;
     _containerView = [[ScreenshotInvisibleContainer alloc] initWithContent:_blurView];
     _containerView.hiddenContainer.translatesAutoresizingMaskIntoConstraints = NO;
     [_contentView addSubview:_containerView.hiddenContainer];
 
+    // Chỉ hiển thị số lượng địch màu đỏ trực tiếp trên màn hình có viền đổ bóng rõ nét
     _speedLabel = [[HUDBackdropLabel alloc] initWithFrame:CGRectZero];
-    _speedLabel.numberOfLines = 0;
+    _speedLabel.numberOfLines = 1;
     _speedLabel.textAlignment = NSTextAlignmentCenter;
-    _speedLabel.textColor = [UIColor whiteColor];
-    _speedLabel.font = [UIFont systemFontOfSize:HUD_FONT_SIZE];
+    _speedLabel.textColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+    _speedLabel.font = [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightHeavy];
+    _speedLabel.layer.shadowColor = [UIColor blackColor].CGColor;
+    _speedLabel.layer.shadowOffset = CGSizeMake(1.5, 1.5);
+    _speedLabel.layer.shadowRadius = 2.0;
+    _speedLabel.layer.shadowOpacity = 0.95;
+    _speedLabel.alpha = 1.0;
     _speedLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_speedLabel setContentHuggingPriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisVertical];
     [_blurView.contentView addSubview:_speedLabel];
@@ -720,10 +705,10 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     }
 
     [_constraints addObjectsFromArray:@[
-        [_blurView.topAnchor constraintEqualToAnchor:_speedLabel.topAnchor constant:-5],
-        [_blurView.leadingAnchor constraintEqualToAnchor:_speedLabel.leadingAnchor constant:-12],
-        [_blurView.trailingAnchor constraintEqualToAnchor:_speedLabel.trailingAnchor constant:12],
-        [_blurView.bottomAnchor constraintEqualToAnchor:_speedLabel.bottomAnchor constant:5],
+        [_blurView.topAnchor constraintEqualToAnchor:_speedLabel.topAnchor],
+        [_blurView.leadingAnchor constraintEqualToAnchor:_speedLabel.leadingAnchor],
+        [_blurView.trailingAnchor constraintEqualToAnchor:_speedLabel.trailingAnchor],
+        [_blurView.bottomAnchor constraintEqualToAnchor:_speedLabel.bottomAnchor],
     ]];
 
     [_constraints addObjectsFromArray:@[
