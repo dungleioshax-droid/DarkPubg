@@ -3303,7 +3303,6 @@ static void ds_esp_tick(void) {
                     if (rawCount > 0) gen = ESPEngineTrackedGen();
                 }
             }
-            }
 
             if (rawCount > 1) {
                 std::sort(rawBoxes, rawBoxes + rawCount, [](const ESPBox2D &a, const ESPBox2D &b) {
