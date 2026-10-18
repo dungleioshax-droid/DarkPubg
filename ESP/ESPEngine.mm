@@ -1052,16 +1052,11 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         ESPActorFields pf;
         ESPActorFieldsRead(vmMap, myPawn, &pf);
         // kernrw52g: bỏ log diag pawn (I/O mỗi scan)
-               (unsigned long long)myPawn, inList, myTeam, (unsigned long long)pf.vtable,
-               pf.nameID, (unsigned long long)pf.mesh, pf.hp, pf.hpMax,
-               (unsigned)pf.bHidden, (unsigned)pf.bDead, (unsigned long long)pf.tMesh,
         // Camera: chẩn đoán tại sao không vẽ được box (chain toàn bộ).
         ESPCamera camProbe;
         BOOL camOK = ESPEngineCamera(gameBase, &camProbe);
         if (camOK) {
             // kernrw52g: bỏ log diag cam OK (I/O mỗi scan)
-                   camProbe.fov, camProbe.location.x, camProbe.location.y,
-                   camProbe.location.z, camProbe.rotation.pitch,
         } else {
             // Soi cả 2 nguồn PC: NetDriver chain (Kernel) + GameInstance resolver.
             BOOL okn = NO;
@@ -1226,7 +1221,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
            (unsigned)nFiltered, (unsigned)nCached, (unsigned)nearChar,
            (unsigned)nearDummy,
-           CFAbsoluteTimeGetCurrent() - t0);
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -1265,14 +1259,12 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     }
     if (verbose) {
         std::vector<std::pair<uint64_t, uint32_t>> vts(vtHist.begin(), vtHist.end());
-        std::sort(vts.begin(), vts.end(), [](const std::pair<uint64_t,uint32_t> &a,
                                              const std::pair<uint64_t,uint32_t> &b) {
             return a.second > b.second;
         });
         char buf[512] = {0};
         int bl = 0;
         for (size_t i = 0; i < vts.size() && i < 8; i++) {
-            bl += snprintf(buf + bl, sizeof(buf) - (size_t)bl, " 0x%llx:%u",
                            (unsigned long long)vts[i].first, (unsigned)vts[i].second);
             if (bl > (int)sizeof(buf) - 32) break;
         }
@@ -1284,7 +1276,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             verboseLeftCopy = g_espVerboseLeft;
         }
         // kernrw52g: bỏ log diag vtHist (I/O mỗi scan)
-               (unsigned long long)pawnVtCopy);
         if (verboseLeftCopy > 0) {
             std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
             if (g_espVerboseLeft > 0) g_espVerboseLeft--;
@@ -1391,10 +1382,8 @@ static NSString *ESPCacheText(void) {
     // Một lượt quét giờ đã phân loại hết actor, nên chỉ lượt đầu tiên mới cần
     // đánh dấu ~ (đang warmup) — lượt sau là số chính thức.
     if (g_espCachePasses < 2) {
-        return [NSString stringWithFormat:@"ESP: %u actors / %u~ players",
                 (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
     }
-    return [NSString stringWithFormat:@"ESP: %u actors / %u players",
             (unsigned)g_espCache.actorCount, (unsigned)g_espCache.playerLike];
 }
 
@@ -1519,11 +1508,9 @@ NSString *ESPEngineScanInfoText(void) {
         // ngay con hình nhân nào bị lọt khỏi bộ lọc. "B %d" = số box đang vẽ
         // trên SpringBoard (cam+track OK). B=0 mà P>0 thì camera/track lỗi.
         if (g_espTrackedCount > 0 || g_espLastBoxes > 0) {
-            return [NSString stringWithFormat:@"scan ok %d P %d D B%d %.1fs",
                     g_espLastScanEnemies, g_espLastScanDummies, g_espLastBoxes,
                     g_espLastScanSeconds];
         }
-        return [NSString stringWithFormat:@"scan ok %d P %d D %.1fs",
                 g_espLastScanEnemies, g_espLastScanDummies, g_espLastScanSeconds];
     }
     return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
@@ -1876,13 +1863,11 @@ static uint64_t ESPTryLPOff(uint64_t vmMap, uint64_t gameInst, uint32_t off,
     BOOL ok = NO;
     uint64_t data = ESPReadU64(vmMap, gameInst + off, &ok);
     if (!ok || !ESPIsUserPtr(data)) {
-        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x dataFail ok=%d raw=0x%llx",
                                off, ok ? 1 : 0, (unsigned long long)data);
         return 0;
     }
     uint32_t n = ESPReadU32(vmMap, gameInst + off + 8, &ok);
     if (!ok || n == 0 || n > 8) {
-        if (stageBuf) snprintf(stageBuf, stageN, "off=0x%x n=%u", off, (unsigned)n);
         return 0;
     }
     uint64_t lp = ESPReadU64(vmMap, data, &ok);
@@ -1941,7 +1926,6 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
         if (strstr(st, "dataFail") == NULL) {
             if (nStages < 8) {
                 size_t bl = strlen(best);
-                snprintf(best + bl, sizeof(best) - bl, " %s", st);
                 nStages++;
             }
         } else if (best[0] == '\0') {
@@ -1950,7 +1934,6 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
         if (pc) {
             g_espLPInstFound = gameInst;
             g_espLPOffFound = kCand[i];
-            snprintf(g_espLPDiag, sizeof(g_espLPDiag), "inst=0x%llx %s",
                      (unsigned long long)gameInst, st);
             ESPLog("camLP resolved %s", g_espLPDiag);
             return pc;
@@ -1958,7 +1941,6 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
     }
     g_espLPNegInst = gameInst;
     g_espLPNegAt = now;
-    snprintf(g_espLPDiag, sizeof(g_espLPDiag), "inst=0x%llx FAIL last=%s",
              (unsigned long long)gameInst, best);
     ESPLog("camLP FAIL %s", g_espLPDiag);
     return 0;
@@ -2006,7 +1988,6 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
         uint64_t data = ESPReadU64(vmMap, gi + off, &okd);
         uint32_t n = ESPReadU32(vmMap, gi + off + 8, &okn);
         if (okd && okn && ESPIsUserPtr(data) && n >= 1 && n <= 8) {
-            bl += snprintf(buf + bl, sizeof(buf) - (size_t)bl, " 0x%x:{0x%llx x%u}",
                            off, (unsigned long long)data, (unsigned)n);
             if (bl > (int)sizeof(buf) - 48) break;
             found++;
@@ -2060,7 +2041,6 @@ const char *ESPEngineBoxPerfText(void) {
     g_perfLastDead = deadDrops;
     if (g_perfN > 0) {
         snprintf(g_perfBuf, sizeof(g_perfBuf),
-                 "n=%d proc=%.1f cam=%.1f act=%.1f avg=%.1f max=%.1f cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu) dead=%llu",
                  g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
                  g_perfSumAct / (double)g_perfN,
                  (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs,
@@ -2359,7 +2339,6 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
     // Dựng basis 1 lần cho cả vòng actor (thay 2 lần trig/actor như trước).
     ESPCamBasis basis;
     if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) {
-        ESPBoxDiagSet("F badFov %.1f", cam.fov);
         return 0;
     }
     // Chỉ dùng world từ cache — KHÔNG scan đồng bộ ở đây: hàm này chạy trên
@@ -2510,7 +2489,6 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         box.nick[sizeof(box.nick) - 1] = '\0';
         outBoxes[n++] = box;
     }
-    ESPBoxDiagSet("F act=%u ene=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
@@ -2790,7 +2768,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     // Dựng basis view-projection 1 lần cho cả danh sách tracked (không trig/actor).
     ESPCamBasis basis;
     if (!ESPCamBasisBuild(&cam, screenW, screenH, &basis)) {
-        ESPBoxDiagSet("R badFov %.1f", cam.fov);
         return 0;
     }
     CFAbsoluteTime tCam = CFAbsoluteTimeGetCurrent();
@@ -2923,7 +2900,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         box.nick[sizeof(box.nick) - 1] = '\0';
         outBoxes[n++] = box;
     }
-    ESPBoxDiagSet("R trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u ok=%d",
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
                   (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     if (tracked.size() > 0 && n == 0) {
