@@ -553,6 +553,12 @@ static NSDictionary *ds_hud_preferences(void) {
         HUDUserDefaultsKeyUsesCustomOffset,
         HUDUserDefaultsKeyRealCustomOffsetX,
         HUDUserDefaultsKeyRealCustomOffsetY,
+        // kernrw52: ESP sub-features sống ở standardDefaults — merge vào snapshot
+        // để bridge đọc cùng nguồn với Settings app (tránh lệch default).
+        HUDUserDefaultsKeyESPShowLine,
+        HUDUserDefaultsKeyESPShowName,
+        HUDUserDefaultsKeyESPShowHealth,
+        HUDUserDefaultsKeyESPShowDistance,
     ]) {
         id value = [defaults objectForKey:key];
         if (value) preferences[key] = value;
@@ -3005,7 +3011,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw49"
+#define DS_ESP_BUILD_TAG "kernrw52"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

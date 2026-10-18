@@ -720,7 +720,16 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 {
     [self loadUserDefaults:NO];
     NSNumber *mode = [_userDefaults objectForKey:key];
-    return mode != nil ? [mode boolValue] : NO;
+    if (mode != nil) return [mode boolValue];
+    // kernrw52: ESP sub-features mặc định ON (khớp với bridge default YES) —
+    // nếu không, UI hiện OFF nhưng bridge đã bật sẵn => toggle ON không có tác dụng.
+    if ([key isEqualToString:HUDUserDefaultsKeyESPShowLine] ||
+        [key isEqualToString:HUDUserDefaultsKeyESPShowName] ||
+        [key isEqualToString:HUDUserDefaultsKeyESPShowHealth] ||
+        [key isEqualToString:HUDUserDefaultsKeyESPShowDistance]) {
+        return YES;
+    }
+    return NO;
 }
 
 - (void)settingDidSelectWithKey:(NSString * _Nonnull)key
