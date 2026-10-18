@@ -982,7 +982,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.level = level;
     r.actorCluster = 0;
     r.actorCount = actorsCount;
-    ESPLog("scan start actors=%u level=0x%llx base=0x%llx adata=0x%llx",
+    // kernrw52g: bỏ log scan start (I/O mỗi scan)
            (unsigned)actorsCount, (unsigned long long)level, (unsigned long long)gameBase,
            (unsigned long long)actorsData);
     CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
@@ -1053,7 +1053,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
         ESPActorFields pf;
         ESPActorFieldsRead(vmMap, myPawn, &pf);
-        ESPLog("diag pawn=0x%llx inList=%d team=%d vTable=0x%llx nid=0x%x mesh=0x%llx hp=%.1f/%.1f bHide=%u bDead=%u tm=0x%llx tMax=%.1f tCur=%.1f up=%u win=%d",
+        // kernrw52g: bỏ log diag pawn (I/O mỗi scan)
                (unsigned long long)myPawn, inList, myTeam, (unsigned long long)pf.vtable,
                pf.nameID, (unsigned long long)pf.mesh, pf.hp, pf.hpMax,
                (unsigned)pf.bHidden, (unsigned)pf.bDead, (unsigned long long)pf.tMesh,
@@ -1062,7 +1062,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         ESPCamera camProbe;
         BOOL camOK = ESPEngineCamera(gameBase, &camProbe);
         if (camOK) {
-            ESPLog("diag cam OK fov=%.1f loc=(%.0f,%.0f,%.0f) rot=(%.0f,%.0f,%.0f)",
+            // kernrw52g: bỏ log diag cam OK (I/O mỗi scan)
                    camProbe.fov, camProbe.location.x, camProbe.location.y,
                    camProbe.location.z, camProbe.rotation.pitch,
                    camProbe.rotation.yaw, camProbe.rotation.roll);
@@ -1108,7 +1108,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     for (uint32_t i = 0; i < scanN; i++) {
         if ((i & 15) == 0) g_espProgress.store((int)i);
         if ((i & 63) == 0 && i > 0 && CFAbsoluteTimeGetCurrent() - t0 > 0.5) {
-            ESPLog("scan budget cut at %u/%u (0.5s) — phan con de luot sau",
+            // kernrw52g: bỏ log scan budget cut (I/O mỗi scan)
                    (unsigned)i, (unsigned)scanN);
             scanCompleted = false;
             break;
@@ -1144,7 +1144,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         }
         if (dg.vt) vtHist[dg.vt]++;
         if (verbose && logged < 24) {
-            ESPLog("a[%u] 0x%llx r=%d w=%d vt=0x%llx nid=0x%x m=0x%llx hp=%.0f/%.0f team=%d tm=0x%llx tMax=%.0f tCur=%.0f up=%u nc=%d nd=%d",
+            // kernrw52g: bỏ log a[i] (I/O blocking mỗi scan)
                    i, (unsigned long long)actor, dg.rule, dg.win, (unsigned long long)dg.vt,
                    dg.nameID, (unsigned long long)dg.mesh, dg.hp, dg.hpMax, dg.team,
                    (unsigned long long)dg.tMesh, dg.tMax, dg.tCur, dg.tIsUp,
@@ -1226,7 +1226,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.sampleActor = sample;
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
-    ESPLog("scan done enemies=%u dummy=%u scanned=%u win=%u/%u vt=%u nm=%u dnm=%u ch=%u dm=%u no=%u filt=%u cache=%u nc=%u nd=%u dt=%.1fs",
+    // kernrw52g: bỏ log scan done (I/O mỗi scan)
            (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
            (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
            (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
@@ -1289,7 +1289,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             pawnVtCopy = g_espPlayerVTable;
             verboseLeftCopy = g_espVerboseLeft;
         }
-        ESPLog("diag vtHist(%zu)%s pawnVt=0x%llx", vts.size(), buf,
+        // kernrw52g: bỏ log diag vtHist (I/O mỗi scan)
                (unsigned long long)pawnVtCopy);
         if (verboseLeftCopy > 0) {
             std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
@@ -1379,7 +1379,7 @@ void ESPEngineRequestScan(uint64_t gameBase) {
             g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
             g_espLastScanDummies = r.world ? (int)r.dummyLike : -1;
             g_espTrackedCount = (int)g_espTracked.size();
-            ESPLog("scan finished dt=%.1fs enemies=%d step=%d", g_espLastScanSeconds,
+            // kernrw52g: bỏ log scan finished (I/O) g_espLastScanSeconds,
                    g_espLastScanEnemies, g_espStep);
         }
         g_espScanStart = 0;
@@ -1801,16 +1801,10 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
     // actor mỗi 120ms). Heartbeat hiếm khi còn unknown để chẩn đoán.
     static CFAbsoluteTime s_lastUnkLog = 0;
     if (added > 0) {
-        ESPLog("discover: cls=%d +E=%d unk=%zu left=%zu trk=%d",
-               cls, added, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
-                   ? unknownIdx.size() - (size_t)unknownTried : 0,
-               g_espTrackedCount);
+        // kernrw52g: bỏ log discover (I/O mỗi discover)
     } else if (!unknownIdx.empty() && now - s_lastUnkLog >= 5.0) {
         s_lastUnkLog = now;
-        ESPLog("discover: cls=%d +E=0 unk=%zu left=%zu trk=%d",
-               cls, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
-                   ? unknownIdx.size() - (size_t)unknownTried : 0,
-               g_espTrackedCount);
+        // kernrw52g: bỏ log discover +E=0 (I/O mỗi discover)
     }
     // kernrw52d: adaptive interval — nếu không tìm thấy địch mới, tăng interval
     // lên 1.0s (giảm tải). Khi tìm thấy → reset về ESP_DISCOVER_INTERVAL.
@@ -2004,7 +1998,7 @@ static void ESPGameInstanceDump(uint64_t vmMap, uint64_t world, uint64_t gameBas
     uint64_t gi3 = (engine && ESPIsUserPtr(engine))
         ? ESPReadU64(vmMap, engine + ESPOff_GameEngine_GameInstance, &ok) : 0;
     if (!ok) gi3 = 0;
-    ESPLog("giDump w470=0x%llx vp80=0x%llx engE20=0x%llx",
+    // kernrw52g: bỏ log giDump (I/O mỗi scan)
            (unsigned long long)gi1, (unsigned long long)gi2, (unsigned long long)gi3);
     uint64_t gi = gi1 ? gi1 : (gi2 ? gi2 : gi3);
     if (!ESPIsUserPtr(gi)) {
@@ -2680,7 +2674,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             static CFAbsoluteTime s_lastStaleLog = 0;
             if (nowCam - s_lastStaleLog >= 2.0) {
                 s_lastStaleLog = nowCam;
-                ESPLog("camStale: camFail -> dung lai cam cu %.2fs (box van bam dich)",
+                // kernrw52g: bỏ log camStale (I/O)
                        (double)(nowCam - s_lastCamAt));
             }
         } else {
@@ -2753,7 +2747,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                             s_lastCamValid = YES;
                             if (nowC - s_lastFlashOkLog >= 1.0) {
                                 s_lastFlashOkLog = nowC;
-                                ESPLog("camFlash: quay nhanh dYaw=%.1f -> 2 doc khop -> chap nhan (het latch)",
+                                // kernrw52g: bỏ log camFlash OK (I/O)
                                        dYaw);
                             }
                         } else {
@@ -2774,7 +2768,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                                 s_lastCamValid = YES;
                                 if (nowC - s_lastFlashOkLog >= 1.0) {
                                     s_lastFlashOkLog = nowC;
-                                    ESPLog("camFlash: cam rách dYaw=%.1f -> retry POV sạch, chap nhan", dYaw);
+                                    // kernrw52g: bỏ log camFlash reject (I/O)
                                 }
                             } else {
                                 useLast = YES;
@@ -2785,7 +2779,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                     }
                     if (useLast && nowC - s_lastFlashRejLog >= 1.0) {
                         s_lastFlashRejLog = nowC;
-                        ESPLog("camFlash reject dYaw=%.1f dPitch=%.1f dLoc=%.1f dFov=%.1f dt=%.3f -> giu cam cu 1 tick",
+                        // kernrw52g: bỏ log camFlash reject detail (I/O)
                                dYaw, dPitch, dLoc, dFov, dt);
                     }
                 }
@@ -2955,8 +2949,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             // blocking từng làm tick vẽ treo (log: box perf max=1425ms).
             BOOL didFlush = NO;
             if (cPos > 0) didFlush = ESPMemoryFlushPageCacheIfIdle();
-            ESPLog("REFRESH-ZERO: trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u (flush=%d)",
-                   tracked.size(), cHid, cPos, cW2s, cSelf, cH, didFlush ? 1 : 0);
+            // kernrw52g: bỏ log REFRESH-ZERO (I/O mỗi tick)
         }
     }
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,

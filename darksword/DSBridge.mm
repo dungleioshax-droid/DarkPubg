@@ -3011,7 +3011,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw52f"
+#define DS_ESP_BUILD_TAG "kernrw52g"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3336,11 +3336,7 @@ static void ds_esp_tick(void) {
                         // chục px một cách hợp lệ, log ở ngưỡng 40 chỉ tạo nhiễu.
                         // Chỉ log cú nhảy LỚN (teleport/đổi actor) để soi lỗi thật.
                         if (dx > 120.0f || dy > 120.0f) {
-                            char msg[192];
-                            snprintf(msg, sizeof(msg),
-                                     "BOX-JUMP: slot[%d] act=0x%llx dx=%.1f dy=%.1f prev=[%.1f,%.1f] cur=[%.1f,%.1f]",
-                                     s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
-                            boxEventLog(msg);
+                            // kernrw52g: bỏ log BOX-JUMP (I/O blocking trên tick)
                         }
                         // Vị trí 3D và phép chiếu W2S đã được xử lý mượt và ngoại suy ở ESPEngineRefreshBoxes.
                         // Gán cur trực tiếp để box bám dính 1:1 theo camera rotation, không bị trôi/chậm pha.
@@ -3375,12 +3371,7 @@ static void ds_esp_tick(void) {
                     }
                 }
                 if (bestSlot >= 0) {
-                    char msg[160];
-                    snprintf(msg, sizeof(msg),
-                             "BOX-ASSIGN: slot[%d] +NEW act=0x%llx dist=%.1fm box=[%.1f,%.1f,%.1f,%.1f]",
-                             bestSlot, (unsigned long long)rawBoxes[r].actor, rawBoxes[r].distance,
-                             rawBoxes[r].x, rawBoxes[r].y, rawBoxes[r].w, rawBoxes[r].h);
-                    boxEventLog(msg);
+                    // kernrw52g: bỏ log BOX-ASSIGN (I/O blocking)
                     s_slots[bestSlot].actor = rawBoxes[r].actor;
                     s_slots[bestSlot].box = rawBoxes[r];
                     s_slots[bestSlot].lastSeen = now2;
