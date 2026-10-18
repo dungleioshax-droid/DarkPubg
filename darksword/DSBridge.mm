@@ -163,6 +163,8 @@ static pid_t g_remoteWindowPid = 0;
 static uint64_t g_espWindow = 0;
 static uint64_t g_espContainer = 0;
 static uint64_t g_espBorders[ESPOverlayMaxBoxes][4] = {{0}};
+static uint64_t g_espBorderLayer[ESPOverlayMaxBoxes] = {0}; // layer của view viền (bật/tắt khung)
+static BOOL g_espBoxBorderOn[ESPOverlayMaxBoxes];            // borderWidth đang = kDSESPBorder?
 static uint64_t g_espLabels[ESPOverlayMaxBoxes] = {0};
 // kernrw49: health bar per-box = 2 UIView con (nền đen alpha + fill màu band
 // như Kernel: <30%% đỏ, <60%% vàng, còn lại xanh lá).
@@ -848,6 +850,18 @@ static BOOL ds_esp_feature_pref(NSDictionary *prefs, NSString *key) {
     return YES;
 }
 
+// "ESP Box" CHỈ là toggle của khung 2D. Các thành phần khác (Snapline,
+// Tên, Máu, Khoảng cách) phải chạy độc lập — trước đây cả overlay bị gate
+// theo mỗi ESP Box nên tắt Box là Line/Name/Health/Distance cũng không chạy.
+// Overlay chỉ tắt hẳn khi TẤT CẢ đều OFF.
+static BOOL ds_esp_any_feature_from_prefs(NSDictionary *prefs) {
+    if (ds_show_esp_from_prefs(prefs)) return YES;
+    return ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowLine) ||
+           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowName) ||
+           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowHealth) ||
+           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowDistance);
+}
+
 NSString *DSBridgeESPStatus(void) {
 #if USE_DARKSWORD
     NSDictionary *prefs = nil;
@@ -1075,7 +1089,7 @@ static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
 }
 
 static NSString *ds_esp_line_for_prefs(NSDictionary *preferences) {
-    if (!ds_show_esp_from_prefs(preferences)) return nil;
+    if (!ds_esp_any_feature_from_prefs(preferences)) return nil;
     uint32_t count = 0;
     @try {
         count = DSBridgeESPCount();
@@ -2326,6 +2340,8 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "addSubview:"), v, YES);
         
         g_espBorders[i][0] = v; // Dùng 1 view duy nhất cho toàn bộ khung box
+        g_espBorderLayer[i] = layer;
+        g_espBoxBorderOn[i] = YES;
         for (int e = 1; e < 4; e++) g_espBorders[i][e] = 0;
 
         uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
@@ -2466,17 +2482,20 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
     // frame sau chạy vòng vẽ (s_featDirty) để label/hp hội tụ trạng thái mới.
     static CFAbsoluteTime s_featPrefAt = 0;
     static BOOL s_featLine = YES, s_featName = YES, s_featHealth = YES, s_featDist = YES;
+    static BOOL s_featBox = YES; // khung 2D — tách khỏi các thành phần khác
     static BOOL s_featDirty = NO;
     if (nowP - s_featPrefAt > 1.0) {
         s_featPrefAt = nowP;
         NSDictionary *featPrefs = nil;
         @try { featPrefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+        BOOL nb = ds_show_esp_from_prefs(featPrefs);
         BOOL nl = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowLine);
         BOOL nn = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowName);
         BOOL nh = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowHealth);
         BOOL nd = ds_esp_feature_pref(featPrefs, HUDUserDefaultsKeyESPShowDistance);
-        if (nl != s_featLine || nn != s_featName || nh != s_featHealth || nd != s_featDist) s_featDirty = YES;
-        s_featLine = nl; s_featName = nn; s_featHealth = nh; s_featDist = nd;
+        if (nb != s_featBox || nl != s_featLine || nn != s_featName ||
+            nh != s_featHealth || nd != s_featDist) s_featDirty = YES;
+        s_featBox = nb; s_featLine = nl; s_featName = nn; s_featHealth = nh; s_featDist = nd;
     }
     if (!g_espWindow || !g_espContainer) {
         if (!ds_esp_overlay_ensure(process, portraitBounds)) return;
@@ -2696,6 +2715,16 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         if (boxMoved && g_espBorders[i][0]) {
             // kernrw49: viền box — SET FRAME là CHIÊU chính (per-box như trước)
             ds_remote_set_rect_on_main(process, g_espBorders[i][0], "setFrame:", fullBox);
+        }
+
+        // "ESP Box" chỉ điều khiển KHUNG. View viền vẫn phải tồn tại vì nó là
+        // cha của label + thanh máu, nên khi Box OFF chỉ set borderWidth = 0 —
+        // Snapline / Tên / Máu / Khoảng cách vẫn chạy độc lập (trước đây tắt
+        // Box là cả overlay tắt theo nên các toggle kia vô dụng).
+        if (g_espBorderLayer[i] && g_espBoxBorderOn[i] != s_featBox) {
+            ds_remote_set_double_on_main(process, g_espBorderLayer[i], "setBorderWidth:",
+                                         s_featBox ? (double)kDSESPBorder : 0.0);
+            g_espBoxBorderOn[i] = s_featBox;
         }
 
         // ---- kernrw49/51: HEALTH BAR (giống Kernel) ----
@@ -3028,7 +3057,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw56-dead"
+#define DS_ESP_BUILD_TAG "kernrw57-features"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3203,7 +3232,7 @@ static void ds_esp_tick(void) {
         s_prefsAt = nowP;
     }
     NSDictionary *preferences = s_prefsCache ?: @{};
-    if (!ds_show_esp_from_prefs(preferences) || !g_gameBase) {
+    if (!ds_esp_any_feature_from_prefs(preferences) || !g_gameBase) {
         if (!s_espHideSent) {
             s_espHideSent = YES;
             DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
@@ -3807,7 +3836,9 @@ static void ds_finish_disable(void) {
     g_espWindow = 0;
     g_espContainer = 0;
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
-        for (int e = 0; e < 4; e++) g_espBorders[i][e] = 0;
+        for (int e = 0; e < 4; e++)        g_espBorders[i][e] = 0;
+        g_espBorderLayer[i] = 0;
+        g_espBoxBorderOn[i] = YES;
         g_espLabels[i] = 0;
         g_espHiddenCache[i] = YES;
         g_espRectValid[i] = NO;
