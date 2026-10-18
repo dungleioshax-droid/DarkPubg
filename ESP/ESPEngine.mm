@@ -1218,7 +1218,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     // kernrw52g: bỏ log scan done (I/O mỗi scan)
            (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
            (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
-           (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -1504,9 +1503,7 @@ NSString *ESPEngineScanInfoText(void) {
         // trên SpringBoard (cam+track OK). B=0 mà P>0 thì camera/track lỗi.
         if (g_espTrackedCount > 0 || g_espLastBoxes > 0) {
                     g_espLastScanEnemies, g_espLastScanDummies, g_espLastBoxes,
-                    g_espLastScanSeconds];
         }
-                g_espLastScanEnemies, g_espLastScanDummies, g_espLastScanSeconds];
     }
     return [NSString stringWithFormat:@"scan fail E%d %.1fs", g_espStep, g_espLastScanSeconds];
 #endif
@@ -1858,7 +1855,6 @@ static uint64_t ESPTryLPOff(uint64_t vmMap, uint64_t gameInst, uint32_t off,
     BOOL ok = NO;
     uint64_t data = ESPReadU64(vmMap, gameInst + off, &ok);
     if (!ok || !ESPIsUserPtr(data)) {
-                               off, ok ? 1 : 0, (unsigned long long)data);
         return 0;
     }
     uint32_t n = ESPReadU32(vmMap, gameInst + off + 8, &ok);
@@ -1929,7 +1925,6 @@ static uint64_t ESPResolvePC(uint64_t vmMap, uint64_t gameInst) {
         if (pc) {
             g_espLPInstFound = gameInst;
             g_espLPOffFound = kCand[i];
-                     (unsigned long long)gameInst, st);
             ESPLog("camLP resolved %s", g_espLPDiag);
             return pc;
         }
