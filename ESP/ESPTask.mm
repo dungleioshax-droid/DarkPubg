@@ -130,12 +130,13 @@ BOOL ESPGameTaskEnsure(void) {
     }
     // Throttle attempt full (Ensure chạy mỗi tick 40Hz).
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - s_lastTryAt < 5.0) {
+    if (now - s_lastTryAt < 2.0) {
         pthread_mutex_unlock(&s_taskMutex);
         return NO;
     }
-    if (s_giveUpFails >= 5) {
-        // Đã trượt đủ: Esign thường -> region-map only, khỏi thử nữa.
+    if (s_giveUpFails >= 100) {
+        // kernrw52e: bỏ give-up — keep trying vm_read (task port) mỗi 2s.
+        // Esign mobile thường fail, nhưng region-map fallback vẫn chạy song song.
         pthread_mutex_unlock(&s_taskMutex);
         return NO;
     }
@@ -150,6 +151,24 @@ BOOL ESPGameTaskEnsure(void) {
         } else {
             t = ESPTaskTryRouteB(pid);
             if (t != MACH_PORT_NULL) route = 2;
+            else {
+                // kernrw52e: Route C — thử lấy task port qua kernel exploit.
+                // taskbyproc đọc task pointer từ kernel memory; nếu task pointer
+                // hợp lệ thì thử dùng nó như mach port cho mach_vm_read_overwrite.
+                uint64_t proc = proc_find_by_name("ShadowTrackerExtra");
+                if (proc) {
+                    uint64_t taskPtr = taskbyproc(proc);
+                    if (taskPtr && taskPtr > 0x100000000ULL) {
+                        // Thử dùng task pointer như mach port
+                        task_t candidate = (task_t)taskPtr;
+                        int p2 = 0;
+                        if (pid_for_task(candidate, &p2) == KERN_SUCCESS && p2 == pid) {
+                            t = candidate;
+                            route = 3;
+                        }
+                    }
+                }
+            }
         }
     }
     if (t != MACH_PORT_NULL) {
