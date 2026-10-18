@@ -152,7 +152,6 @@ BOOL ESPGameTaskEnsure(void) {
             t = ESPTaskTryRouteB(pid);
             if (t != MACH_PORT_NULL) route = 2;
         }
-        }
     }
     if (t != MACH_PORT_NULL) {
         s_gameTask = t;
