@@ -64,20 +64,45 @@
     log_debug(OS_LOG_DEFAULT, "- [MainApplicationDelegate application:%{public}@ didFinishLaunchingWithOptions:%{public}@]", application, launchOptions);
 
     _rootViewController = [[RootViewController alloc] init];
+    _rootViewController.title = @"Home";
+    _rootViewController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home" image:[UIImage systemImageNamed:@"house.fill"] selectedImage:[UIImage systemImageNamed:@"house.fill"]];
+
+    // Settings tab: hosts TSSettingsController inline
+    UIViewController *settingsHost = [[UIViewController alloc] init];
+    settingsHost.title = @"Settings";
+    settingsHost.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Settings" image:[UIImage systemImageNamed:@"gear"] selectedImage:[UIImage systemImageNamed:@"gear"]];
+    settingsHost.view.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
+
+    UITabBarController *tabBarController = [[UITabBarController alloc] init];
+    tabBarController.viewControllers = @[_rootViewController, settingsHost];
+    tabBarController.delegate = self;
 
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-    // Opaque window — do not inherit TrollStore HUD transparency.
     self.window.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
     self.window.opaque = YES;
-    [self.window setRootViewController:_rootViewController];
+    [self.window setRootViewController:tabBarController];
     [self.window makeKeyAndVisible];
 
-    // Trigger network access immediately and prepare the current build's
-    // kernelcache in the sandbox. The privileged chain still starts only when
-    // the user enables the HUD.
     DSBridgeWarmUpNetworkAndPrefetchKernelCache();
 
     return YES;
+}
+
+- (void)tabBarController:(UITabBarController *)tabBarController didSelectViewController:(UIViewController *)viewController {
+    if (viewController != _rootViewController) {
+        TSSettingsController *settingsViewController = [[TSSettingsController alloc] init];
+        settingsViewController.delegate = _rootViewController;
+        settingsViewController.alreadyLaunched = [_rootViewController isHUDEnabled];
+
+        SPLarkTransitioningDelegate *transitioningDelegate = [[SPLarkTransitioningDelegate alloc] init];
+        settingsViewController.transitioningDelegate = transitioningDelegate;
+        settingsViewController.modalPresentationStyle = UIModalPresentationCustom;
+        settingsViewController.modalPresentationCapturesStatusBarAppearance = YES;
+
+        [tabBarController presentViewController:settingsViewController animated:YES completion:^{
+            tabBarController.selectedIndex = 0;
+        }];
+    }
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
