@@ -2553,7 +2553,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         // Hide stale boxes once
         for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
             if (!g_espHiddenCache[i]) {
-                if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
+                if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", 1);
                 ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 1);
                 g_espHiddenCache[i] = YES;
             }
@@ -2595,7 +2595,11 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         ESPBox2D b = boxes[i];
         BOOL hide = (b.visible == 0 || b.w < 1.0f || b.h < 2.0f);
         if (hide != g_espHiddenCache[i]) {
-            if (!g_espPathLayer && g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
+            if (g_espBorders[i][0]) ds_remote_set_u64_on_main(process, g_espBorders[i][0], "setHidden:", hide ? 1 : 0);
+            // Label khởi tạo setHidden:1 (ensure) — khi box hiện phải bật label
+            // TƯỜNG MINH (hidden là cờ riêng của view, unhide cha không tự unhide
+            // con). Hiện label khi box bật; khi box ẨN label theo cha, khỏi IPC.
+            if (!hide) ds_remote_set_u64_on_main(process, g_espLabels[i], "setHidden:", 0);
             // kernrw38: label là subview của viền -> ẩn theo cha, khỏi IPC riêng.
             g_espHiddenCache[i] = hide;
             if (hide) {
