@@ -49,6 +49,19 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     UIProgressView *_dsProgressBar;
     UILabel *_dsProgressLabel;
 #endif
+
+    UIView *_headerContainer;
+    UILabel *_appTitleLabel;
+    UILabel *_appSubtitleLabel;
+    UIView *_badgeView;
+    UIView *_badgeDot;
+    UILabel *_badgeLabel;
+
+    UIView *_statusCardView;
+    UILabel *_statusDetailLabel;
+
+    UIView *_hintCardView;
+    UILabel *_hintLabel;
 }
 
 + (void)setShouldToggleHUDAfterLaunch:(BOOL)flag
@@ -97,66 +110,232 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     CGRect bounds = UIScreen.mainScreen.bounds;
 
     self.view = [[UIView alloc] initWithFrame:bounds];
-    self.view.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
+    self.view.backgroundColor = [UIColor colorWithRed:13/255.0 green:15/255.0 blue:20/255.0 alpha:1.0];
 
     self.backgroundView = [[UIView alloc] initWithFrame:bounds];
     self.backgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.backgroundView.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
+    self.backgroundView.backgroundColor = [UIColor colorWithRed:13/255.0 green:15/255.0 blue:20/255.0 alpha:1.0];
 
     [self.view addSubview:self.backgroundView];
 
     UILayoutGuide *safeArea = self.backgroundView.safeAreaLayoutGuide;
+
+    // 1. Header Container
+    _headerContainer = [[UIView alloc] init];
+    _headerContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.backgroundView addSubview:_headerContainer];
+
+    _appTitleLabel = [[UILabel alloc] init];
+    _appTitleLabel.text = @"DarkPubg ESP";
+    _appTitleLabel.font = [UIFont systemFontOfSize:24 weight:UIFontWeightBold];
+    _appTitleLabel.textColor = [UIColor whiteColor];
+    _appTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_headerContainer addSubview:_appTitleLabel];
+
+    _appSubtitleLabel = [[UILabel alloc] init];
+    _appSubtitleLabel.text = @"Kernel Memory Radar • iOS";
+    _appSubtitleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    _appSubtitleLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
+    _appSubtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_headerContainer addSubview:_appSubtitleLabel];
+
+    // Status Pill Badge
+    _badgeView = [[UIView alloc] init];
+    _badgeView.backgroundColor = [UIColor colorWithRed:22/255.0 green:25/255.0 blue:34/255.0 alpha:1.0];
+    _badgeView.layer.cornerRadius = 14.0;
+    _badgeView.layer.borderWidth = 1.0;
+    _badgeView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0].CGColor;
+    _badgeView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_headerContainer addSubview:_badgeView];
+
+    _badgeDot = [[UIView alloc] init];
+    _badgeDot.backgroundColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+    _badgeDot.layer.cornerRadius = 4.0;
+    _badgeDot.translatesAutoresizingMaskIntoConstraints = NO;
+    [_badgeView addSubview:_badgeDot];
+
+    _badgeLabel = [[UILabel alloc] init];
+    _badgeLabel.text = @"CHƯA BẬT";
+    _badgeLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    _badgeLabel.textColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+    _badgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_badgeView addSubview:_badgeLabel];
+
+    // 2. Status Card View
+    _statusCardView = [[UIView alloc] init];
+    _statusCardView.backgroundColor = [UIColor colorWithRed:22/255.0 green:25/255.0 blue:34/255.0 alpha:1.0];
+    _statusCardView.layer.cornerRadius = 16.0;
+    _statusCardView.layer.borderWidth = 1.0;
+    _statusCardView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0].CGColor;
+    _statusCardView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.backgroundView addSubview:_statusCardView];
+
+    UIImageView *gameIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"gamecontroller.fill"]];
+    gameIcon.tintColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:1.0];
+    gameIcon.contentMode = UIViewContentModeScaleAspectFit;
+    gameIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:gameIcon];
+
+    UILabel *gameTitleLabel = [[UILabel alloc] init];
+    gameTitleLabel.text = @"Mục tiêu: PUBG Mobile";
+    gameTitleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    gameTitleLabel.textColor = [UIColor whiteColor];
+    gameTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:gameTitleLabel];
+
+    UILabel *gameSubLabel = [[UILabel alloc] init];
+    gameSubLabel.text = @"ShadowTrackerExtra";
+    gameSubLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    gameSubLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
+    gameSubLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:gameSubLabel];
+
+    UIView *cardDivider = [[UIView alloc] init];
+    cardDivider.backgroundColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0];
+    cardDivider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:cardDivider];
+
+    UIImageView *statusIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"waveform.path.ecg"]];
+    statusIcon.tintColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+    statusIcon.contentMode = UIViewContentModeScaleAspectFit;
+    statusIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:statusIcon];
+
+    _statusDetailLabel = [[UILabel alloc] init];
+    _statusDetailLabel.text = @"Sẵn sàng kết nối bộ nhớ kernel...";
+    _statusDetailLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    _statusDetailLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
+    _statusDetailLabel.numberOfLines = 0;
+    _statusDetailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_statusCardView addSubview:_statusDetailLabel];
+
+    // 3. Main Action Button
     _mainButton = [MainButton buttonWithType:UIButtonTypeSystem];
     [_mainButton setTintColor:[UIColor whiteColor]];
     [_mainButton addTarget:self action:@selector(tapMainButton:) forControlEvents:UIControlEventTouchUpInside];
-    if (@available(iOS 15.0, *))
-    {
-        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-        config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
-        config.baseForegroundColor = [UIColor whiteColor];
-        [config setTitleTextAttributesTransformer:^NSDictionary <NSAttributedStringKey, id> * _Nonnull(NSDictionary <NSAttributedStringKey, id> * _Nonnull textAttributes) {
-            NSMutableDictionary *newAttributes = [textAttributes mutableCopy];
-            [newAttributes setObject:[UIFont systemFontOfSize:28.0 weight:UIFontWeightBold] forKey:NSFontAttributeName];
-            return newAttributes;
-        }];
-        [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
-        config.contentInsets = NSDirectionalEdgeInsetsMake(22, 44, 22, 44);
-        [_mainButton setConfiguration:config];
-        _mainButton.layer.shadowColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:0.45].CGColor;
-        _mainButton.layer.shadowOpacity = 0.45;
-        _mainButton.layer.shadowRadius = 18;
-        _mainButton.layer.shadowOffset = CGSizeMake(0, 8);
-        _mainButton.layer.masksToBounds = NO;
-    }
-    else
-    {
-        [_mainButton.titleLabel setFont:[UIFont boldSystemFontOfSize:32.0]];
-    }
+    _mainButton.layer.cornerRadius = 16.0;
+    _mainButton.layer.masksToBounds = YES;
+    _mainButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backgroundView addSubview:_mainButton];
 
-    [_mainButton setTranslatesAutoresizingMaskIntoConstraints:NO];
-    [NSLayoutConstraint activateConstraints:@[
-        [_mainButton.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
-        [_mainButton.centerYAnchor constraintEqualToAnchor:self.backgroundView.centerYAnchor],
-    ]];
+    // 4. Hint Card
+    _hintCardView = [[UIView alloc] init];
+    _hintCardView.backgroundColor = [UIColor colorWithRed:22/255.0 green:25/255.0 blue:34/255.0 alpha:1.0];
+    _hintCardView.layer.cornerRadius = 12.0;
+    _hintCardView.layer.borderWidth = 1.0;
+    _hintCardView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0].CGColor;
+    _hintCardView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.backgroundView addSubview:_hintCardView];
 
+    UIImageView *hintIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"lightbulb.fill"]];
+    hintIcon.tintColor = [UIColor colorWithRed:251/255.0 green:191/255.0 blue:36/255.0 alpha:1.0];
+    hintIcon.contentMode = UIViewContentModeScaleAspectFit;
+    hintIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [_hintCardView addSubview:hintIcon];
+
+    _hintLabel = [[UILabel alloc] init];
+    _hintLabel.text = @"Mẹo: Bạn có thể bật ESP trước hoặc sau khi mở PUBG Mobile. Vào tab Cài đặt để tùy biến Box, Line, Khoảng cách.";
+    _hintLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    _hintLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
+    _hintLabel.numberOfLines = 0;
+    _hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_hintCardView addSubview:_hintLabel];
+
+    // 5. Author Label (Credits)
     _authorLabel = [[UILabel alloc] init];
-    [_authorLabel setNumberOfLines:0];
-    [_authorLabel setTextAlignment:NSTextAlignmentCenter];
-    [_authorLabel setTextColor:[UIColor colorWithWhite:1.0 alpha:0.88]];
-    [_authorLabel setFont:[UIFont systemFontOfSize:13.0 weight:UIFontWeightMedium]];
-    _authorLabel.layer.shadowColor = [UIColor blackColor].CGColor;
-    _authorLabel.layer.shadowOpacity = 0.35;
-    _authorLabel.layer.shadowRadius = 4;
-    _authorLabel.layer.shadowOffset = CGSizeMake(0, 1);
-    [_authorLabel sizeToFit];
+    _authorLabel.numberOfLines = 0;
+    _authorLabel.textAlignment = NSTextAlignmentCenter;
+    _authorLabel.textColor = [UIColor colorWithRed:100/255.0 green:116/255.0 blue:139/255.0 alpha:1.0];
+    _authorLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    _authorLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backgroundView addSubview:_authorLabel];
 
-    _authorLabelBottomConstraint = [_authorLabel.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor constant:_gAuthorLabelBottomConstraintConstantRegular];
-    [_authorLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    _authorLabelBottomConstraint = [_authorLabel.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor constant:-16.0f];
+
     [NSLayoutConstraint activateConstraints:@[
+        // Header
+        [_headerContainer.topAnchor constraintEqualToAnchor:safeArea.topAnchor constant:16],
+        [_headerContainer.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_headerContainer.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+
+        [_appTitleLabel.topAnchor constraintEqualToAnchor:_headerContainer.topAnchor],
+        [_appTitleLabel.leadingAnchor constraintEqualToAnchor:_headerContainer.leadingAnchor],
+
+        [_appSubtitleLabel.topAnchor constraintEqualToAnchor:_appTitleLabel.bottomAnchor constant:4],
+        [_appSubtitleLabel.leadingAnchor constraintEqualToAnchor:_headerContainer.leadingAnchor],
+        [_appSubtitleLabel.bottomAnchor constraintEqualToAnchor:_headerContainer.bottomAnchor],
+
+        [_badgeView.trailingAnchor constraintEqualToAnchor:_headerContainer.trailingAnchor],
+        [_badgeView.centerYAnchor constraintEqualToAnchor:_headerContainer.centerYAnchor],
+        [_badgeView.heightAnchor constraintEqualToConstant:28],
+
+        [_badgeDot.leadingAnchor constraintEqualToAnchor:_badgeView.leadingAnchor constant:10],
+        [_badgeDot.centerYAnchor constraintEqualToAnchor:_badgeView.centerYAnchor],
+        [_badgeDot.widthAnchor constraintEqualToConstant:8],
+        [_badgeDot.heightAnchor constraintEqualToConstant:8],
+
+        [_badgeLabel.leadingAnchor constraintEqualToAnchor:_badgeDot.trailingAnchor constant:6],
+        [_badgeLabel.trailingAnchor constraintEqualToAnchor:_badgeView.trailingAnchor constant:-10],
+        [_badgeLabel.centerYAnchor constraintEqualToAnchor:_badgeView.centerYAnchor],
+
+        // Status Card
+        [_statusCardView.topAnchor constraintEqualToAnchor:_headerContainer.bottomAnchor constant:24],
+        [_statusCardView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_statusCardView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+
+        [gameIcon.leadingAnchor constraintEqualToAnchor:_statusCardView.leadingAnchor constant:16],
+        [gameIcon.topAnchor constraintEqualToAnchor:_statusCardView.topAnchor constant:14],
+        [gameIcon.widthAnchor constraintEqualToConstant:20],
+        [gameIcon.heightAnchor constraintEqualToConstant:20],
+
+        [gameTitleLabel.leadingAnchor constraintEqualToAnchor:gameIcon.trailingAnchor constant:12],
+        [gameTitleLabel.topAnchor constraintEqualToAnchor:_statusCardView.topAnchor constant:12],
+        [gameTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_statusCardView.trailingAnchor constant:-16],
+
+        [gameSubLabel.leadingAnchor constraintEqualToAnchor:gameTitleLabel.leadingAnchor],
+        [gameSubLabel.topAnchor constraintEqualToAnchor:gameTitleLabel.bottomAnchor constant:2],
+
+        [cardDivider.topAnchor constraintEqualToAnchor:gameSubLabel.bottomAnchor constant:12],
+        [cardDivider.leadingAnchor constraintEqualToAnchor:_statusCardView.leadingAnchor constant:16],
+        [cardDivider.trailingAnchor constraintEqualToAnchor:_statusCardView.trailingAnchor constant:-16],
+        [cardDivider.heightAnchor constraintEqualToConstant:1],
+
+        [statusIcon.leadingAnchor constraintEqualToAnchor:_statusCardView.leadingAnchor constant:16],
+        [statusIcon.topAnchor constraintEqualToAnchor:cardDivider.bottomAnchor constant:14],
+        [statusIcon.widthAnchor constraintEqualToConstant:20],
+        [statusIcon.heightAnchor constraintEqualToConstant:20],
+
+        [_statusDetailLabel.leadingAnchor constraintEqualToAnchor:statusIcon.trailingAnchor constant:12],
+        [_statusDetailLabel.topAnchor constraintEqualToAnchor:cardDivider.bottomAnchor constant:12],
+        [_statusDetailLabel.trailingAnchor constraintEqualToAnchor:_statusCardView.trailingAnchor constant:-16],
+        [_statusDetailLabel.bottomAnchor constraintEqualToAnchor:_statusCardView.bottomAnchor constant:-14],
+
+        // Main Action Button
+        [_mainButton.topAnchor constraintEqualToAnchor:_statusCardView.bottomAnchor constant:28],
+        [_mainButton.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_mainButton.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+        [_mainButton.heightAnchor constraintEqualToConstant:56],
+
+        // Hint Card
+        [_hintCardView.topAnchor constraintEqualToAnchor:_mainButton.bottomAnchor constant:24],
+        [_hintCardView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_hintCardView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+
+        [hintIcon.leadingAnchor constraintEqualToAnchor:_hintCardView.leadingAnchor constant:14],
+        [hintIcon.topAnchor constraintEqualToAnchor:_hintCardView.topAnchor constant:14],
+        [hintIcon.widthAnchor constraintEqualToConstant:18],
+        [hintIcon.heightAnchor constraintEqualToConstant:18],
+
+        [_hintLabel.leadingAnchor constraintEqualToAnchor:hintIcon.trailingAnchor constant:10],
+        [_hintLabel.topAnchor constraintEqualToAnchor:_hintCardView.topAnchor constant:12],
+        [_hintLabel.trailingAnchor constraintEqualToAnchor:_hintCardView.trailingAnchor constant:-14],
+        [_hintLabel.bottomAnchor constraintEqualToAnchor:_hintCardView.bottomAnchor constant:-12],
+
+        // Author Label
         _authorLabelBottomConstraint,
         [_authorLabel.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
+        [_authorLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_authorLabel.trailingAnchor constraintLessThanOrEqualToAnchor:safeArea.trailingAnchor constant:-20],
     ]];
 
     UITapGestureRecognizer *authorTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tapAuthorLabel:)];
@@ -467,90 +646,88 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 {
     _isRemoteHUDActive = [self isHUDEnabled];
 
-    static NSAttributedString *hintAttributedString = nil;
-    static NSAttributedString *creditsAttributedString = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSDictionary *defaultAttributes = @{
-            NSForegroundColorAttributeName: [UIColor whiteColor],
-            NSFontAttributeName: [UIFont systemFontOfSize:14],
-        };
-
-        NSMutableParagraphStyle *creditsParaStyle = [[NSMutableParagraphStyle alloc] init];
-        creditsParaStyle.lineHeightMultiple = 1.2;
-        creditsParaStyle.alignment = NSTextAlignmentCenter;
-
-        NSDictionary *creditsAttributes = @{
-            NSForegroundColorAttributeName: [UIColor whiteColor],
-            NSFontAttributeName: [UIFont systemFontOfSize:14],
-            NSParagraphStyleAttributeName: creditsParaStyle,
-        };
-
-        NSString *hintText = NSLocalizedString(@"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD.", nil);
-        hintAttributedString = [[NSAttributedString alloc] initWithString:hintText attributes:defaultAttributes];
-
-        NSTextAttachment *githubIcon = [NSTextAttachment textAttachmentWithImage:[UIImage imageNamed:@"github-mark-white"]];
-        [githubIcon setBounds:CGRectMake(0, 0, 14, 14)];
-
-        NSAttributedString *githubIconText = [NSAttributedString attributedStringWithAttachment:githubIcon];
-        NSMutableAttributedString *githubIconTextFull = [[NSMutableAttributedString alloc] initWithAttributedString:githubIconText];
-        [githubIconTextFull appendAttributedString:[[NSAttributedString alloc] initWithString:@" " attributes:creditsAttributes]];
-
-        NSString *creditsText = NSLocalizedString(@"DarkSpeed by @GITHUB@huami1314\nBased on TrollSpeed by @GITHUB@i_82", nil);
-        NSMutableAttributedString *creditsAttributedText = [[NSMutableAttributedString alloc] initWithString:creditsText attributes:creditsAttributes];
-
-        // replace all "@GITHUB@" with github icon
-        NSRange atRange;
-
-        atRange = [creditsAttributedText.string rangeOfString:@"@GITHUB@"];
-        while (atRange.location != NSNotFound) {
-            [creditsAttributedText replaceCharactersInRange:atRange withAttributedString:githubIconTextFull];
-            atRange = [creditsAttributedText.string rangeOfString:@"@GITHUB@"];
-        }
-
-        creditsAttributedString = creditsAttributedText;
-    });
-
     __weak typeof(self) weakSelf = self;
     [UIView transitionWithView:self.backgroundView duration:HUD_TRANSITION_DURATION options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        [strongSelf->_mainButton setTitle:(strongSelf->_isRemoteHUDActive ? NSLocalizedString(@"Exit HUD", nil) : NSLocalizedString(@"Open HUD", nil)) forState:UIControlStateNormal];
+        if (!strongSelf) return;
+
+        if (strongSelf->_isRemoteHUDActive) {
+            [strongSelf->_mainButton setTitle:@"TẮT ESP (STOP)" forState:UIControlStateNormal];
+            [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"stop.fill"] forState:UIControlStateNormal];
+            if (@available(iOS 15.0, *)) {
+                UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+                config.baseBackgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+                config.baseForegroundColor = [UIColor whiteColor];
+                config.image = [UIImage systemImageNamed:@"stop.fill"];
+                config.imagePadding = 10;
+                config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+                [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+                    NSMutableDictionary *attrs = [textAttributes mutableCopy];
+                    attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+                    return attrs;
+                }];
+                [strongSelf->_mainButton setConfiguration:config];
+            } else {
+                strongSelf->_mainButton.backgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+            }
+            strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+            strongSelf->_badgeLabel.text = @"HOẠT ĐỘNG";
+            strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+        } else {
+            [strongSelf->_mainButton setTitle:@"BẬT ESP (START)" forState:UIControlStateNormal];
+            [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
+            if (@available(iOS 15.0, *)) {
+                UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+                config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+                config.baseForegroundColor = [UIColor whiteColor];
+                config.image = [UIImage systemImageNamed:@"play.fill"];
+                config.imagePadding = 10;
+                config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+                [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+                    NSMutableDictionary *attrs = [textAttributes mutableCopy];
+                    attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+                    return attrs;
+                }];
+                [strongSelf->_mainButton setConfiguration:config];
+            } else {
+                strongSelf->_mainButton.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+            }
+            strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+            strongSelf->_badgeLabel.text = @"CHƯA BẬT";
+            strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+        }
+
         NSString *bridgeError = DSBridgeCompiledIn() ? DSBridgeLastError() : @"";
-        // kernrw48: chỉ còn ESP — Base Game status đã gỡ.
         [strongSelf loadUserDefaults:NO];
         BOOL showESP = [strongSelf->_userDefaults[HUDUserDefaultsKeyShowESPBox] boolValue];
         NSString *espStatus = nil;
         NSString *espScan = nil;
         if (showESP && DSBridgeCompiledIn()) {
             @try {
-                // Dùng cached (không quét trên main thread để tránh treo).
                 espStatus = DSBridgeESPCachedStatus();
                 espScan = DSBridgeESPScanInfo();
             } @catch (__unused NSException *e) {
                 espStatus = nil;
             }
-            if (espStatus.length == 0) espStatus = @"ESP: --";
+            if (espStatus.length == 0) espStatus = @"ESP: Sẵn sàng";
         }
         NSMutableArray<NSString *> *extraLines = [NSMutableArray array];
         if (espStatus) [extraLines addObject:espStatus];
         if (espScan) [extraLines addObject:espScan];
         NSString *extraText = extraLines.count ? [extraLines componentsJoinedByString:@"\n"] : nil;
-        if (!strongSelf->_isRemoteHUDActive && bridgeError.length > 0) {
-            if (extraText) {
-                [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@", bridgeError, extraText]];
-            } else {
-                [strongSelf->_authorLabel setText:bridgeError];
-            }
-        } else if (extraText) {
-            // HUD active → hint is attributed; base/esp needs plain text, so combine as plain.
-            NSString *hintPlain = strongSelf->_isRemoteHUDActive
-                ? NSLocalizedString(@"DarkSpeed is running in the background.\nDo not force-quit it after enabling the HUD.", nil)
-                : NSLocalizedString(@"DarkSpeed by huami1314\nBased on TrollSpeed by i_82", nil);
-            [strongSelf->_authorLabel setText:[NSString stringWithFormat:@"%@\n%@", hintPlain, extraText]];
-            [strongSelf->_authorLabel setTextAlignment:NSTextAlignmentCenter];
+
+        if (bridgeError.length > 0) {
+            strongSelf->_statusDetailLabel.text = [NSString stringWithFormat:@"Lỗi: %@", bridgeError];
+            strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+        } else if (extraText.length > 0) {
+            strongSelf->_statusDetailLabel.text = extraText;
+            strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
         } else {
-            [strongSelf->_authorLabel setAttributedText:(strongSelf->_isRemoteHUDActive ? hintAttributedString : creditsAttributedString)];
+            strongSelf->_statusDetailLabel.text = strongSelf->_isRemoteHUDActive ? @"ESP Overlay đang chạy trong nền" : @"ESP đang tắt. Bấm nút bên dưới để khởi chạy.";
+            strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
         }
+
+        [strongSelf->_authorLabel setText:@"DarkPubg • Based on DarkSpeed & TrollSpeed"];
     } completion:nil];
 }
 
