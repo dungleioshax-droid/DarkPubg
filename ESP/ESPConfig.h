@@ -23,7 +23,7 @@
 // (fields window + VTable check, FName walk chỉ cho VTable lạ) nên nâng 16->48
 // để quét sạch ~100 unknown trong ~2 vòng (~0.24s) thay vì ~6 vòng (~0.8-2s).
 // Địch mới (class đã biết) hiện sau ~1 vòng (~0.12s) thay vì 1-2s.
-#define ESP_DISCOVER_BUDGET 24 // budget unknown mỗi vòng — giảm tải scan actor
+#define ESP_DISCOVER_BUDGET 12 // budget unknown mỗi vòng — giảm tải scan actor (kernrw52d)
 // Cập nhật vị trí box giữa 2 lượt quét: ESP_REFRESH_HZ lần/giây (đọc lại vị trí
 // root + camera, KHÔNG phân loại lại actor — rẻ hơn quét đầy đủ ~40 lần).
 // kernrw45: 40->60Hz. Sau kernrw44 gỡ g_espClassifyMutex khỏi đường refresh,

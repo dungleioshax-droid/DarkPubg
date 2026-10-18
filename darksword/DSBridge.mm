@@ -3011,7 +3011,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw52"
+#define DS_ESP_BUILD_TAG "kernrw52d"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3248,8 +3248,22 @@ static void ds_esp_tick(void) {
         if (now2 - s_lastRefresh >= minInterval) {
             s_lastRefresh = now2;
             didRefresh = YES;
-            // Đặt lịch quét nền và discover TRÊN QUEUE NỀN (không chặn tick render 60Hz).
-            ESPEngineRequestDiscover(g_gameBase);
+            // kernrw52d: ADAPTIVE DISCOVER — skip discover khi tất cả slot đều
+            // active và recently seen (< 1.0s). Discover chỉ cần khi có slot trống
+            // hoặc slot stale (> 1.0s) — tức là có khả năng xuất hiện địch mới.
+            // Giảm tải CPU đáng kể trong trận ổn định (không spawn địch mới).
+            {
+                BOOL allStable = YES;
+                int activeCount = 0;
+                for (int s = 0; s < ESPOverlayMaxBoxes; s++) {
+                    if (!s_slots[s].active || s_slots[s].actor == 0) { allStable = NO; break; }
+                    activeCount++;
+                    if (now2 - s_slots[s].lastSeen > 1.0) { allStable = NO; break; }
+                }
+                if (!allStable || activeCount < ESPOverlayMaxBoxes) {
+                    ESPEngineRequestDiscover(g_gameBase);
+                }
+            }
             ESPEngineRequestScan(g_gameBase);
             // Task port game (như aovcheat): có thì mọi read bên dưới đi đường
             // nhanh mach_vm_read_overwrite; chưa có thì ensure (throttle trong).
@@ -3325,10 +3339,18 @@ static void ds_esp_tick(void) {
                                      s, (unsigned long long)cur.actor, dx, dy, prev.x, prev.y, cur.x, cur.y);
                             boxEventLog(msg);
                         }
-                        // Vị trí 3D và phép chiếu W2S đã được xử lý mượt và ngoại suy ở ESPEngineRefreshBoxes.
-                        // Gán cur trực tiếp để box bám dính 1:1 theo camera rotation, không bị trôi/chậm pha.
-                        s_slots[s].box = cur;
-                        s_slots[s].lastSeen = now2;
+                        // kernrw52d: CLAMP BOX-JUMP — khi camera quay nhanh, box
+                        // teleport (dx/dy > 100px) trong 1 frame gây giật hình.
+                        // Thay vì gán cur (teleport), giữ vị trí cũ để tránh
+                        // nhảy; vẫn cập nhật lastSeen để không bị drop slot.
+                        // (Log vẫn ghi cú nhảy lớn để debug.)
+                        if (dx > 100.0f || dy > 100.0f) {
+                            s_slots[s].lastSeen = now2;
+                            // KHÔNG gán cur — giữ box cũ, tránh teleport visual
+                        } else {
+                            s_slots[s].box = cur;
+                            s_slots[s].lastSeen = now2;
+                        }
                         break;
                     }
                 }

@@ -1339,6 +1339,9 @@ void ESPEngineRequestScan(uint64_t gameBase) {
     // Vài lượt đầu quét dày để địch/players hiện số đúng sớm nhất có thể (TTL
     // là khoảng nghỉ TỐI THIỂU, lượt quét dài bao nhiêu còn tuỳ cache).
     double ttl = (g_espPasses < 3) ? 0.5 : ESP_CACHE_TTL;
+    // kernrw52d: khi provider degraded (task port fail, reads chậm), tăng TTL
+    // lên 3.0s để giảm tần suất scan (scan degraded chậm, không giúp gì).
+    if (ESPProviderIsDegraded()) ttl = (ttl < 3.0) ? 3.0 : ttl;
     if (now - g_espCheckedAt < ttl && g_espCheckedAt > 0) return;
     bool expected = false;
     if (!g_espScanning.compare_exchange_strong(expected, true)) {
@@ -1592,8 +1595,13 @@ static uint64_t ESPProcVMMap(uint64_t *outProc) {
 void ESPEngineDiscoverTick(uint64_t gameBase) {
     if (!gameBase || !ds_is_ready()) return;
     static CFAbsoluteTime s_last = 0;
+    // kernrw52d: adaptive discover interval — bắt đầu ESP_DISCOVER_INTERVAL,
+    // nếu 3 lượt liên tiếp không tìm thấy địch mới thì tăng lên 1.0s (giảm tải).
+    // Khi tìm thấy địch mới → reset về ESP_DISCOVER_INTERVAL.
+    static int s_emptyStreak = 0;
+    static double s_adaptiveInterval = ESP_DISCOVER_INTERVAL;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (s_last && now - s_last < ESP_DISCOVER_INTERVAL) return;
+    if (s_last && now - s_last < s_adaptiveInterval) return;
     s_last = now;
 
     uint64_t vmMap = ESPProcVMMap(NULL);
@@ -1803,6 +1811,17 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
                cls, unknownIdx.size(), unknownIdx.size() > (size_t)unknownTried
                    ? unknownIdx.size() - (size_t)unknownTried : 0,
                g_espTrackedCount);
+    }
+    // kernrw52d: adaptive interval — nếu không tìm thấy địch mới, tăng interval
+    // lên 1.0s (giảm tải). Khi tìm thấy → reset về ESP_DISCOVER_INTERVAL.
+    if (added > 0) {
+        s_emptyStreak = 0;
+        s_adaptiveInterval = ESP_DISCOVER_INTERVAL;
+    } else {
+        s_emptyStreak++;
+        if (s_emptyStreak >= 3) {
+            s_adaptiveInterval = 1.0; // 1s khi stable
+        }
     }
 }
 
