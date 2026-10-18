@@ -26,6 +26,15 @@
 // Vị trí actor giờ được đọc lại MỖI frame refresh: 60Hz mượt mà
 #define ESP_POS_READ_HZ 60
 
+// Bù trễ pipeline của HUD. Vị trí/camera đọc ở tick T chỉ hiện trên màn hình
+// sau khi qua present SpringBoard + 1 vsync, nên box vẽ đúng vị trí T sẽ nằm
+// SAU lưng địch/khung hình (log thực tế: "box trễ, không bám" khi địch chạy
+// hoặc khi lia camera). Cộng vận tốc * lead vào vị trí chiếu để box nằm đúng
+// chỗ địch SẼ ở đó lúc frame HUD hiện ra. 0.016 = 1 frame 60Hz; đây chỉ là bù
+// 1 frame nên không thể vọt xa (5m/s * 16ms = 8cm) và địch đứng yên thì
+// vận tốc = 0 nên box đứng yên. Máy present chậm (>25ms) có thể nâng lên 0.024.
+#define ESP_PREDICT_LEAD 0.016f
+
 // BULK-MAP: map nhiều page liền nhau trong 1 lần.
 #define ESP_BULK_MAP_ENABLED 1
 

@@ -2557,13 +2557,31 @@ static BOOL ESPTrackedPos(uint64_t vmMap, const ESPTrackedActor *tr, ESPVector *
 typedef struct {
     uint64_t actor;
     ESPVector pos;
-    ESPVector vel;   // cm/giây
+    ESPVector vel;   // cm/giây, đo trên baseline >= 80ms
+    ESPVector slowPos; // mốc đầu của baseline đo vận tốc
+    CFAbsoluteTime slowAt;
     CFAbsoluteTime at;
     int outliers;    // số mẫu bất thường liên tiếp (để tự hồi phục)
     int hpPct;       // 0-100 cho thanh máu, -1 chưa đọc (giữ mẫu cũ giữa các lần đọc thưa)
     BOOL valid;
 } ESPPosHist;
 static ESPPosHist s_posHist[ESP_POS_HIST];
+
+// Offset dự đoán = vận tốc * dt, KẸP BIÊN ĐỘ. Vận tốc đo trên baseline
+// ~80ms nên đã bền với vị trí cập nhật theo bước, nhưng một cú teleport nhỏ
+// dưới ngưỡng ESP_MAX_JUMP vẫn có thể cho vận tốc lớn; kẹp offset để box
+// không vọt xa rồi giật lùi. 40cm lớn hơn nhiều so với bù trễ 1 frame của
+// người chạy (5m/s * 16ms = 8cm) nên không cắt mất phần bù thật.
+static ESPVector ESPPredictOffset(const ESPVector *vel, float dt, float maxCm) {
+    if (!vel || !(dt > 0.0f)) return (ESPVector){0, 0, 0};
+    float ox = vel->x * dt, oy = vel->y * dt, oz = vel->z * dt;
+    float m = sqrtf(ox*ox + oy*oy + oz*oz);
+    if (m > maxCm && m > 0.0f) {
+        float s = maxCm / m;
+        ox *= s; oy *= s; oz *= s;
+    }
+    return (ESPVector){ox, oy, oz};
+}
 
 static ESPPosHist *ESPPosHistSlot(uint64_t actor) {
     ESPPosHist *h = &s_posHist[(size_t)((actor >> 4) % ESP_POS_HIST)];
@@ -2575,6 +2593,8 @@ static ESPPosHist *ESPPosHistSlot(uint64_t actor) {
     h->hpPct = -1;
     h->pos = (ESPVector){0, 0, 0};
     h->vel = (ESPVector){0, 0, 0};
+    h->slowPos = (ESPVector){0, 0, 0};
+    h->slowAt = 0;
     h->at = 0;
     return h;
 }
@@ -2763,7 +2783,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
     // x 4 read x 40Hz vẫn không đáng kể.
     //
     // Ngoại suy/blend vận tốc vẫn KHÔNG dùng (thứ từng làm box "đứng im rồi
-    // nhảy"); đọc đủ nhịp nên không cần ngoại suy.
+    // nhảy"); giờ chỉ bù ~1 frame chứ không ngoại suy cả khoảng đọc thưa.
     for (size_t i = 0; i < tracked.size() && n < maxBoxes; i++) {
         const ESPTrackedActor *tr = &tracked[i];
         CFAbsoluteTime nowF = CFAbsoluteTimeGetCurrent();
@@ -2782,51 +2802,95 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             }
         }
         ESPVector fresh = {0,0,0};
-        if (!ESPTrackedPos(vmMap, tr, &fresh)) { cPos++; h->valid = NO; continue; }
-        // Vận tốc = delta 2 mẫu gần nhất với bộ lọc EMA (Exponential Moving Average)
-        // để triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
+        BOOL gotPos = ESPTrackedPos(vmMap, tr, &fresh);
+        // Vận tốc đo trên baseline >= 80ms + EMA (xem nhánh bên dưới) để
+        // triệt tiêu velocity spike làm box vọt xa rồi giật lùi (rubber-banding).
         BOOL sampleReject = NO;
-        if (h->valid && h->at > 0) {
-            double ddt = nowF - h->at;
-            float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
-            float jump = sqrtf(dx*dx + dy*dy + dz*dz);
-            if (ddt > 0.001 && ddt < 1.0 && jump <= ESP_MAX_JUMP) {
-                ESPVector v = { dx / (float)ddt, dy / (float)ddt, dz / (float)ddt };
-                float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
-                if (sp > ESP_MAX_VEL) {
-                    float s = ESP_MAX_VEL / sp;
-                    v.x *= s; v.y *= s; v.z *= s;
-                }
-                if (h->vel.x != 0 || h->vel.y != 0 || h->vel.z != 0) {
-                    const float alphaVel = 0.45f;
-                    h->vel.x = h->vel.x * (1.0f - alphaVel) + v.x * alphaVel;
-                    h->vel.y = h->vel.y * (1.0f - alphaVel) + v.y * alphaVel;
-                    h->vel.z = h->vel.z * (1.0f - alphaVel) + v.z * alphaVel;
-                } else {
-                    h->vel = v;
-                }
-                h->outliers = 0;
-            } else {
-                // Mẫu bất thường (teleport/respawn): bỏ 1 frame rồi mới nhận.
-                h->vel = (ESPVector){0, 0, 0};
-                if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
-                    sampleReject = YES;
+        if (!gotPos) {
+            // Fail 1 frame KHÔNG bỏ box nữa: bridge đang giữ box cũ nên bỏ frame
+            // = box đứng im trong khi địch chạy, tới lúc đọc lại thì nhảy — đúng
+            // kiểu "giật, không bám". Còn mẫu cũ < 0.15s thì dead-reckon tiếp
+            // bằng vận tốc đã lọc; quá hạn mới coi như mất actor (bridge tự ẩn
+            // box theo grace 1.2s).
+            cPos++;
+            double age = (h->valid && h->at > 0) ? (nowF - h->at) : 999.0;
+            if (!h->valid || age > 0.15) {
+                h->valid = NO;
+                continue;
+            }
+            // Chỉ đuổi tối đa 50ms và kẹp 60cm để nhiễu đọc không đẩy box đi xa.
+            float step = (float)((age < 0.05) ? age : 0.05);
+            ESPVector off = ESPPredictOffset(&h->vel, step, 60.0f);
+            pos.x = h->pos.x + off.x;
+            pos.y = h->pos.y + off.y;
+            pos.z = h->pos.z + off.z;
+        } else {
+            if (h->valid && h->at > 0) {
+                double ddt = nowF - h->at;
+                float dx = fresh.x - h->pos.x, dy = fresh.y - h->pos.y, dz = fresh.z - h->pos.z;
+                float jump = sqrtf(dx*dx + dy*dy + dz*dz);
+                if (ddt <= 0.001 || ddt >= 1.0 || jump > ESP_MAX_JUMP) {
+                    // Teleport/respawn hoặc mẫu quá cũ: bỏ 1 frame rồi nhận lại,
+                    // xoá vận tốc + mốc đo để không ngoại suy theo quãng teleport.
+                    h->vel = (ESPVector){0, 0, 0};
+                    h->slowAt = 0;
+                    if (jump > ESP_MAX_JUMP && ++h->outliers < 2) {
+                        sampleReject = YES;
+                    } else {
+                        h->outliers = 0;
+                    }
                 } else {
                     h->outliers = 0;
+                    // Vận tốc đo trên baseline >= 80ms thay vì 2 tick liền kề.
+                    // Vị trí địch do game cập nhật theo bước (dồn gói mạng) thì
+                    // delta 1 tick có thể là 0 rồi 50cm -> vận tốc nhảy loạn,
+                    // box vọt rồi giật lùi. Đo trên 80ms thì một bước 50cm chỉ
+                    // làm vận tốc nhích nhẹ, box bám đều giữa 2 bước.
+                    if (h->slowAt <= 0) {
+                        h->slowPos = fresh;
+                        h->slowAt = nowF;
+                    } else {
+                        double sdt = nowF - h->slowAt;
+                        if (sdt >= 0.08) {
+                            ESPVector v = { (fresh.x - h->slowPos.x) / (float)sdt,
+                                            (fresh.y - h->slowPos.y) / (float)sdt,
+                                            (fresh.z - h->slowPos.z) / (float)sdt };
+                            float sp = sqrtf(v.x*v.x + v.y*v.y + v.z*v.z);
+                            if (sp > ESP_MAX_VEL) {
+                                float s = ESP_MAX_VEL / sp;
+                                v.x *= s; v.y *= s; v.z *= s;
+                            }
+                            if (h->vel.x != 0 || h->vel.y != 0 || h->vel.z != 0) {
+                                const float alphaVel = 0.5f;
+                                h->vel.x = h->vel.x * (1.0f - alphaVel) + v.x * alphaVel;
+                                h->vel.y = h->vel.y * (1.0f - alphaVel) + v.y * alphaVel;
+                                h->vel.z = h->vel.z * (1.0f - alphaVel) + v.z * alphaVel;
+                            } else {
+                                h->vel = v;
+                            }
+                            h->slowPos = fresh;
+                            h->slowAt = nowF;
+                        }
+                    }
                 }
+            } else {
+                h->vel = (ESPVector){0, 0, 0};
+                h->outliers = 0;
+                h->slowAt = 0;
             }
-        } else {
-            h->vel = (ESPVector){0, 0, 0};
-            h->outliers = 0;
-        }
-        h->at = nowF;
-        h->valid = YES;
-        if (sampleReject) {
-            pos = h->pos;      // giữ vị trí cũ cho frame này
-        } else {
-            // Đọc mỗi tick nên mẫu luôn tươi: theo thẳng vị trí mới.
-            h->pos = fresh;
-            pos = h->pos;
+            h->at = nowF;
+            h->valid = YES;
+            if (sampleReject) {
+                pos = h->pos;      // giữ vị trí cũ cho frame này
+            } else {
+                h->pos = fresh;
+                // Bù trễ present (xem ESP_PREDICT_LEAD): box nằm đúng chỗ địch
+                // sẽ ở đó lúc frame HUD hiện ra thay vì bám sau lưng.
+                ESPVector off = ESPPredictOffset(&h->vel, ESP_PREDICT_LEAD, 40.0f);
+                pos.x = fresh.x + off.x;
+                pos.y = fresh.y + off.y;
+                pos.z = fresh.z + off.z;
+            }
         }
         // HP cho thanh máu, cùng nhịp với vị trí (máu không cần ngoại suy).
         h->hpPct = ESPHPPercent(vmMap, tr->actor, tr->kind);

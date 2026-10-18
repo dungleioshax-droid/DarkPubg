@@ -170,6 +170,7 @@ static uint64_t g_espHpBG[ESPOverlayMaxBoxes] = {0};
 static uint64_t g_espHpFill[ESPOverlayMaxBoxes] = {0};
 static uint8_t g_espHpBand[ESPOverlayMaxBoxes]; // 0/1/2 = green/yellow/red, 0xFF = chưa track
 static uint32_t g_espHpFillH[ESPOverlayMaxBoxes]; // chiều cao fill x10 - dirty khi đổi
+static float g_espHpFrameH[ESPOverlayMaxBoxes]; // chiều cao box lúc set frame HP gần nhất (0 = chưa set)
 static BOOL g_espLabelShown[ESPOverlayMaxBoxes] = {0}; // kernrw51: label đang hiện? (cờ riêng vì label có hidden=1 riêng)
 static uint64_t g_dsRedColor = 0;       // kernrw49: cache 3 UIColor trên SpringBoard
 static uint64_t g_dsYellowColor = 0;
@@ -2224,6 +2225,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         g_espHpFill[k] = 0;
         g_espHpBand[k] = 0xFF;
         g_espHpFillH[k] = 0xFFFFFFFF;
+        g_espHpFrameH[k] = 0.0f;
     }
     g_dsRedColor = 0;
     g_dsYellowColor = 0;
@@ -2357,6 +2359,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         g_espHpFill[i] = 0;
         g_espHpBand[i] = 0xFF;
         g_espHpFillH[i] = 0xFFFFFFFF;
+        g_espHpFrameH[i] = 0.0f;
         g_espHpShown[i] = NO;
         if (hpColorOK) {
             uint64_t hfill = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
@@ -2378,6 +2381,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         g_espHpShown[i] = NO;
         g_espHpBand[i] = 0xFF;
         g_espHpFillH[i] = 0xFFFFFFFF;
+        g_espHpFrameH[i] = 0.0f;
 
     }
     ds_trace("esp ensure: %d box views built", ESPOverlayMaxBoxes);
@@ -2648,6 +2652,7 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                 g_espRectValid[i] = NO;
                 g_espLabelShown[i] = NO;
                 g_espHpShown[i] = NO;
+                g_espHpFrameH[i] = 0.0f; // hiện lại -> setFrame lại từ đầu
             }
         }
         if (hide) continue;
@@ -2702,21 +2707,35 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
             uint8_t band = (b.health < 30) ? 2 : (b.health < 60) ? 1 : 0;
             if (s_featHealth && fullBox.size.height >= 8.0f && fullBox.size.width >= 2.0f) {
                 CGFloat barW = 6.0f; CGFloat barPad = 4.0f;
-                if (boxMoved || !g_espRectValid[i] || b.health != g_espLastHp[i]) {
-                // 1 setFrame cho bg (chiều cao = box), 1 setFrame cho fill
-                // (chiều cao = box * health%): set TRỰC TIẾP từ fullBox làm
-                // fullBox đã map (chuyển landscape + mapOrient đủ).
-                // Bar to bên local? Về game: bar to bên trái box:
-                // Bar to beside box: gameRect (b.x - barW - barPad, b.y, barW, b.h).
-                // Fill: từ bottom (đáy box) đặt lên: height = b.h * pct/100.
-                CGFloat fillHGame = b.h * ((float)b.health) / 100.0f;
-                CGRect fillGame = CGRectMake(b.x - barW - barPad, b.y + b.h - fillHGame,
-                                             barW, fillHGame);
-                CGRect fillMap = ds_esp_map_rect(fillGame, landW, landH, winCenter, mapOrient);
-                CGRect fillLocal = CGRectMake(fillMap.origin.x - fullBox.origin.x,
-                                              fillMap.origin.y - fullBox.origin.y,
-                                              fillMap.size.width, fillMap.size.height);
-                ds_remote_set_rect_on_main(process, g_espHpFill[i], "setFrame:", fillLocal);
+                // HP fill là SUBVIEW của viền: viền chạy thì bar chạy theo MIỄN
+                // PHÍ. Frame local của bar chỉ phụ thuộc chiều cao box + % máu,
+                // nên chỉ cần setFrame khi 2 thứ đó đổi. Trước đây gate theo
+                // boxMoved -> mỗi frame địch chạy là thêm 1 IPC/box (8 box =
+                // 8 call main-thread/frame) chỉ để đặt lại đúng frame cũ, đẩy
+                // present vượt 16.7ms -> frame bị bỏ -> box trễ/giật.
+                BOOL hpFrameDirty = !g_espRectValid[i] || b.health != g_espLastHp[i];
+                if (!hpFrameDirty) {
+                    // So với chiều cao LÚC SET gần nhất (không phải frame trước):
+                    // box to/nhỏ dần từng 0.1pt/frame vẫn phải cập nhật, không
+                    // thì bar lệch dần khỏi đáy box.
+                    hpFrameDirty = (g_espHpFrameH[i] <= 0.0f) ||
+                                   (fabs(g_espHpFrameH[i] - fullBox.size.height) >= 0.5);
+                }
+                if (hpFrameDirty) {
+                    g_espHpFrameH[i] = (float)fullBox.size.height;
+                    // Bar nằm bên TRÁI box (hệ game), fill mọc từ ĐÁY box lên:
+                    // gameRect = (b.x - barW - barPad, b.y + b.h - fillH,
+                    //             barW, fillH), fillH = b.h * pct/100.
+                    // fillLocal = fill đã map về hệ container TRỪ gốc fullBox,
+                    // vì fill là subview của viền (toạ độ local của viền).
+                    CGFloat fillHGame = b.h * ((float)b.health) / 100.0f;
+                    CGRect fillGame = CGRectMake(b.x - barW - barPad, b.y + b.h - fillHGame,
+                                                 barW, fillHGame);
+                    CGRect fillMap = ds_esp_map_rect(fillGame, landW, landH, winCenter, mapOrient);
+                    CGRect fillLocal = CGRectMake(fillMap.origin.x - fullBox.origin.x,
+                                                  fillMap.origin.y - fullBox.origin.y,
+                                                  fillMap.size.width, fillMap.size.height);
+                    ds_remote_set_rect_on_main(process, g_espHpFill[i], "setFrame:", fillLocal);
                 }
                 uint8_t lastBand = g_espHpBand[i];
                 if (lastBand == 0xFF) lastBand = 0; // lần đầu coi như green
@@ -2736,11 +2755,13 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
                 // box quá nhỏ / toggle Health OFF / tọa độ lệch — ẩn bar
                 ds_remote_set_u64_on_main(process, g_espHpFill[i], "setHidden:", 1);
                 g_espHpShown[i] = NO;
+                g_espHpFrameH[i] = 0.0f;
             }
         } else if (g_espHpFill[i] && g_espHpShown[i]) {
             // health chưa đọc được (dưới -1) — ẩn bar
             ds_remote_set_u64_on_main(process, g_espHpFill[i], "setHidden:", 1);
             g_espHpShown[i] = NO;
+            g_espHpFrameH[i] = 0.0f;
         }
 
         // kernrw51: label hội tụ theo toggle ESP Name — cờ g_espLabelShown riêng
@@ -3007,7 +3028,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw53-60hz-red"
+#define DS_ESP_BUILD_TAG "kernrw54-latency"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3780,6 +3801,7 @@ static void ds_finish_disable(void) {
         g_espHpShown[i] = NO;
         g_espHpBand[i] = 0xFF;
         g_espHpFillH[i] = 0xFFFFFFFF;
+        g_espHpFrameH[i] = 0.0f;
     }
     s_espStaleCleaned = NO; // enable sau quét dọn lại từ đầu
     g_hudEnabledAt = 0; // tắt TRACE + settle delay của phiên cũ
