@@ -14,6 +14,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong) UIView *backgroundView;
 + (void)setShouldToggleHUDAfterLaunch:(BOOL)flag;
 - (void)reloadMainButtonState;
+- (BOOL)isHUDEnabled;
 @end
 
 NS_ASSUME_NONNULL_END
