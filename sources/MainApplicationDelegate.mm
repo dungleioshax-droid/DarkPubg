@@ -9,7 +9,7 @@
 #import "MainApplication.h"
 #import "RootViewController.h"
 #import "ESPSettingsViewController.h"
-#import "ESPSettingsViewController.h"
+#import "ESPSettingsViewController.mm"
 
 #import "HUDHelper.h"
 #import "DSBridge.h"
