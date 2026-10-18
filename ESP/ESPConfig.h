@@ -14,11 +14,11 @@
 // TTL này là độ trễ phụ của quét ĐẦY ĐỦ (re-validate verdict/address reuse).
 // Phát hiện địch MỚI không còn lệ thuộc TTL này — xem ESPEngineDiscoverTick
 // (phân loại riêng actor chưa biết mỗi ~120ms). TTL 0.8s chỉ là nhịp quét nền.
-#define ESP_CACHE_TTL 1.5 // quét nền 1.5s/lần — giảm tần suất full scan (trước 0.8s gây spike 59ms)
+#define ESP_CACHE_TTL 2.0 // quét nền 2.0s/lần — giảm tần suất full scan (kernrw52f)
 
 // Discover địch mới: khoảng (giây) giữa 2 lần + budget phân loại full/lần.
 // 0.12s ~= 8Hz; budget 16 actor unknown mỗi lượt (page cache warm thì ~vài ms).
-#define ESP_DISCOVER_INTERVAL 0.2 // khoảng (giây) giữa 2 lần discover — giảm tần suất scan enemy mới
+#define ESP_DISCOVER_INTERVAL 0.5 // khoảng (giây) giữa 2 lần discover — giảm tần suất scan (kernrw52f)
 // Budget unknown mỗi vòng: từ kernrw33 mỗi unknown quen chỉ tốn ~2 read
 // (fields window + VTable check, FName walk chỉ cho VTable lạ) nên nâng 16->48
 // để quét sạch ~100 unknown trong ~2 vòng (~0.24s) thay vì ~6 vòng (~0.8-2s).
