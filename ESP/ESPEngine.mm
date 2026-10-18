@@ -1376,7 +1376,9 @@ static NSString *ESPCacheText(void) {
     // Một lượt quét giờ đã phân loại hết actor, nên chỉ lượt đầu tiên mới cần
     // đánh dấu ~ (đang warmup) — lượt sau là số chính thức.
     if (g_espCachePasses < 2) {
+        return [NSString stringWithFormat:@"ESP: ~E%d", g_espStep];
     }
+    return [NSString stringWithFormat:@"ESP: E%d", g_espStep];
 }
 
 // Quét NHẸ đồng bộ (~15 lần đọc kernel): world -> level -> actors count.
@@ -2624,7 +2626,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             if (nowCam - s_lastStaleLog >= 2.0) {
                 s_lastStaleLog = nowCam;
                 // kernrw52g: bỏ log camStale (I/O)
-                       (double)(nowCam - s_lastCamAt));
             }
         } else {
             ESPBoxDiagSet("R camFail");
@@ -2876,7 +2877,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         box.nick[sizeof(box.nick) - 1] = '\0';
         outBoxes[n++] = box;
     }
-                  tracked.size(), (unsigned)cHid, (unsigned)cPos,
     if (tracked.size() > 0 && n == 0) {
         static CFAbsoluteTime s_lastZeroRefreshLog = 0;
         CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
