@@ -945,13 +945,6 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         [self appendLog:@"Yêu cầu đóng cửa sổ HUD Overlay..." type:@"STOP"];
     }
 
-#if USE_DARKSWORD
-    if (!isNowEnabled) {
-        [self showDSProgressOverlay];
-    } else {
-        [self hideDSProgressOverlay];
-    }
-#endif
     [self setHUDEnabled:!isNowEnabled];
     isNowEnabled = !isNowEnabled;
 
@@ -963,24 +956,21 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         notify_register_dispatch(NOTIFY_LAUNCHED_HUD, &anyToken, dispatch_get_main_queue(), ^(int token) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
             notify_cancel(token);
-#if USE_DARKSWORD
-            [strongSelf hideDSProgressOverlay];
-#endif
             [strongSelf->_impactFeedbackGenerator impactOccurred];
             [strongSelf reloadMainButtonState];
+            [strongSelf->_mainButton setUserInteractionEnabled:YES];
             [strongSelf.backgroundView setUserInteractionEnabled:YES];
             [strongSelf appendLog:@"HUD Overlay đã khởi tạo thành công" type:@"SUCCESS"];
         });
 
-        [self.backgroundView setUserInteractionEnabled:NO];
+        [_mainButton setUserInteractionEnabled:NO];
 #if USE_DARKSWORD
-        // DarkSword bootstrap can take minutes; the progress bar is the feedback.
-        // Do not auto re-enable after 5s — only success (notify) or failure
-        // (NOTIFY_RELOAD_APP) ends the busy state.
+        // DarkSword bootstrap runs in background; progress is displayed in terminal log.
 #else
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self reloadMainButtonState];
+                [self->_mainButton setUserInteractionEnabled:YES];
                 [self.backgroundView setUserInteractionEnabled:YES];
             });
         });
@@ -988,9 +978,10 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     }
     else
     {
-        [self.backgroundView setUserInteractionEnabled:NO];
+        [_mainButton setUserInteractionEnabled:NO];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self reloadMainButtonState];
+            [self->_mainButton setUserInteractionEnabled:YES];
             [self.backgroundView setUserInteractionEnabled:YES];
         });
     }
@@ -999,91 +990,36 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 #if USE_DARKSWORD
 - (void)showDSProgressOverlay
 {
-    if (!_dsProgressOverlay) {
-        UIView *overlay = [[UIView alloc] initWithFrame:self.view.bounds];
-        overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        overlay.backgroundColor = [UIColor colorWithWhite:0.28 alpha:0.96];
-
-        UIProgressView *bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleBar];
-        bar.translatesAutoresizingMaskIntoConstraints = NO;
-        bar.progressTintColor = [UIColor colorWithRed:26/255.0 green:188/255.0 blue:156/255.0 alpha:1.0];
-        bar.trackTintColor = [UIColor colorWithWhite:1.0 alpha:0.25];
-        bar.progress = 0.0;
-        [overlay addSubview:bar];
-
-        UILabel *label = [[UILabel alloc] init];
-        label.translatesAutoresizingMaskIntoConstraints = NO;
-        label.textColor = UIColor.whiteColor;
-        label.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.numberOfLines = 0;
-        label.lineBreakMode = NSLineBreakByWordWrapping;
-        label.text = [NSString stringWithFormat:@"%@\n0%%", NSLocalizedString(@"Initializing DarkSpeed", nil)];
-        [overlay addSubview:label];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [bar.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor constant:-12.0],
-            [bar.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:44.0],
-            [bar.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-44.0],
-            [bar.heightAnchor constraintEqualToConstant:4.0],
-            [label.topAnchor constraintEqualToAnchor:bar.bottomAnchor constant:18.0],
-            [label.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:28.0],
-            [label.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-28.0],
-            [label.bottomAnchor constraintLessThanOrEqualToAnchor:overlay.bottomAnchor constant:-40.0],
-        ]];
-        _dsProgressOverlay = overlay;
-        _dsProgressBar = bar;
-        _dsProgressLabel = label;
-    }
-
-    if (!_dsProgressOverlay.superview) [self.view addSubview:_dsProgressOverlay];
-    [self.view bringSubviewToFront:_dsProgressOverlay];
-    _dsProgressOverlay.hidden = NO;
-    _dsProgressBar.progressTintColor = [UIColor colorWithRed:26/255.0 green:188/255.0 blue:156/255.0 alpha:1.0];
-    _dsProgressBar.progress = 0.0;
-    _dsProgressLabel.numberOfLines = 0;
-    _dsProgressLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    _dsProgressLabel.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
-    _dsProgressLabel.textAlignment = NSTextAlignmentCenter;
-    _dsProgressLabel.text = [NSString stringWithFormat:@"%@\n0%%", NSLocalizedString(@"Initializing DarkSpeed", nil)];
+    // Bỏ popup overlay toàn màn hình theo yêu cầu người dùng.
+    // Tiến trình được hiển thị trực tiếp tại live terminal log bên dưới.
 }
 
 - (void)hideDSProgressOverlay
 {
-    _dsProgressOverlay.hidden = YES;
+    if (_dsProgressOverlay) {
+        _dsProgressOverlay.hidden = YES;
+    }
 }
 
 - (void)showDSFailure:(NSString *)error
 {
-    if (!_dsProgressOverlay) [self showDSProgressOverlay];
-    if (!_dsProgressOverlay.superview) [self.view addSubview:_dsProgressOverlay];
-    [self.view bringSubviewToFront:_dsProgressOverlay];
-    _dsProgressOverlay.hidden = NO;
-    _dsProgressBar.progress = 1.0f;
-    _dsProgressBar.progressTintColor = UIColor.systemRedColor;
-    _dsProgressLabel.numberOfLines = 0;
-    _dsProgressLabel.lineBreakMode = NSLineBreakByWordWrapping;
-    _dsProgressLabel.font = [UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular];
-    _dsProgressLabel.textAlignment = NSTextAlignmentLeft;
-    _dsProgressLabel.text = [NSString stringWithFormat:@"%@\n\n%@",
-        NSLocalizedString(@"DarkSpeed initialization failed", nil),
-        error.length > 0 ? error : NSLocalizedString(@"Unknown error", nil)];
+    NSString *msg = error.length > 0 ? error : NSLocalizedString(@"Unknown error", nil);
+    [self appendLog:[NSString stringWithFormat:@"Khởi tạo DarkSpeed thất bại: %@", msg] type:@"ERROR"];
+    [_mainButton setUserInteractionEnabled:YES];
+    [self.backgroundView setUserInteractionEnabled:YES];
+    [self reloadMainButtonState];
 }
 
 - (void)dsProgressDidChange:(NSNotification *)note
 {
     if (!DSBridgeIsRunning()) {
-        // Done or failed — only auto-hide on success; error hides via NOTIFY_RELOAD_APP.
-        if (DSBridgeHUDEnabled()) [self hideDSProgressOverlay];
         return;
     }
     double p = DSBridgeProgress();
     if (p < 0.0) p = 0.0;
     if (p > 1.0) p = 1.0;
-    _dsProgressBar.progress = (float)p;
     NSString *stage = DSBridgeStage();
     if (stage.length == 0) stage = NSLocalizedString(@"Initializing DarkSpeed", nil);
-    _dsProgressLabel.text = [NSString stringWithFormat:@"%@\n%d%%", stage, (int)llround(p * 100.0)];
     [self appendLog:[NSString stringWithFormat:@"%@ (%d%%)", stage, (int)llround(p * 100.0)] type:@"LOAD"];
 }
 #endif

@@ -123,8 +123,7 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
     self.title = @"Cài đặt";
 
     self.sectionTitles = @[
-        @"TÍNH NĂNG HIỂN THỊ (OVERLAY)",
-        @"CỬA SỔ & HỆ THỐNG"
+        @"TÍNH NĂNG HIỂN THỊ (OVERLAY)"
     ];
 
     NSArray *espItems = @[
@@ -170,34 +169,7 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
         }
     ];
 
-    NSArray *systemItems = @[
-        @{
-            @"title": @"Xuyên cảm ứng (Pass-through)",
-            @"subtitle": @"Không bị cản trở khi bấm phím trong game",
-            @"key": HUDUserDefaultsKeyPassthroughMode,
-            @"default": @NO,
-            @"icon": @"hand.tap.fill",
-            @"iconColor": [UIColor colorWithRed:129/255.0 green:140/255.0 blue:248/255.0 alpha:1.0]
-        },
-        @{
-            @"title": @"Cố định vị trí (Keep In-place)",
-            @"subtitle": @"Khóa vị trí menu không cho kéo di chuyển",
-            @"key": HUDUserDefaultsKeyKeepInPlace,
-            @"default": @NO,
-            @"icon": @"pin.fill",
-            @"iconColor": [UIColor colorWithRed:251/255.0 green:146/255.0 blue:60/255.0 alpha:1.0]
-        },
-        @{
-            @"title": @"Ẩn khi quay/chụp (Hide @snapshot)",
-            @"subtitle": @"Chống chụp màn hình hoặc quay video lộ ESP",
-            @"key": HUDUserDefaultsKeyHideAtSnapshot,
-            @"default": @NO,
-            @"icon": @"eye.slash.fill",
-            @"iconColor": [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0]
-        }
-    ];
-
-    self.sectionItems = @[espItems, systemItems];
+    self.sectionItems = @[espItems];
 
     self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStyleInsetGrouped];
     self.tableView.backgroundColor = [UIColor clearColor];

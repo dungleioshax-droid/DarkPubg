@@ -1376,9 +1376,9 @@ static NSString *ESPCacheText(void) {
     // Một lượt quét giờ đã phân loại hết actor, nên chỉ lượt đầu tiên mới cần
     // đánh dấu ~ (đang warmup) — lượt sau là số chính thức.
     if (g_espCachePasses < 2) {
-        return [NSString stringWithFormat:@"ESP: ~E%d", g_espStep];
+        return [NSString stringWithFormat:@"%u Địch (~)", (unsigned)g_espCache.playerLike];
     }
-    return [NSString stringWithFormat:@"ESP: E%d", g_espStep];
+    return [NSString stringWithFormat:@"%u Địch", (unsigned)g_espCache.playerLike];
 }
 
 // Quét NHẸ đồng bộ (~15 lần đọc kernel): world -> level -> actors count.

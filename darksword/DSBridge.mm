@@ -872,7 +872,11 @@ NSString *DSBridgeESPStatus(void) {
 
 uint32_t DSBridgeESPCount(void) {
 #if USE_DARKSWORD
-    if (!g_gameBase || !ds_is_ready()) return 0;
+    if (!ds_is_ready()) return 0;
+    NSDictionary *prefs = nil;
+    @try { prefs = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+    ds_ensure_game_base(prefs);
+    if (!g_gameBase) return 0;
     @try {
         return ESPEnginePlayerCount(g_gameBase);
     } @catch (__unused NSException *e) {

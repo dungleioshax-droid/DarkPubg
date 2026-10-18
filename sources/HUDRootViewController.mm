@@ -97,34 +97,74 @@ static void SpringBoardLockStatusChanged
 #define UPDATE_INTERVAL 1.0
 #define IDLE_INTERVAL 3.0
 
-static const double HUD_FONT_SIZE_DEFAULT = 9.0;
-static const double HUD_MIN_CORNER_RADIUS = 8.0;
+static const double HUD_FONT_SIZE_DEFAULT = 13.0;
+static const double HUD_MIN_CORNER_RADIUS = 10.0;
 static double HUD_FONT_SIZE = HUD_FONT_SIZE_DEFAULT;
 static CGFloat HUD_INACTIVE_OPACITY = 0.667;
 static uint8_t HUD_SHOW_ESP_BOX = 0; // 0=hide, 1=show ESP status
-
-static NSString *legacyESPLine(void)
-{
-    if (!HUD_SHOW_ESP_BOX) return nil;
-    NSString *status = nil;
-    @try {
-        status = DSBridgeESPStatus();
-    } @catch (__unused NSException *e) {
-        status = nil;
-    }
-    if (status.length == 0) status = @"ESP: --";
-    return status;
-}
 
 static NSAttributedString *formattedNSAttributedString(BOOL __unused isFocused)
 {
     @autoreleasepool
     {
-        NSString *espLine = legacyESPLine();
-        if (!espLine) return nil;
-        return [[NSAttributedString alloc] initWithString:espLine attributes:@{
-            NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightRegular]
+        if (!HUD_SHOW_ESP_BOX) return nil;
+
+        uint32_t count = 0;
+        @try {
+            count = DSBridgeESPCount();
+        } @catch (__unused NSException *e) {
+            count = 0;
+        }
+
+        NSString *status = nil;
+        @try {
+            status = DSBridgeESPStatus();
+        } @catch (__unused NSException *e) {
+            status = nil;
+        }
+
+        if (!status || status.length == 0) return nil;
+
+        BOOL isWaiting = ([status containsString:@"wait"] || [status containsString:@"--"]);
+
+        NSMutableAttributedString *attributedString = [[NSMutableAttributedString alloc] init];
+
+        UIFont *iconFont = [UIFont systemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightBold];
+        UIFont *countFont = [UIFont monospacedDigitSystemFontOfSize:HUD_FONT_SIZE + 2 weight:UIFontWeightHeavy];
+        UIFont *labelFont = [UIFont systemFontOfSize:HUD_FONT_SIZE weight:UIFontWeightBold];
+
+        // Biểu tượng tâm ngắm
+        NSAttributedString *iconAttr = [[NSAttributedString alloc] initWithString:@"🎯 " attributes:@{
+            NSFontAttributeName: iconFont,
+            NSForegroundColorAttributeName: [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0]
         }];
+        [attributedString appendAttributedString:iconAttr];
+
+        if (isWaiting && count == 0) {
+            NSAttributedString *waitAttr = [[NSAttributedString alloc] initWithString:@"-- ĐỊCH" attributes:@{
+                NSFontAttributeName: labelFont,
+                NSForegroundColorAttributeName: [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0]
+            }];
+            [attributedString appendAttributedString:waitAttr];
+        } else {
+            // Số lượng địch: Màu đỏ nổi bật nếu có địch, màu xanh ngọc nếu an toàn (0 địch)
+            UIColor *numColor = (count > 0) ? [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0]
+                                            : [UIColor colorWithRed:16/255.0 green:185/255.0 blue:129/255.0 alpha:1.0];
+
+            NSAttributedString *countAttr = [[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"%u", (unsigned)count] attributes:@{
+                NSFontAttributeName: countFont,
+                NSForegroundColorAttributeName: numColor
+            }];
+            [attributedString appendAttributedString:countAttr];
+
+            NSAttributedString *textAttr = [[NSAttributedString alloc] initWithString:@" ĐỊCH" attributes:@{
+                NSFontAttributeName: labelFont,
+                NSForegroundColorAttributeName: [UIColor whiteColor]
+            }];
+            [attributedString appendAttributedString:textAttr];
+        }
+
+        return attributedString;
     }
 }
 
@@ -443,6 +483,10 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     NSAttributedString *attributedText = formattedNSAttributedString(_isFocused);
     if (attributedText) {
         [_speedLabel setAttributedText:attributedText];
+        _blurView.hidden = NO;
+    } else {
+        [_speedLabel setAttributedText:[[NSAttributedString alloc] initWithString:@""]];
+        _blurView.hidden = YES;
     }
     [_speedLabel sizeToFit];
 }
@@ -461,6 +505,9 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     _blurView = [[UIVisualEffectView alloc] initWithEffect:_blurEffect];
     _blurView.layer.cornerRadius = HUD_MIN_CORNER_RADIUS;
     _blurView.layer.masksToBounds = YES;
+    _blurView.layer.borderWidth = 1.0;
+    _blurView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:0.8].CGColor;
+    _blurView.backgroundColor = [UIColor colorWithRed:13/255.0 green:15/255.0 blue:20/255.0 alpha:0.85];
     _blurView.translatesAutoresizingMaskIntoConstraints = NO;
     _containerView = [[ScreenshotInvisibleContainer alloc] initWithContent:_blurView];
     _containerView.hiddenContainer.translatesAutoresizingMaskIntoConstraints = NO;
@@ -673,10 +720,10 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     }
 
     [_constraints addObjectsFromArray:@[
-        [_blurView.topAnchor constraintEqualToAnchor:_speedLabel.topAnchor constant:-2],
-        [_blurView.leadingAnchor constraintEqualToAnchor:_speedLabel.leadingAnchor constant:-4],
-        [_blurView.trailingAnchor constraintEqualToAnchor:_speedLabel.trailingAnchor constant:4],
-        [_blurView.bottomAnchor constraintEqualToAnchor:_speedLabel.bottomAnchor constant:2],
+        [_blurView.topAnchor constraintEqualToAnchor:_speedLabel.topAnchor constant:-5],
+        [_blurView.leadingAnchor constraintEqualToAnchor:_speedLabel.leadingAnchor constant:-12],
+        [_blurView.trailingAnchor constraintEqualToAnchor:_speedLabel.trailingAnchor constant:12],
+        [_blurView.bottomAnchor constraintEqualToAnchor:_speedLabel.bottomAnchor constant:5],
     ]];
 
     [_constraints addObjectsFromArray:@[
