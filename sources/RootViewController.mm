@@ -118,6 +118,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [self.view addSubview:self.backgroundView];
 
     UILayoutGuide *safeArea = self.backgroundView.safeAreaLayoutGuide;
+    _mainButton = [MainButton buttonWithType:UIButtonTypeSystem];
     [_mainButton setTintColor:[UIColor whiteColor]];
     [_mainButton addTarget:self action:@selector(tapMainButton:) forControlEvents:UIControlEventTouchUpInside];
     if (@available(iOS 15.0, *))
