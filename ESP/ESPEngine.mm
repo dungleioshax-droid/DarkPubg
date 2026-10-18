@@ -2940,25 +2940,32 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         box.nick[sizeof(box.nick) - 1] = '\0';
         outBoxes[n++] = box;
     }
+    static CFAbsoluteTime s_zeroSince = 0;       // bắt đầu chuỗi 0 box (0 = đang có box)
+    static CFAbsoluteTime s_lastRescueFlush = 0; // lần xả region map gần nhất
     if (tracked.size() > 0 && n == 0) {
         static CFAbsoluteTime s_lastZeroRefreshLog = 0;
         CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
-        if (nowLog - s_lastZeroRefreshLog >= 2.0) {
+        if (s_zeroSince <= 0) s_zeroSince = nowLog;
+        if (nowLog - s_lastZeroRefreshLog >= 1.0) {
             s_lastZeroRefreshLog = nowLog;
-            // CHỈ xả cache khi ĐỌC VỊ TRÍ THẤT BẠI (pos>0) — lúc đó mới nghi
-            // mapping héo/hết memory entry.
-            //
-            // KHÔNG xả khi chỉ w2s>0 (project bị từ chối): w2s là lỗi TOÁN, không
-            // phải lỗi đọc. Bản smooth3 xả ở đây nên cứ ~2s lại quét sạch 130+
-            // page của actor, lượt quét đầy đủ sau đó phải map lại từ đầu -> 5.0s
-            // (log smooth3: `win=132/6 dt=5.0s`), và ĐÓ chính là độ trễ 5-6s để
-            // địch mới hiện box.
-            // IfIdle: không chờ mutex đọc (scan nền có thể đang map page) — flush
-            // blocking từng làm tick vẽ treo (log: box perf max=1425ms).
-            BOOL didFlush = NO;
-            if (cPos > 0) didFlush = ESPMemoryFlushPageCacheIfIdle();
-            // kernrw52g: bỏ log REFRESH-ZERO (I/O mỗi tick)
+            // Chẩn đoán 1 dòng/giây (log này từng bị bỏ vì sợ I/O mỗi tick).
+            // Khi box tắt, đây là manh mối duy nhất: trk>0 mà pos/w2s tăng =
+            // lỗi đọc/lỗi chiếu; tất cả = 0 = tracked rỗng hoặc actor bị lọc.
+            ESPLog("REFRESH-ZERO trk=%zu hid=%u pos=%u w2s=%u self=%u h=%u cam=%.0f/%.0f fov=%.0f",
+                   tracked.size(), cHid, cPos, cW2s, cSelf, cH,
+                   cam.rotation.yaw, cam.rotation.pitch, cam.fov);
+            // CHỈ xả region map khi 0 box + LỖI ĐỌC VỊ TRÍ kéo dài >= 5s, tối đa
+            // 1 lần/30s. Bản trước xả mỗi 2s ngay khi có 1 read fail: trên máy
+            // không có task port, xả = mọi page phải map lại qua kernel trong
+            // khi scan nền đang giữ read lock -> tick 135-919ms, box đứng/tắt
+            // hàng chục giây (đúng log người dùng 2026-10-18).
+            if (cPos > 0 && nowLog - s_zeroSince >= 5.0 && nowLog - s_lastRescueFlush >= 30.0) {
+                s_lastRescueFlush = nowLog;
+                ESPMemoryFlushPageCacheIfIdle();
+            }
         }
+    } else if (n > 0) {
+        s_zeroSince = 0; // có box lại -> chuỗi 0 box kết thúc
     }
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);

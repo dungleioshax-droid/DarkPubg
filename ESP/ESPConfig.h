@@ -13,8 +13,15 @@
 //
 // TTL này là độ trễ phụ của quét ĐẦY ĐỦ (re-validate verdict/address reuse).
 // Phát hiện địch MỚI không còn lệ thuộc TTL này — xem ESPEngineDiscoverTick
-// (phân loại riêng actor chưa biết mỗi ~120ms). TTL 0.8s chỉ là nhịp quét nền.
-#define ESP_CACHE_TTL 1.0 // quét nền 1.0s/lần — cập nhật actor nhanh chóng (tối ưu mượt mà)
+// (phân loại riêng actor chưa biết mỗi ~250ms). TTL chỉ là nhịp quét nền.
+//
+// 3.0s (kernrw55): log thực tế trên máy KHÔNG lấy được task port (Esign) cho
+// thấy quét đầy đủ 1Hz + region-map làm tick refresh bị chặn 135-919ms
+// (box perf tick max=919.7ms) và box tắt hàng chục giây. Vị trí box đọc mỗi
+// tick ở ESPEngineRefreshBoxes nên TTL không làm box chậm; nó chỉ làm việc
+// phân loại lại actor (verdict/address reuse) thưa hơn — đổi 1s -> 3s là
+// giảm 2/3 số cú giật do scan.
+#define ESP_CACHE_TTL 3.0 // quét nền 3s/lần khi không có task port (xem trên)
 
 // Discover địch mới: khoảng (giây) giữa 2 lần + budget phân loại full/lần.
 #define ESP_DISCOVER_INTERVAL 0.25 // 250ms — phát hiện địch mới ngay lập tức
