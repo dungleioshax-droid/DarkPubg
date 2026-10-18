@@ -58,6 +58,8 @@ import UIKit
             return "person.text.rectangle"
         case .espShowHealth:
             return "heart.fill"
+        case .espShowDistance:
+            return "ruler"
         }
     }
 

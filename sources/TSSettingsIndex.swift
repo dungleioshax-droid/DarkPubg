@@ -18,6 +18,7 @@ enum TSSettingsIndex: Int, CaseIterable {
     case espShowLine
     case espShowName
     case espShowHealth
+    case espShowDistance
 
     var key: String {
         switch self {
@@ -35,6 +36,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return HUDUserDefaultsKeyESPShowName
         case .espShowHealth:
             return HUDUserDefaultsKeyESPShowHealth
+        case .espShowDistance:
+            return HUDUserDefaultsKeyESPShowDistance
         }
     }
 
@@ -54,6 +57,8 @@ enum TSSettingsIndex: Int, CaseIterable {
             return NSLocalizedString("ESP Name", comment: "TSSettingsIndex")
         case .espShowHealth:
             return NSLocalizedString("ESP Health", comment: "TSSettingsIndex")
+        case .espShowDistance:
+            return NSLocalizedString("ESP Distance", comment: "TSSettingsIndex")
         }
     }
 
@@ -71,7 +76,8 @@ enum TSSettingsIndex: Int, CaseIterable {
         case .showESPBox: fallthrough
         case .espShowLine: fallthrough
         case .espShowName: fallthrough
-        case .espShowHealth:
+        case .espShowHealth: fallthrough
+        case .espShowDistance:
             return highlighted ? NSLocalizedString("ON", comment: "TSSettingsIndex") : NSLocalizedString("OFF", comment: "TSSettingsIndex")
         }
     }

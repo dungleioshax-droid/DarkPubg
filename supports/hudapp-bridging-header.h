@@ -37,6 +37,7 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyShowESPBox = @"showESPBox";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowLine = @"espShowLine";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowName = @"espShowName";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowHealth = @"espShowHealth";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowDistance = @"espShowDistance";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";
