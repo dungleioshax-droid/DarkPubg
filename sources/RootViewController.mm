@@ -103,18 +103,6 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     self.backgroundView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.backgroundView.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
 
-    _backgroundGradient = [CAGradientLayer layer];
-    _backgroundGradient.colors = @[
-        (id)[UIColor colorWithRed:12/255.0 green:18/255.0 blue:40/255.0 alpha:1.0].CGColor,
-        (id)[UIColor colorWithRed:8/255.0 green:48/255.0 blue:72/255.0 alpha:1.0].CGColor,
-        (id)[UIColor colorWithRed:14/255.0 green:92/255.0 blue:110/255.0 alpha:1.0].CGColor
-    ];
-    _backgroundGradient.locations = @[@0.0, @0.55, @1.0];
-    _backgroundGradient.startPoint = CGPointMake(0.0, 0.0);
-    _backgroundGradient.endPoint = CGPointMake(1.0, 1.0);
-    _backgroundGradient.frame = bounds;
-    [self.backgroundView.layer insertSublayer:_backgroundGradient atIndex:0];
-
     [self.view addSubview:self.backgroundView];
 
     UILayoutGuide *safeArea = self.backgroundView.safeAreaLayoutGuide;
@@ -150,27 +138,6 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [NSLayoutConstraint activateConstraints:@[
         [_mainButton.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
         [_mainButton.centerYAnchor constraintEqualToAnchor:self.backgroundView.centerYAnchor],
-    ]];
-
-    _settingsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [_settingsButton setTintColor:[UIColor whiteColor]];
-    [_settingsButton addTarget:self action:@selector(tapSettingsButton:) forControlEvents:UIControlEventTouchUpInside];
-    [_settingsButton setImage:[UIImage systemImageNamed:@"gear"] forState:UIControlStateNormal];
-    [self.backgroundView addSubview:_settingsButton];
-    if (@available(iOS 15.0, *))
-    {
-        UIButtonConfiguration *config = [UIButtonConfiguration tintedButtonConfiguration];
-        [config setCornerStyle:UIButtonConfigurationCornerStyleLarge];
-        config.baseBackgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
-        config.baseForegroundColor = [UIColor whiteColor];
-        [_settingsButton setConfiguration:config];
-    }
-    [_settingsButton setTranslatesAutoresizingMaskIntoConstraints:NO];
-    [NSLayoutConstraint activateConstraints:@[
-        [_settingsButton.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor constant:-20.0f],
-        [_settingsButton.centerXAnchor constraintEqualToAnchor:safeArea.centerXAnchor],
-        [_settingsButton.widthAnchor constraintEqualToConstant:40.0f],
-        [_settingsButton.heightAnchor constraintEqualToConstant:40.0f],
     ]];
 
     _authorLabel = [[UILabel alloc] init];

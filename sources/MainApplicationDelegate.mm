@@ -8,6 +8,8 @@
 #import "MainApplicationDelegate.h"
 #import "MainApplication.h"
 #import "RootViewController.h"
+#import "ESPSettingsViewController.h"
+#import "ESPSettingsViewController.h"
 
 #import "HUDHelper.h"
 #import "DSBridge.h"
@@ -67,15 +69,12 @@
     _rootViewController.title = @"Home";
     _rootViewController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Home" image:[UIImage systemImageNamed:@"house.fill"] selectedImage:[UIImage systemImageNamed:@"house.fill"]];
 
-    // Settings tab: hosts TSSettingsController inline
-    UIViewController *settingsHost = [[UIViewController alloc] init];
-    settingsHost.title = @"Settings";
-    settingsHost.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Settings" image:[UIImage systemImageNamed:@"gear"] selectedImage:[UIImage systemImageNamed:@"gear"]];
-    settingsHost.view.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
+    ESPSettingsViewController *settingsViewController = [[ESPSettingsViewController alloc] init];
+    settingsViewController.title = @"Settings";
+    settingsViewController.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Settings" image:[UIImage systemImageNamed:@"gear"] selectedImage:[UIImage systemImageNamed:@"gear"]];
 
     UITabBarController *tabBarController = [[UITabBarController alloc] init];
-    tabBarController.viewControllers = @[_rootViewController, settingsHost];
-    tabBarController.delegate = self;
+    tabBarController.viewControllers = @[_rootViewController, settingsViewController];
 
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     self.window.backgroundColor = [UIColor colorWithRed:8/255.0 green:12/255.0 blue:24/255.0 alpha:1.0];
@@ -86,23 +85,6 @@
     DSBridgeWarmUpNetworkAndPrefetchKernelCache();
 
     return YES;
-}
-
-- (void)tabBarController:(UITabBarController *)tabBarController didSelectViewController:(UIViewController *)viewController {
-    if (viewController != _rootViewController) {
-        TSSettingsController *settingsViewController = [[TSSettingsController alloc] init];
-        settingsViewController.delegate = _rootViewController;
-        settingsViewController.alreadyLaunched = [_rootViewController isHUDEnabled];
-
-        SPLarkTransitioningDelegate *transitioningDelegate = [[SPLarkTransitioningDelegate alloc] init];
-        settingsViewController.transitioningDelegate = transitioningDelegate;
-        settingsViewController.modalPresentationStyle = UIModalPresentationCustom;
-        settingsViewController.modalPresentationCapturesStatusBarAppearance = YES;
-
-        [tabBarController presentViewController:settingsViewController animated:YES completion:^{
-            tabBarController.selectedIndex = 0;
-        }];
-    }
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
