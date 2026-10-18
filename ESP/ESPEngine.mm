@@ -1220,7 +1220,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
            (unsigned)winFail, (unsigned)nVt, (unsigned)nName, (unsigned)nDummyName,
            (unsigned)nChar, (unsigned)nDummySig, (unsigned)nNo,
            (unsigned)nFiltered, (unsigned)nCached, (unsigned)nearChar,
-           (unsigned)nearDummy,
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -1265,7 +1264,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         char buf[512] = {0};
         int bl = 0;
         for (size_t i = 0; i < vts.size() && i < 8; i++) {
-                           (unsigned long long)vts[i].first, (unsigned)vts[i].second);
             if (bl > (int)sizeof(buf) - 32) break;
         }
         uint64_t pawnVtCopy = 0;
@@ -1365,7 +1363,6 @@ void ESPEngineRequestScan(uint64_t gameBase) {
             g_espLastScanDummies = r.world ? (int)r.dummyLike : -1;
             g_espTrackedCount = (int)g_espTracked.size();
             // kernrw52g: bỏ log scan finished (I/O) g_espLastScanSeconds,
-                   g_espLastScanEnemies, g_espStep);
         }
         g_espScanStart = 0;
         g_espScanning.store(false);
