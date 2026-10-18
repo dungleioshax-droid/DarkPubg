@@ -1216,7 +1216,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.samplePos = samplePos;
     r.hasSamplePos = hasPos;
     // kernrw52g: bỏ log scan done (I/O mỗi scan)
-           (unsigned)enemies, (unsigned)dummies, (unsigned)r.scanned, (unsigned)winOK,
 
     // GNames/UEtTÊN: chỉ quét khi CHƯA có địch nào. Đã có địch nhờ VTable thì
     // bỏ hẳn — ESPResolveUName tốn ~11s ở lượt đầu mà ra 0x0, và quét nền giữ
@@ -2025,14 +2024,8 @@ const char *ESPEngineBoxPerfText(void) {
     uint64_t dDead = deadDrops - g_perfLastDead;
     g_perfLastDead = deadDrops;
     if (g_perfN > 0) {
-        snprintf(g_perfBuf, sizeof(g_perfBuf),
-                 g_perfN, g_perfSumProc / (double)g_perfN, g_perfSumCam / (double)g_perfN,
-                 g_perfSumAct / (double)g_perfN,
-                 (g_perfSumProc + g_perfSumCam + g_perfSumAct) / (double)g_perfN, g_perfMaxMs,
-                 (unsigned long long)dHit, (unsigned long long)dMiss,
-                 (unsigned long long)dTask, (unsigned long long)dKernel,
-                 (unsigned long long)dChunkMaps, (unsigned long long)dChunkPages,
-                 (unsigned long long)chunkFails, (unsigned long long)dDead);
+        // kernrw52g: bỏ perf snprintf chi tiết (I/O), chỉ giữ n/a
+        snprintf(g_perfBuf, sizeof(g_perfBuf), "n=%d", g_perfN);
     } else {
         snprintf(g_perfBuf, sizeof(g_perfBuf),
                  "n=0 cache(h=%llu m=%llu) read(t=%llu k=%llu) chunk(m=%llu p=%llu f=%llu) dead=%llu",
@@ -2475,7 +2468,6 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         outBoxes[n++] = box;
     }
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
-                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     ESPPerfSample((tProc - tBox0) * 1000.0, (tCam - tProc) * 1000.0,
                   (CFAbsoluteTimeGetCurrent() - tCam) * 1000.0);
     if (!foundTracked.empty()) {
@@ -2705,7 +2697,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                             if (nowC - s_lastFlashOkLog >= 1.0) {
                                 s_lastFlashOkLog = nowC;
                                 // kernrw52g: bỏ log camFlash OK (I/O)
-                                       dYaw);
                             }
                         } else {
                             float dYraw = fabsf(camR.rotation.yaw - s_lastCam.rotation.yaw);
@@ -2886,7 +2877,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         outBoxes[n++] = box;
     }
                   tracked.size(), (unsigned)cHid, (unsigned)cPos,
-                  (unsigned)cW2s, (unsigned)cSelf, (unsigned)cH, n);
     if (tracked.size() > 0 && n == 0) {
         static CFAbsoluteTime s_lastZeroRefreshLog = 0;
         CFAbsoluteTime nowLog = CFAbsoluteTimeGetCurrent();
