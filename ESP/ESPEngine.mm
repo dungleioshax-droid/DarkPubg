@@ -2567,6 +2567,39 @@ typedef struct {
 } ESPPosHist;
 static ESPPosHist s_posHist[ESP_POS_HIST];
 
+// --- Ring actor vừa chết/ẩn (refresh phát hiện) ---
+// Bridge cố ý giữ box cũ tới 1.2s khi 1 frame hụt w2s (chống nháy khi lia
+// camera). Nhưng khi địch CHẾT, engine bỏ actor khỏi danh sách box ngay từ
+// tick đó, còn bridge vẫn vẽ box đứng yên ở chỗ chết thêm 1.2s — đúng kiểu
+// "địch chết mà box còn hiện một lúc". Ring này để bridge biết actor đã chết
+// và bỏ slot tức thì. Ghi/đọc ít (chỉ lúc chết + lúc slot stale) nên mutex
+// riêng là đủ, không đụng g_espClassifyMutex của scan nền.
+#define ESP_GONE_RING 64
+#define ESP_GONE_TTL 5.0
+static uint64_t s_goneActor[ESP_GONE_RING];
+static CFAbsoluteTime s_goneAt[ESP_GONE_RING];
+static int s_goneNext = 0;
+static std::mutex s_goneMutex;
+
+static void ESPMarkActorGone(uint64_t actor) {
+    if (!actor) return;
+    std::lock_guard<std::mutex> lk(s_goneMutex);
+    s_goneActor[s_goneNext] = actor;
+    s_goneAt[s_goneNext] = CFAbsoluteTimeGetCurrent();
+    s_goneNext = (s_goneNext + 1) % ESP_GONE_RING;
+}
+
+BOOL ESPEngineActorGone(uint64_t actor, double withinSec) {
+    if (!actor) return NO;
+    if (!(withinSec > 0)) withinSec = ESP_GONE_TTL;
+    std::lock_guard<std::mutex> lk(s_goneMutex);
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    for (int i = 0; i < ESP_GONE_RING; i++) {
+        if (s_goneActor[i] == actor && now - s_goneAt[i] <= withinSec) return YES;
+    }
+    return NO;
+}
+
 // Offset dự đoán = vận tốc * dt, KẸP BIÊN ĐỘ. Vận tốc đo trên baseline
 // ~80ms nên đã bền với vị trí cập nhật theo bước, nhưng một cú teleport nhỏ
 // dưới ngưỡng ESP_MAX_JUMP vẫn có thể cho vận tốc lớn; kẹp offset để box
@@ -2794,10 +2827,22 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         // đọc bHidden trước, ẩn/chết thì khỏi đọc bDead.
         uint8_t flags[2] = {0, 0};
         if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Actor_HiddenFlag, flags, 1)) {
-            if (flags[0] & 0x1) { cHid++; h->valid = NO; continue; }
+            if (flags[0] & 0x1) {
+                // Chỉ mark lần ĐẦU (h->valid còn YES) để ring 64 slot không bị
+                // một actor đã chết ghi đè 60 lần/giây.
+                cHid++;
+                if (h->valid) ESPMarkActorGone(tr->actor);
+                h->valid = NO;
+                continue;
+            }
             if (tr->kind != 3) {
                 if (ESPMemoryRead(vmMap, tr->actor + ESPOff_Char_Dead, flags + 1, 1)) {
-                    if (flags[1] & 0x1) { cHid++; h->valid = NO; continue; }
+                    if (flags[1] & 0x1) {
+                        cHid++;
+                        if (h->valid) ESPMarkActorGone(tr->actor);
+                        h->valid = NO;
+                        continue;
+                    }
                 }
             }
         }

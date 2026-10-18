@@ -65,6 +65,10 @@ uint64_t ESPEngineTrackedGen(void);
 // Bridge báo số box đang vẽ (để hiển thị B<nn> trên dòng scan của app).
 void ESPBoxCounterSet(int n);
 
+// Actor đã chết/biến mất trong withinSec giây qua (refresh thấy bDead/bHidden).
+// Bridge dùng để bỏ box NGAY thay vì giữ box đứng yên tới grace 1.2s.
+BOOL ESPEngineActorGone(uint64_t actor, double withinSec);
+
 // Diag pipeline của lần gọi Boxes/RefreshBoxes gần nhất, vd:
 // @"R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2", @"F camFail". Dùng khi B=0 mà P>0.
 const char *ESPEngineLastBoxDiag(void);

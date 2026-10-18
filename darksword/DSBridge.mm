@@ -3028,7 +3028,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw55-steady"
+#define DS_ESP_BUILD_TAG "kernrw56-dead"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3414,6 +3414,21 @@ static void ds_esp_tick(void) {
                     continue;
                 }
                 double age = now2 - s_slots[s].lastSeen;
+                // Địch CHẾT/ẩn: engine đã bỏ actor khỏi danh sách box ngay tick
+                // đó. Không chờ grace 1.2s (box đứng yên ở chỗ chết) — bỏ slot
+                // luôn để box tắt ngay. age>0.10 chỉ để không đụng slot vừa
+                // được refresh cập nhật trong chính tick này.
+                if (age > 0.10 && ESPEngineActorGone(s_slots[s].actor, 5.0)) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg),
+                             "BOX-DROP: slot[%d] -DEAD act=0x%llx",
+                             s, (unsigned long long)s_slots[s].actor);
+                    boxEventLog(msg);
+                    s_slots[s].active = NO;
+                    s_slots[s].actor = 0;
+                    s_boxes[s] = (ESPBox2D){0, 0, 0, 0, 0, -1, 0, 0};
+                    continue;
+                }
                 if (age > 2.5) {
                     char msg[128];
                     snprintf(msg, sizeof(msg),
