@@ -3011,7 +3011,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw52i"
+#define DS_ESP_BUILD_TAG "kernrw52j"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3302,6 +3302,7 @@ static void ds_esp_tick(void) {
                     ESPProviderEndRead();
                     if (rawCount > 0) gen = ESPEngineTrackedGen();
                 }
+            }
             }
 
             if (rawCount > 1) {
