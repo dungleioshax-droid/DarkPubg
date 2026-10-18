@@ -2729,7 +2729,6 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
                     if (useLast && nowC - s_lastFlashRejLog >= 1.0) {
                         s_lastFlashRejLog = nowC;
                         // kernrw52g: bỏ log camFlash reject detail (I/O)
-                               dYaw, dPitch, dLoc, dFov, dt);
                     }
                 }
             }
