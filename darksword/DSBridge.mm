@@ -248,7 +248,7 @@ static const size_t kDSRemoteTextScratchCapacity = 0x800;
 static CFAbsoluteTime g_hudEnabledAt = 0;
 // Hoãn phần ESP sau khi bật HUD để không dồn hàng trăm remote call dựng overlay
 // vào đúng lúc SpringBoard vừa attach cửa sổ HUD.
-static const NSTimeInterval kDSESPSettleDelay = 1.5;
+static const NSTimeInterval kDSESPSettleDelay = 1.0;
 
 static void ds_trace(const char *fmt, ...) {
     if (g_hudEnabledAt <= 0) return;
@@ -3011,7 +3011,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw52g"
+#define DS_ESP_BUILD_TAG "kernrw52h"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

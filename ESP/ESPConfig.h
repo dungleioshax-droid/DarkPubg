@@ -61,7 +61,7 @@
 // kernrw45: 40->60Hz cùng ESP_REFRESH_HZ. Gate = 1/60 − 4ms = 12.7ms < tick
 // 16.7ms -> present mỗi tick (~60/s); tải IPC ~300ms/s chấp nhận được nhờ
 // label-subview + text 2Hz (kernrw38) giữ mỗi lượt ~4-5ms (pAvg ~7ms log43).
-#define ESP_PRESENT_HZ 30
+#define ESP_PRESENT_HZ 40
 
 // kernrw43: bitmap overlay (kernrw19-42) đã bị XOÁ HOÀN TOÀN — remote_write
 // vài MB + setImage: mỗi frame là nguồn gây đơ máy. ESP giờ chỉ vẽ per-box
