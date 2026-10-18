@@ -151,24 +151,7 @@ BOOL ESPGameTaskEnsure(void) {
         } else {
             t = ESPTaskTryRouteB(pid);
             if (t != MACH_PORT_NULL) route = 2;
-            else {
-                // kernrw52e: Route C — thử lấy task port qua kernel exploit.
-                // taskbyproc đọc task pointer từ kernel memory; nếu task pointer
-                // hợp lệ thì thử dùng nó như mach port cho mach_vm_read_overwrite.
-                uint64_t proc = proc_find_by_name("ShadowTrackerExtra");
-                if (proc) {
-                    uint64_t taskPtr = taskbyproc(proc);
-                    if (taskPtr && taskPtr > 0x100000000ULL) {
-                        // Thử dùng task pointer như mach port
-                        task_t candidate = (task_t)taskPtr;
-                        int p2 = 0;
-                        if (pid_for_task(candidate, &p2) == KERN_SUCCESS && p2 == pid) {
-                            t = candidate;
-                            route = 3;
-                        }
-                    }
-                }
-            }
+        }
         }
     }
     if (t != MACH_PORT_NULL) {
