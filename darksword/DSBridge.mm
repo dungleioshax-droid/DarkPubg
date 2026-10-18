@@ -1075,15 +1075,16 @@ static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
 
 static NSString *ds_esp_line_for_prefs(NSDictionary *preferences) {
     if (!ds_show_esp_from_prefs(preferences)) return nil;
-    if (!ds_is_ready()) return @"ESP: wait…";
-    ds_ensure_game_base(preferences);
-    if (!g_gameBase) return @"ESP: --";
+    uint32_t count = 0;
     @try {
-        NSString *s = ESPEngineStatusText(g_gameBase);
-        return s.length ? s : @"ESP: --";
+        count = DSBridgeESPCount();
     } @catch (__unused NSException *e) {
-        return @"ESP: --";
+        count = 0;
     }
+    if (!ds_is_ready()) return (count > 0) ? [NSString stringWithFormat:@"%u", (unsigned)count] : @"--";
+    ds_ensure_game_base(preferences);
+    if (!g_gameBase) return (count > 0) ? [NSString stringWithFormat:@"%u", (unsigned)count] : @"--";
+    return [NSString stringWithFormat:@"%u", (unsigned)count];
 }
 
 static NSString *ds_display_text(NSDictionary *preferences,
@@ -1091,8 +1092,7 @@ static NSString *ds_display_text(NSDictionary *preferences,
                                  BOOL __unused focused,
                                  double __unused down,
                                  double __unused up) {
-    // kernrw48: app chỉ còn ESP — speed/FPS + Base Game line đã gỡ.
-    // text 1Hz giờ = duy nhất dòng trạng thái ESP (hoặc rỗng khi toggle OFF).
+    // Chỉ hiển thị số lượng địch thuần tuý
     NSString *espLine = ds_esp_line_for_prefs(preferences);
     return espLine ?: @"";
 }
@@ -1113,35 +1113,29 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     presentation.centered =
         mode == HUDPresetPositionTopCenter || mode == HUDPresetPositionTopCenterMost;
     presentation.centeredMost = mode == HUDPresetPositionTopCenterMost;
-    // kernrw48: speed/FPS/base-feature OFF cứng; giữ cấu trúc shell + passthrough.
-    presentation.singleLine = NO;
+    presentation.singleLine = YES;
     presentation.bitrate = NO;
     presentation.arrowPrefixes = NO;
     presentation.inverted = NO;
-    presentation.followsRotation = NO;
+    presentation.followsRotation = YES; // Luôn hiển thị cả ngang lẫn dọc trong game
     presentation.hideAtSnapshot = ds_pref_bool(preferences, HUDUserDefaultsKeyHideAtSnapshot);
     presentation.displayFPS = NO;
-    presentation.passthrough = ds_pref_bool(preferences, HUDUserDefaultsKeyPassthroughMode);
+    presentation.passthrough = YES;
 
     BOOL customFont = ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomFontSize);
     if (customFont) {
         presentation.fontSize = MIN(MAX(ds_pref_double(
-            preferences, HUDUserDefaultsKeyRealCustomFontSize, kDSHUDMinFontSize), 8.0), 12.0);
-        presentation.cornerRadius = presentation.fontSize / 2.0;
+            preferences, HUDUserDefaultsKeyRealCustomFontSize, 24.0), 14.0), 40.0);
     } else {
-        presentation.fontSize = kDSHUDMinFontSize;
-        presentation.cornerRadius = kDSHUDMinCornerRadius;
+        presentation.fontSize = 24.0;
     }
-    presentation.inactiveOpacity = presentation.inverted ? 1.0 : kDSHUDInactiveOpacity;
-    NSInteger espLines = ds_show_esp_from_prefs(preferences) ? 1 : 0;
-    presentation.numberOfLines = (presentation.centered || presentation.singleLine ? 1 : 2) + espLines;
+    presentation.cornerRadius = 0.0;
+    presentation.inactiveOpacity = 1.0;
+    presentation.numberOfLines = 1;
     presentation.alignment = presentation.centered ? NSTextAlignmentCenter : NSTextAlignmentLeft;
-    presentation.maskedCorners =
-        presentation.centeredMost && !presentation.landscape
-            ? kDSCornerMaskBottom
-            : kDSCornerMaskAll;
+    presentation.maskedCorners = kDSCornerMaskAll;
 
-    UIFontWeight weight = presentation.inverted ? UIFontWeightMedium : UIFontWeightRegular;
+    UIFontWeight weight = UIFontWeightHeavy;
     UIFont *font = [UIFont monospacedDigitSystemFontOfSize:presentation.fontSize weight:weight];
     CGRect measured = [text boundingRectWithSize:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)
                                         options:NSStringDrawingUsesLineFragmentOrigin |
@@ -1960,6 +1954,8 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
         process, colorClass, "darkGrayColor");
     if (!clear || !white || !black || !safeBackground) return 0;
 
+    uint64_t red = ds_remote_get_object_on_main(process, colorClass, "systemRedColor");
+
     ds_perform_on_springboard_main(process, window,
                                    ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, container,
@@ -1967,8 +1963,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_perform_on_springboard_main(process, secureField,
                                    ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, blurView,
-                                   ds_remote_sel(process, "setBackgroundColor:"),
-                                   presentation.inverted ? white : safeBackground, YES);
+                                   ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_remote_set_u64_on_main(process, container, "setTag:", (uint64_t)kDSSpringBoardHUDTag);
     ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
     ds_remote_set_u64_on_main(process, container, "setUserInteractionEnabled:", 0);
@@ -1982,12 +1977,12 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_u64_on_main(process, secureField, "setOpaque:", 0);
     ds_perform_on_springboard_main(process, label,
                                    ds_remote_sel(process, "setTextColor:"),
-                                   presentation.inverted ? black : white, YES);
+                                   red ?: white, YES);
     ds_remote_set_u64_on_main(process, label, "setNumberOfLines:",
                               (uint64_t)presentation.numberOfLines);
     ds_remote_set_u64_on_main(process, label, "setHidden:", 0);
     uint64_t font = ds_remote_font(process, presentation.fontSize,
-                                   presentation.inverted);
+                                   YES);
     if (!font) return 0;
     ds_perform_on_springboard_main(process, label,
                                    ds_remote_sel(process, "setFont:"), font, YES);
@@ -1995,15 +1990,18 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_u64_on_main(process, label, "setUserInteractionEnabled:", 0);
     ds_remote_set_u64_on_main(process, label, "setTextAlignment:",
                               (uint64_t)presentation.alignment);
-    ds_remote_set_double_on_main(process, label, "setAlpha:", 0.85);
+    ds_remote_set_double_on_main(process, label, "setAlpha:", 1.0);
+
+    uint64_t labelLayer = ds_remote_get_object_on_main(process, label, "layer");
+    if (labelLayer) {
+        ds_remote_set_double_on_main(process, labelLayer, "setShadowOpacity:", 1.0);
+        ds_remote_set_double_on_main(process, labelLayer, "setShadowRadius:", 2.0);
+    }
 
     uint64_t layer = ds_remote_get_object_on_main(process, blurView, "layer");
     if (layer) {
-        ds_remote_set_double_on_main(process, layer, "setCornerRadius:",
-                                     presentation.cornerRadius);
-        ds_remote_set_u64_on_main(process, layer, "setMasksToBounds:", 1);
-        ds_remote_set_u64_on_main(process, layer, "setMaskedCorners:",
-                                  (uint64_t)presentation.maskedCorners);
+        ds_remote_set_double_on_main(process, layer, "setCornerRadius:", 0.0);
+        ds_remote_set_u64_on_main(process, layer, "setMasksToBounds:", 0);
     }
     ds_remote_set_double_on_main(process, container, "setAlpha:", 1.0);
 
@@ -2679,10 +2677,10 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         if (g_espRectValid[i]) {
             // kernrw49: viền box vẽ per-box ALWAYS — ngưỡng 2pt (giữ nguyên
             // cơ chế per-box proven kể từ kernrw27, không qua path layer).
-            boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 2.0 ||
-                        fabs(prevBox.origin.y - fullBox.origin.y) >= 2.0 ||
-                        fabs(prevBox.size.width - fullBox.size.width) >= 2.0 ||
-                        fabs(prevBox.size.height - fullBox.size.height) >= 2.0);
+            boxMoved = (fabs(prevBox.origin.x - fullBox.origin.x) >= 0.5 ||
+                        fabs(prevBox.origin.y - fullBox.origin.y) >= 0.5 ||
+                        fabs(prevBox.size.width - fullBox.size.width) >= 0.5 ||
+                        fabs(prevBox.size.height - fullBox.size.height) >= 0.5);
         }
         if (boxMoved) s_pathDirty = YES;
 
@@ -2771,8 +2769,8 @@ static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int coun
         CGPoint labelLocal = CGPointMake(labelCenter.x - fullBox.origin.x,
                                          labelCenter.y - fullBox.origin.y);
         BOOL labelMoved = !g_espRectValid[i] ||
-            fabs(g_espLastLabelCenter[i].x - labelLocal.x) > 4.0 ||
-            fabs(g_espLastLabelCenter[i].y - labelLocal.y) > 4.0;
+            fabs(g_espLastLabelCenter[i].x - labelLocal.x) > 1.0 ||
+            fabs(g_espLastLabelCenter[i].y - labelLocal.y) > 1.0;
         if (wantLabel && labelMoved &&
             (!g_espRectValid[i] || nowP - g_espLastLabelAt[i] >= (1.0 / ESP_OVERLAY_LABEL_HZ))) {
             ds_remote_set_point_on_main(process, g_espLabels[i], "setCenter:", labelLocal);
@@ -2880,8 +2878,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
         g_lastLabelFrame = presentation->labelFrame;
     }
 
-    BOOL hideForLandscape = presentation->landscape && !presentation->followsRotation;
-    BOOL shouldHide = hideForLandscape;
+    BOOL shouldHide = NO; // Luôn hiển thị trong game cả landscape lẫn portrait
     if (shouldHide != g_lastWindowHidden) {
         ds_remote_set_u64_on_main(process, g_remoteWindow, "setHidden:", shouldHide ? 1 : 0);
         g_lastWindowHidden = shouldHide;
@@ -2893,26 +2890,22 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
                                   (uint64_t)presentation->alignment);
 
         uint64_t colorClass = ds_remote_class(process, "UIColor");
-        uint64_t white = colorClass
-            ? ds_remote_get_object_on_main(process, colorClass, "whiteColor") : 0;
-        uint64_t black = colorClass
-            ? ds_remote_get_object_on_main(process, colorClass, "blackColor") : 0;
-        uint64_t darkGray = colorClass
-            ? ds_remote_get_object_on_main(process, colorClass, "darkGrayColor") : 0;
-        uint64_t textColor = presentation->inverted ? black : white;
-        uint64_t backgroundColor = presentation->inverted ? white : darkGray;
-        if (textColor && backgroundColor) {
+        uint64_t red = colorClass
+            ? ds_remote_get_object_on_main(process, colorClass, "systemRedColor") : 0;
+        uint64_t clear = colorClass
+            ? ds_remote_get_object_on_main(process, colorClass, "clearColor") : 0;
+        if (red && clear) {
             ds_perform_on_springboard_main(process, g_remoteLabel,
-                                           ds_remote_sel(process, "setTextColor:"), textColor, YES);
+                                           ds_remote_sel(process, "setTextColor:"), red, YES);
             ds_perform_on_springboard_main(process, g_remoteBlurView,
                                            ds_remote_sel(process, "setBackgroundColor:"),
-                                           backgroundColor, YES);
+                                           clear, YES);
         }
 
         if (fabs(g_lastFontSize - presentation->fontSize) > 0.001 ||
             g_lastInverted != presentation->inverted) {
             uint64_t font = ds_remote_font(process, presentation->fontSize,
-                                           presentation->inverted);
+                                           YES);
             if (!font) return NO;
             ds_perform_on_springboard_main(process, g_remoteLabel,
                                            ds_remote_sel(process, "setFont:"), font, YES);
@@ -2922,8 +2915,7 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
         uint64_t layer = ds_remote_get_object_on_main(process, g_remoteBlurView, "layer");
         if (layer) {
-            ds_remote_set_double_on_main(process, layer, "setCornerRadius:",
-                                         presentation->cornerRadius);
+            ds_remote_set_double_on_main(process, layer, "setCornerRadius:", 0.0);
             ds_remote_set_u64_on_main(process, layer, "setMaskedCorners:",
                                       (uint64_t)presentation->maskedCorners);
         }
@@ -3015,7 +3007,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw52j-ui"
+#define DS_ESP_BUILD_TAG "kernrw53-60hz-red"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
