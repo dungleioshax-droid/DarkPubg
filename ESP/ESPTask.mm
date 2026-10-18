@@ -167,7 +167,7 @@ BOOL ESPGameTaskEnsure(void) {
     }
     if (!s_failLogged) {
         s_failLogged = YES;
-        ESPLog("task port FAIL (Esign mobile?) - fallback kernel region-map");
+        // kernrw52i: bỏ log task port FAIL (không dùng được trên non-jb, rác log)
     }
     if (++s_giveUpFails == 5) {
         ESPLog("task port unavailable x5 - region-map only for this session");
