@@ -60,8 +60,9 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     UIView *_statusCardView;
     UILabel *_statusDetailLabel;
 
-    UIView *_hintCardView;
-    UILabel *_hintLabel;
+    UIView *_consoleCardView;
+    UITextView *_consoleTextView;
+    NSMutableAttributedString *_consoleLogContent;
 }
 
 + (void)setShouldToggleHUDAfterLaunch:(BOOL)flag
@@ -218,28 +219,64 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     _mainButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backgroundView addSubview:_mainButton];
 
-    // 4. Hint Card
-    _hintCardView = [[UIView alloc] init];
-    _hintCardView.backgroundColor = [UIColor colorWithRed:22/255.0 green:25/255.0 blue:34/255.0 alpha:1.0];
-    _hintCardView.layer.cornerRadius = 12.0;
-    _hintCardView.layer.borderWidth = 1.0;
-    _hintCardView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0].CGColor;
-    _hintCardView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.backgroundView addSubview:_hintCardView];
+    // 4. Console Log Card
+    _consoleCardView = [[UIView alloc] init];
+    _consoleCardView.backgroundColor = [UIColor colorWithRed:22/255.0 green:25/255.0 blue:34/255.0 alpha:1.0];
+    _consoleCardView.layer.cornerRadius = 14.0;
+    _consoleCardView.layer.borderWidth = 1.0;
+    _consoleCardView.layer.borderColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0].CGColor;
+    _consoleCardView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.backgroundView addSubview:_consoleCardView];
 
-    UIImageView *hintIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"lightbulb.fill"]];
-    hintIcon.tintColor = [UIColor colorWithRed:251/255.0 green:191/255.0 blue:36/255.0 alpha:1.0];
-    hintIcon.contentMode = UIViewContentModeScaleAspectFit;
-    hintIcon.translatesAutoresizingMaskIntoConstraints = NO;
-    [_hintCardView addSubview:hintIcon];
+    UIView *dot1 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 8)];
+    dot1.backgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+    dot1.layer.cornerRadius = 4.0;
+    dot1.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:dot1];
 
-    _hintLabel = [[UILabel alloc] init];
-    _hintLabel.text = @"Mẹo: Bạn có thể bật ESP trước hoặc sau khi mở PUBG Mobile. Vào tab Cài đặt để tùy biến Box, Line, Khoảng cách.";
-    _hintLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    _hintLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
-    _hintLabel.numberOfLines = 0;
-    _hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [_hintCardView addSubview:_hintLabel];
+    UIView *dot2 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 8)];
+    dot2.backgroundColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
+    dot2.layer.cornerRadius = 4.0;
+    dot2.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:dot2];
+
+    UIView *dot3 = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 8)];
+    dot3.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+    dot3.layer.cornerRadius = 4.0;
+    dot3.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:dot3];
+
+    UILabel *consoleTitle = [[UILabel alloc] init];
+    consoleTitle.text = @"NHẬT KÝ TẠO HUD (CONSOLE LOGS)";
+    consoleTitle.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    consoleTitle.textColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
+    consoleTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:consoleTitle];
+
+    UILabel *liveLabel = [[UILabel alloc] init];
+    liveLabel.text = @"● LIVE";
+    liveLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+    liveLabel.textColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+    liveLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:liveLabel];
+
+    UIView *consoleDivider = [[UIView alloc] init];
+    consoleDivider.backgroundColor = [UIColor colorWithRed:35/255.0 green:39/255.0 blue:54/255.0 alpha:1.0];
+    consoleDivider.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:consoleDivider];
+
+    _consoleTextView = [[UITextView alloc] init];
+    _consoleTextView.backgroundColor = [UIColor colorWithRed:15/255.0 green:17/255.0 blue:23/255.0 alpha:1.0];
+    _consoleTextView.layer.cornerRadius = 8.0;
+    _consoleTextView.layer.borderWidth = 1.0;
+    _consoleTextView.layer.borderColor = [UIColor colorWithRed:31/255.0 green:35/255.0 blue:46/255.0 alpha:1.0].CGColor;
+    _consoleTextView.editable = NO;
+    _consoleTextView.selectable = YES;
+    _consoleTextView.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    _consoleTextView.font = [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular];
+    _consoleTextView.textColor = [UIColor colorWithRed:226/255.0 green:232/255.0 blue:240/255.0 alpha:1.0];
+    _consoleTextView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_consoleCardView addSubview:_consoleTextView];
 
     // 5. Author Label (Credits)
     _authorLabel = [[UILabel alloc] init];
@@ -311,25 +348,47 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         [_statusDetailLabel.bottomAnchor constraintEqualToAnchor:_statusCardView.bottomAnchor constant:-14],
 
         // Main Action Button
-        [_mainButton.topAnchor constraintEqualToAnchor:_statusCardView.bottomAnchor constant:28],
+        [_mainButton.topAnchor constraintEqualToAnchor:_statusCardView.bottomAnchor constant:24],
         [_mainButton.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
         [_mainButton.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
         [_mainButton.heightAnchor constraintEqualToConstant:56],
 
-        // Hint Card
-        [_hintCardView.topAnchor constraintEqualToAnchor:_mainButton.bottomAnchor constant:24],
-        [_hintCardView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
-        [_hintCardView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+        // Console Log Card
+        [_consoleCardView.topAnchor constraintEqualToAnchor:_mainButton.bottomAnchor constant:20],
+        [_consoleCardView.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:20],
+        [_consoleCardView.trailingAnchor constraintEqualToAnchor:safeArea.trailingAnchor constant:-20],
+        [_consoleCardView.bottomAnchor constraintEqualToAnchor:_authorLabel.topAnchor constant:-12],
 
-        [hintIcon.leadingAnchor constraintEqualToAnchor:_hintCardView.leadingAnchor constant:14],
-        [hintIcon.topAnchor constraintEqualToAnchor:_hintCardView.topAnchor constant:14],
-        [hintIcon.widthAnchor constraintEqualToConstant:18],
-        [hintIcon.heightAnchor constraintEqualToConstant:18],
+        [dot1.leadingAnchor constraintEqualToAnchor:_consoleCardView.leadingAnchor constant:12],
+        [dot1.topAnchor constraintEqualToAnchor:_consoleCardView.topAnchor constant:12],
+        [dot1.widthAnchor constraintEqualToConstant:8],
+        [dot1.heightAnchor constraintEqualToConstant:8],
 
-        [_hintLabel.leadingAnchor constraintEqualToAnchor:hintIcon.trailingAnchor constant:10],
-        [_hintLabel.topAnchor constraintEqualToAnchor:_hintCardView.topAnchor constant:12],
-        [_hintLabel.trailingAnchor constraintEqualToAnchor:_hintCardView.trailingAnchor constant:-14],
-        [_hintLabel.bottomAnchor constraintEqualToAnchor:_hintCardView.bottomAnchor constant:-12],
+        [dot2.leadingAnchor constraintEqualToAnchor:dot1.trailingAnchor constant:5],
+        [dot2.centerYAnchor constraintEqualToAnchor:dot1.centerYAnchor],
+        [dot2.widthAnchor constraintEqualToConstant:8],
+        [dot2.heightAnchor constraintEqualToConstant:8],
+
+        [dot3.leadingAnchor constraintEqualToAnchor:dot2.trailingAnchor constant:5],
+        [dot3.centerYAnchor constraintEqualToAnchor:dot1.centerYAnchor],
+        [dot3.widthAnchor constraintEqualToConstant:8],
+        [dot3.heightAnchor constraintEqualToConstant:8],
+
+        [consoleTitle.leadingAnchor constraintEqualToAnchor:dot3.trailingAnchor constant:10],
+        [consoleTitle.centerYAnchor constraintEqualToAnchor:dot1.centerYAnchor],
+
+        [liveLabel.trailingAnchor constraintEqualToAnchor:_consoleCardView.trailingAnchor constant:-12],
+        [liveLabel.centerYAnchor constraintEqualToAnchor:dot1.centerYAnchor],
+
+        [consoleDivider.topAnchor constraintEqualToAnchor:dot1.bottomAnchor constant:10],
+        [consoleDivider.leadingAnchor constraintEqualToAnchor:_consoleCardView.leadingAnchor constant:10],
+        [consoleDivider.trailingAnchor constraintEqualToAnchor:_consoleCardView.trailingAnchor constant:-10],
+        [consoleDivider.heightAnchor constraintEqualToConstant:1],
+
+        [_consoleTextView.topAnchor constraintEqualToAnchor:consoleDivider.bottomAnchor constant:8],
+        [_consoleTextView.leadingAnchor constraintEqualToAnchor:_consoleCardView.leadingAnchor constant:8],
+        [_consoleTextView.trailingAnchor constraintEqualToAnchor:_consoleCardView.trailingAnchor constant:-8],
+        [_consoleTextView.bottomAnchor constraintEqualToAnchor:_consoleCardView.bottomAnchor constant:-8],
 
         // Author Label
         _authorLabelBottomConstraint,
@@ -354,12 +413,68 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     }
 }
 
+- (void)appendLog:(NSString *)message type:(NSString *)type
+{
+    if (!_consoleTextView) {
+        return;
+    }
+    if (!_consoleLogContent) {
+        _consoleLogContent = [[NSMutableAttributedString alloc] init];
+    }
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"HH:mm:ss"];
+    NSString *timeStr = [formatter stringFromDate:[NSDate date]];
+
+    UIColor *tagColor = [UIColor colorWithRed:56/255.0 green:189/255.0 blue:248/255.0 alpha:1.0]; // cyan default
+    if ([type isEqualToString:@"SUCCESS"] || [type isEqualToString:@"ACTIVE"] || [type isEqualToString:@"HUD"] || [type isEqualToString:@"READY"]) {
+        tagColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0]; // teal
+    } else if ([type isEqualToString:@"ERROR"] || [type isEqualToString:@"STOP"]) {
+        tagColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0]; // red
+    } else if ([type isEqualToString:@"WARN"] || [type isEqualToString:@"SCAN"] || [type isEqualToString:@"ACTION"]) {
+        tagColor = [UIColor colorWithRed:251/255.0 green:191/255.0 blue:36/255.0 alpha:1.0]; // yellow
+    }
+
+    NSDictionary *timeAttrs = @{
+        NSForegroundColorAttributeName: [UIColor colorWithRed:100/255.0 green:116/255.0 blue:139/255.0 alpha:1.0],
+        NSFontAttributeName: [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular]
+    };
+    NSDictionary *tagAttrs = @{
+        NSForegroundColorAttributeName: tagColor,
+        NSFontAttributeName: [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightBold]
+    };
+    NSDictionary *msgAttrs = @{
+        NSForegroundColorAttributeName: [UIColor colorWithRed:226/255.0 green:232/255.0 blue:240/255.0 alpha:1.0],
+        NSFontAttributeName: [UIFont monospacedSystemFontOfSize:11.5 weight:UIFontWeightRegular]
+    };
+
+    NSMutableAttributedString *line = [[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"[%@] ", timeStr] attributes:timeAttrs];
+    [line appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"[%@] ", type] attributes:tagAttrs]];
+    [line appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@\n", message] attributes:msgAttrs]];
+
+    [_consoleLogContent appendAttributedString:line];
+    _consoleTextView.attributedText = _consoleLogContent;
+
+    if (_consoleLogContent.length > 0) {
+        NSRange bottomRange = NSMakeRange(_consoleLogContent.length - 1, 1);
+        [_consoleTextView scrollRangeToVisible:bottomRange];
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     _impactFeedbackGenerator = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
 
     [self registerNotifications];
+
+    [self appendLog:@"Khởi động hệ thống DarkPubg ESP" type:@"INIT"];
+    [self appendLog:@"Sẵn sàng kết nối bộ nhớ ShadowTrackerExtra" type:@"KERNEL"];
+    if (_isRemoteHUDActive) {
+        [self appendLog:@"HUD Overlay đang hoạt động (Active)" type:@"HUD"];
+    } else {
+        [self appendLog:@"Chờ người dùng bấm BẬT ESP để tạo Overlay" type:@"READY"];
+    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -823,6 +938,13 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     log_debug(OS_LOG_DEFAULT, "- [RootViewController tapMainButton:%{public}@]", sender);
 
     BOOL isNowEnabled = [self isHUDEnabled];
+    if (!isNowEnabled) {
+        [self appendLog:@"Yêu cầu khởi tạo cửa sổ HUD Overlay..." type:@"ACTION"];
+        [self appendLog:@"Hooking ShadowTrackerExtra memory..." type:@"KERNEL"];
+    } else {
+        [self appendLog:@"Yêu cầu đóng cửa sổ HUD Overlay..." type:@"STOP"];
+    }
+
 #if USE_DARKSWORD
     if (!isNowEnabled) {
         [self showDSProgressOverlay];
@@ -847,6 +969,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             [strongSelf->_impactFeedbackGenerator impactOccurred];
             [strongSelf reloadMainButtonState];
             [strongSelf.backgroundView setUserInteractionEnabled:YES];
+            [strongSelf appendLog:@"HUD Overlay đã khởi tạo thành công" type:@"SUCCESS"];
         });
 
         [self.backgroundView setUserInteractionEnabled:NO];
@@ -961,6 +1084,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     NSString *stage = DSBridgeStage();
     if (stage.length == 0) stage = NSLocalizedString(@"Initializing DarkSpeed", nil);
     _dsProgressLabel.text = [NSString stringWithFormat:@"%@\n%d%%", stage, (int)llround(p * 100.0)];
+    [self appendLog:[NSString stringWithFormat:@"%@ (%d%%)", stage, (int)llround(p * 100.0)] type:@"LOAD"];
 }
 #endif
 
