@@ -1048,6 +1048,8 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
     return number ? number.doubleValue : fallback;
 }
 
+static void ds_esp_ensure_orientation_observer(void); // forward decl
+
 static UIInterfaceOrientation ds_interface_orientation(void) {
     // kernrw52j: đảm bảo observer orientation được khởi tạo (cho HUD text window).
     ds_esp_ensure_orientation_observer();
