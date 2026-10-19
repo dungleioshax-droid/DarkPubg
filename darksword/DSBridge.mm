@@ -1049,57 +1049,46 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
 }
 
 static void ds_esp_ensure_orientation_observer(void); // forward decl
-static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets);
-static inline int ds_bks_orientation(void);
 
-// Màn hình đang ở tư thế chơi game (landscape) chưa? PUBG Mobile chỉ chơi được
-// ở landscape; máy đang dọc nghĩa là user ở trong app DarkSpeed, KHÔNG ở trong
-// game. Nguồn quyết định là orientation FOREGROUND (poll trực tiếp từ
-// SpringBoard ở ds_poll_foreground_orientation): vào game -> landscape, ở
-// trong app -> portrait. UIDevice có thể "đóng băng" khi app bị đẩy xuống
-// background nên chỉ dùng để chống nhiễu/chốt kết quả khi foreground chưa rõ.
-static BOOL ds_display_is_landscape(void) {
+static UIInterfaceOrientation ds_interface_orientation(void) {
+    // kernrw52j: đảm bảo observer orientation được khởi tạo (cho HUD text window).
+    ds_esp_ensure_orientation_observer();
+    // Ưu tiên orientation của game (foreground) và thiết bị, không chỉ
+    // SpringBoard scene (kẹt portrait). Nếu không, HUD chỉ đúng khi xoay máy
+    // trước khi mở HUD — không tự xoay theo game.
     int fg = g_foregroundOrientation.load();
-    BOOL fgLandscape = (fg == UIInterfaceOrientationLandscapeLeft ||
-                        fg == UIInterfaceOrientationLandscapeRight);
-    BOOL fgPortrait = (fg == UIInterfaceOrientationPortrait ||
-                       fg == UIInterfaceOrientationPortraitUpsideDown);
+    if (fg == UIInterfaceOrientationLandscapeLeft || fg == UIInterfaceOrientationLandscapeRight ||
+        fg == UIInterfaceOrientationPortrait || fg == UIInterfaceOrientationPortraitUpsideDown) {
+        return (UIInterfaceOrientation)fg;
+    }
+    // Thiết bị vật lý
     UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
-    BOOL devLandscape = (dev == UIDeviceOrientationLandscapeLeft ||
-                         dev == UIDeviceOrientationLandscapeRight);
-    BOOL devPortrait = (dev == UIDeviceOrientationPortrait ||
-                        dev == UIDeviceOrientationPortraitUpsideDown);
-    if (fgLandscape) return YES;
-    if (devLandscape) return YES;
-    if (fgPortrait || devPortrait) return NO;
-    int bks = ds_bks_orientation();
-    if (bks == UIInterfaceOrientationLandscapeLeft ||
-        bks == UIInterfaceOrientationLandscapeRight) {
-        return YES;
+    UIInterfaceOrientation mapped = UIInterfaceOrientationUnknown;
+    switch (dev) {
+        case UIDeviceOrientationLandscapeLeft:  mapped = UIInterfaceOrientationLandscapeRight; break;
+        case UIDeviceOrientationLandscapeRight: mapped = UIInterfaceOrientationLandscapeLeft; break;
+        case UIDeviceOrientationPortrait:       mapped = UIInterfaceOrientationPortrait; break;
+        case UIDeviceOrientationPortraitUpsideDown: mapped = UIInterfaceOrientationPortraitUpsideDown; break;
+        default: break;
     }
-    // Không rõ tư thế -> coi như landscape (game luôn landscape; tránh ẩn nhầm
-    // box khi đang chơi mà cảm biến/orientation không trả về gì).
-    return YES;
-}
-
-// Kích thước màn hình THẬT theo tư thế hiện tại. KHÔNG dùng bounds scene của
-// app: khi app bị đẩy xuống background (game foreground) scene của app giữ
-// nguyên orientation lúc đó -> overlay ESP bị đóng khung sai (box xoay 90°,
-// không bám địch, "giật giật"). Đây chính là lý do trước kia phải "xoay ngang
-// app trước rồi mới mở HUD" thì box mới đúng.
-static CGRect ds_effective_display_bounds(void) {
-    CGRect appBounds = CGRectZero;
-    ds_screen_geometry(&appBounds, NULL);
-    if (CGRectIsNull(appBounds) || appBounds.size.width <= 0 || appBounds.size.height <= 0) {
-        appBounds = UIScreen.mainScreen.bounds;
+    if (mapped != UIInterfaceOrientationUnknown) return mapped;
+    // SpringBoard scene (fallback)
+    UIInterfaceOrientation remoteOrientation =
+        (UIInterfaceOrientation)g_remoteOrientation.load();
+    if (remoteOrientation != UIInterfaceOrientationUnknown) {
+        return remoteOrientation;
     }
-    if (CGRectIsNull(appBounds) || appBounds.size.width <= 0 || appBounds.size.height <= 0) {
-        appBounds = CGRectMake(0, 0, 390, 844);
-    }
-    CGFloat w = MAX(appBounds.size.width, appBounds.size.height);
-    CGFloat h = MIN(appBounds.size.width, appBounds.size.height);
-    return ds_display_is_landscape() ? CGRectMake(0, 0, w, h)
-                                     : CGRectMake(0, 0, h, w);
+    __block UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            UIWindowScene *windowScene = (UIWindowScene *)scene;
+            if (windowScene.activationState == UISceneActivationStateUnattached) continue;
+            orientation = windowScene.interfaceOrientation;
+            break;
+        }
+    });
+    return orientation;
 }
 
 static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
@@ -1150,9 +1139,8 @@ static NSString *ds_display_text(NSDictionary *preferences,
 static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
                                              NSString *text) {
     DSHUDPresentation presentation = {};
-    // kernrw57-rot: tư thế hiển thị lấy từ thiết bị/foreground (game), không
-    // lấy từ scene app (background kẹt orientation cũ).
-    presentation.landscape = ds_display_is_landscape();
+    UIInterfaceOrientation orientation = ds_interface_orientation();
+    presentation.landscape = UIInterfaceOrientationIsLandscape(orientation);
 
     HUDUserDefaultsKey modeKey = presentation.landscape
         ? HUDUserDefaultsKeySelectedModeLandscape
@@ -1198,9 +1186,9 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     if (labelSize.height < 1) labelSize.height = ceil(font.lineHeight);
     CGSize hudSize = CGSizeMake(labelSize.width + 8.0, labelSize.height + 4.0);
 
-    CGRect screenBounds = ds_effective_display_bounds();
-    UIEdgeInsets safeInsets = UIEdgeInsetsZero;
-    ds_screen_geometry(NULL, &safeInsets);
+    CGRect screenBounds;
+    UIEdgeInsets safeInsets;
+    ds_screen_geometry(&screenBounds, &safeInsets);
     CGFloat realOffsetX = 0;
     CGFloat realOffsetY = 0;
     if (ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomOffset)) {
@@ -2082,9 +2070,7 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     g_remoteBlurView = blurView;
     g_remoteBlurEffect = 0;
     g_lastPresentationSignature = preferences.description.hash ^
-                                  (NSUInteger)(ds_display_is_landscape()
-                                      ? UIInterfaceOrientationLandscapeRight
-                                      : UIInterfaceOrientationPortrait);
+                                  (NSUInteger)ds_interface_orientation();
     g_lastWindowFrame = presentation.windowFrame;
     g_lastLabelFrame = presentation.labelFrame;
     g_lastWindowHidden = NO;
@@ -3058,9 +3044,7 @@ static void ds_update_rate(void) {
         focused ? (double)output : up);
     DSHUDPresentation presentation = ds_hud_presentation(preferences, text);
     NSUInteger presentationSignature = preferences.description.hash ^
-                                       (NSUInteger)(ds_display_is_landscape()
-                                           ? UIInterfaceOrientationLandscapeRight
-                                           : UIInterfaceOrientationPortrait);
+                                       (NSUInteger)ds_interface_orientation();
     BOOL applyStyle = presentationSignature != g_lastPresentationSignature;
 
     static int s_presentSeq = 0;
@@ -3097,7 +3081,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw57-rot"
+#define DS_ESP_BUILD_TAG "kernrw57-hud2"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -3272,19 +3256,7 @@ static void ds_esp_tick(void) {
         s_prefsAt = nowP;
     }
     NSDictionary *preferences = s_prefsCache ?: @{};
-    // kernrw57-rot: overlay chỉ sống khi đang ở TƯ THẾ CHƠI GAME (landscape).
-    // Máy dọc = user đang ở trong app DarkSpeed, không phải trong game -> ẩn
-    // hẳn; trước đây box vẫn được map ±90° vào khung dọc nên hiện "kiểu ngang"
-    // lơ lửng trên app. Debounce 0.5s chống nhấp nháy khi UIDevice đọc nhầm
-    // đúng lúc vừa xoay máy.
-    static CFAbsoluteTime s_lastLandscapeAt = 0;
-    BOOL landscapeNow = ds_display_is_landscape();
-    if (landscapeNow) {
-        s_lastLandscapeAt = nowP;
-    } else if (s_lastLandscapeAt > 0 && nowP - s_lastLandscapeAt < 0.5) {
-        landscapeNow = YES; // vừa landscape trong 0.5s qua -> giữ overlay
-    }
-    if (!ds_esp_any_feature_from_prefs(preferences) || !g_gameBase || !landscapeNow) {
+    if (!ds_esp_any_feature_from_prefs(preferences) || !g_gameBase) {
         if (!s_espHideSent) {
             s_espHideSent = YES;
             DSESPFrame *frame = (DSESPFrame *)malloc(sizeof(DSESPFrame));
@@ -3302,9 +3274,7 @@ static void ds_esp_tick(void) {
     @try {
         CGRect sbBounds = CGRectZero;
         if (CGRectIsNull(s_geoCache) || nowP - s_geoAt > 0.5) {
-            // kernrw57-rot: bounds hiệu dụng theo TƯ THẾ hiện tại, không theo
-            // scene của app (background giữ orientation cũ -> box lệch 90°).
-            sbBounds = ds_effective_display_bounds();
+            ds_screen_geometry(&sbBounds, NULL);
             s_geoCache = sbBounds;
             s_geoAt = nowP;
         } else {
@@ -3731,7 +3701,7 @@ static void ds_register_hud_notifications(void) {
         NSDictionary *preferences = ds_hud_preferences();
         ds_append_checkpoint([NSString stringWithFormat:
             @"HUD settings refreshed position=%@ esp=%@ snapshot=%@",
-            preferences[ds_display_is_landscape()
+            preferences[UIInterfaceOrientationIsLandscape(ds_interface_orientation())
                 ? HUDUserDefaultsKeySelectedModeLandscape
                 : HUDUserDefaultsKeySelectedMode] ?: @"default",
             preferences[HUDUserDefaultsKeyShowESPBox] ?: @NO,
