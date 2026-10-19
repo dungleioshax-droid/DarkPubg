@@ -38,6 +38,14 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowLine = @"espShowLine";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowName = @"espShowName";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowHealth = @"espShowHealth";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowDistance = @"espShowDistance";
+// qblpack: render pack kiểu QBL (TeamID/HeadDot/AIMark/Bones/Scale).
+// TeamID/HeadDot/AIMark mặc định ON; Bones/Scale mặc định OFF (đọc thêm bộ nhớ
+// mỗi tick nên để user tự bật).
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowTeamID = @"espShowTeamID";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowHeadDot = @"espShowHeadDot";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowAIMark = @"espShowAIMark";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowBones = @"espShowBones";
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPESPScale = @"espESPScale";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";

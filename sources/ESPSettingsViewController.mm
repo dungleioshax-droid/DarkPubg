@@ -166,6 +166,46 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
             @"default": @YES,
             @"icon": @"line.diagonal",
             @"iconColor": [UIColor colorWithRed:168/255.0 green:85/255.0 blue:247/255.0 alpha:1.0]
+        },
+        @{
+            @"title": @"ESP Team ID",
+            @"subtitle": @"Hiện số đội (T<id>) trên đầu mục tiêu — kiểu QBL",
+            @"key": HUDUserDefaultsKeyESPShowTeamID,
+            @"default": @YES,
+            @"icon": @"person.3.fill",
+            @"iconColor": [UIColor colorWithRed:52/255.0 green:199/255.0 blue:89/255.0 alpha:1.0]
+        },
+        @{
+            @"title": @"ESP Head Dot",
+            @"subtitle": @"Chấm đánh dấu đầu mục tiêu — kiểu QBL",
+            @"key": HUDUserDefaultsKeyESPShowHeadDot,
+            @"default": @YES,
+            @"icon": @"circle.fill",
+            @"iconColor": [UIColor colorWithRed:255/255.0 green:214/255.0 blue:10/255.0 alpha:1.0]
+        },
+        @{
+            @"title": @"ESP AI Mark",
+            @"subtitle": @"Đổi màu box + tam giác cho bot/AI — kiểu QBL",
+            @"key": HUDUserDefaultsKeyESPShowAIMark,
+            @"default": @YES,
+            @"icon": @"exclamationmark.triangle.fill",
+            @"iconColor": [UIColor colorWithRed:255/255.0 green:159/255.0 blue:10/255.0 alpha:1.0]
+        },
+        @{
+            @"title": @"ESP Xương (Bones)",
+            @"subtitle": @"Skeleton ESP — tự dò offset xương khi bật (đọc thêm bộ nhớ)",
+            @"key": HUDUserDefaultsKeyESPShowBones,
+            @"default": @NO,
+            @"icon": @"figure.walk",
+            @"iconColor": [UIColor colorWithRed:90/255.0 green:200/255.0 blue:250/255.0 alpha:1.0]
+        },
+        @{
+            @"title": @"ESP Scale",
+            @"subtitle": @"Phóng to khung box 15% quanh tâm — kiểu QBL ESPScale",
+            @"key": HUDUserDefaultsKeyESPESPScale,
+            @"default": @NO,
+            @"icon": @"arrow.up.left.and.arrow.down.right",
+            @"iconColor": [UIColor colorWithRed:191/255.0 green:90/255.0 blue:242/255.0 alpha:1.0]
         }
     ];
 

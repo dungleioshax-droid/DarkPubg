@@ -864,7 +864,12 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     if ([key isEqualToString:HUDUserDefaultsKeyESPShowLine] ||
         [key isEqualToString:HUDUserDefaultsKeyESPShowName] ||
         [key isEqualToString:HUDUserDefaultsKeyESPShowHealth] ||
-        [key isEqualToString:HUDUserDefaultsKeyESPShowDistance]) {
+        [key isEqualToString:HUDUserDefaultsKeyESPShowDistance] ||
+        // qblpack: TeamID/HeadDot/AIMark mặc định ON; Bones/Scale mặc định OFF
+        // (rơi xuống return NO bên dưới).
+        [key isEqualToString:HUDUserDefaultsKeyESPShowTeamID] ||
+        [key isEqualToString:HUDUserDefaultsKeyESPShowHeadDot] ||
+        [key isEqualToString:HUDUserDefaultsKeyESPShowAIMark]) {
         return YES;
     }
     return NO;

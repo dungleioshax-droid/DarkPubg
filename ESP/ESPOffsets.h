@@ -114,6 +114,19 @@ static const uint32_t ESPOff_NetDriver_ServerConn = 0x78;
 static const uint32_t ESPOff_Conn_LocalPC = 0x30;
 static const uint32_t ESPOff_PC_LocalPawn = 0x28D8; // ASTExtraPlayerController->STExtraBaseCharacter
 
+// --- Xương / skeleton (port hướng QBL getBoneWithRotationFast) ---
+// QBL đọc transform xương từ SkeletalMeshComponent: mảng FTransform (0x30 byte)
+// nằm ở 1 offset KHÔNG có trong dump của dự án này (dump chỉ có Mesh/Bounds).
+// Vì vậy engine TỰ DÒ offset lúc chạy (xem ESPBonesConfigure trong ESPEngine.mm):
+// quét các ứng viên TArray<FTransform> trong [Start,End) rồi VALIDATE bằng tỉ lệ
+// cơ thể (đầu trên hông, tay/chân có độ dài hợp lý) — chỉ nhận khi khớp hoàn
+// toàn, sai thì tắt xương (không vẽ rác). Có thể chỉnh khoảng quét ở đây.
+static const uint32_t ESPOff_Mesh_BoneScanStart = 0x480; // đầu vùng nghi TArray<FTransform>
+static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xC00; // cuối vùng (kết thúc trước 0xC00)
+static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale
+static const uint32_t ESPOff_Bone_NumMax        = 40;    // đọc tối đa 40 khớp đầu (đủ cho bản đồ index)
+
+
 // TArray layout (UE4)
 typedef struct {
     uint64_t data; // pointer

@@ -29,6 +29,11 @@ BOOL ESPIsPlayerCharacterName(const char *name);
 // So tên với list hình nhân huấn luyện (ShootingPracticeTarget...).
 BOOL ESPIsTrainingDummyName(const char *name);
 
+// qblpack: bot/AI pawn (AIMarkDifferent của QBL). Chỉ dùng để ĐỔI MÀU/mark —
+// actor vẫn được coi là player (đúng hành vi cũ); danh sách ca từ khoá chắc
+// chắn nằm trong tên class bot (TPlanAI/FakePlayer_AIPawn...).
+BOOL ESPNameIsAIPawn(const char *name);
+
 // kernrw49: nickname người chơi — Character+0x960 (FString PlayerName, đường
 // Kernel kPlayerName), fallback Pawn→APlayerState (0x4D0) → 0x4B8 FString.
 // Đọc UTF-16LE → UTF-8 (do FString là UTF-16, nickname tiếng Việt/Trung

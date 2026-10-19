@@ -49,6 +49,8 @@ extern void DSBridgeRefreshGameBase(void);
 
 static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
+static void ESPBonesReset(void); // qblpack: xoá cấu hình xương khi đổi world
+static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh); // qblpack: dò bảng xương (định nghĩa cuối file)
 
 // --- Cửa sổ actor: 1 lần map page lấy HẾT field (trước đây ~8 lần map page) ---
 // 0x0 VTable, 0x18 FName, 0xE8 bHidden, 0x208 RootComponent,
@@ -77,6 +79,7 @@ typedef struct {
     float hp, hpMax, tCur, tMax;
     uint8_t bHidden, bDead, tIsUp;
     int team;
+    uint8_t ai; // qblpack: 1 = tên khớp ESPNameIsAIPawn (chỉ đường phân loại theo tên)
     BOOL hasVtable, hasName, hasRoot, hasMesh, hasHp, hasTarget, hasTeam;
     BOOL window; // đọc được cả cửa sổ 1 lần => mọi field đều đáng tin
 } ESPActorFields;
@@ -90,6 +93,7 @@ typedef struct {
     int nearChar;
     int nearDummy;
     int team;
+    int ai; // qblpack: 1 = bot/AI (tên class khớp list AI)
     unsigned tIsUp;
     float hp, hpMax, tCur, tMax;
     uint64_t vt, mesh, tMesh, root;
@@ -273,6 +277,10 @@ static std::unordered_set<uint64_t> g_espPlayerVTables; // Mọi VTable player/b
 // Đây là đường nhanh khiến 91 unknown chỉ còn vài FName walk mỗi vòng (Kernel
 // làm tương tự với PlayerVTable/GrenadeVTable). Xả theo world như player set.
 static std::unordered_set<uint64_t> g_espJunkVTables;
+// qblpack AIMarkDifferent: VTable của bot/AI đã học (bot dùng chung 1 class nên
+// gặp VTable này ở bất kỳ actor nào là biết AI, khỏi đọc tên lại — cùng cách
+// g_espPlayerVTables). Xả theo world.
+static std::unordered_set<uint64_t> g_espAIVTables;
 static int s_unameTries = 0; // Số lần thử giải mã GNames per game base
 // kernrw44: mutex RIÊNG cho cache camera (s_cam*). Trước đây các cache này
 // nằm dưới g_espClassifyMutex — mutex CŨNG do scan nền giữ suốt từng lần phân
@@ -387,6 +395,8 @@ static void ESPVerdictResetIfWorldChanged(uint64_t world) {
         g_espPlayerVTable = 0; // học lại VTable cho world mới
         g_espPlayerVTables.clear();
         g_espJunkVTables.clear(); // world mới => học lại rác từ đầu
+        g_espAIVTables.clear();   // qblpack: học lại VTable bot
+        ESPBonesReset();          // qblpack: rig/offset xương có thể đổi theo world
         g_espPasses = 0;
         g_espVerboseLeft = 2; // log chi tiết 2 lượt đầu của world mới
         g_espTracked.clear(); // world mới => tracked cũ sai hết, xả luôn
@@ -513,7 +523,10 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
         }
         // 0) VTable đã học (từ pawn của mình hoặc actor đầu): 0 read thêm.
         if (f.hasVtable && f.vtable && ((g_espPlayerVTable && f.vtable == g_espPlayerVTable) || (g_espPlayerVTables.count(f.vtable) > 0))) {
-            if (diag) diag->rule = 1;
+            if (diag) {
+                diag->rule = 1;
+                if (g_espAIVTables.count(f.vtable)) diag->ai = 1; // bot dùng chung VTable
+            }
             ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
             goto check_live;
         }
@@ -540,7 +553,9 @@ static BOOL ESPIsEnemy(uint64_t vmMap, uint64_t actor, int myTeam, uint64_t myPa
                             ESPLog("learned player VTable=0x%llx from %s", (unsigned long long)f.vtable, nm);
                         }
                     }
-                    if (diag) diag->rule = 2;
+                    f.ai = ESPNameIsAIPawn(nm) ? 1 : 0; // qblpack: AIMarkDifferent
+                    if (f.ai && f.hasVtable && f.vtable) g_espAIVTables.insert(f.vtable);
+                    if (diag) { diag->rule = 2; diag->ai = f.ai; }
                     ESPVerdictSetLocked(actor, 1, (f.hasTeam && f.team >= 0 && f.team <= 200000000) ? f.team : INT_MIN);
                     goto check_live;
                 }
@@ -626,6 +641,11 @@ check_live:;
     // 1 lần đọc cửa sổ cho check sống.
     ESPActorFields f;
     ESPActorFieldsRead(vmMap, actor, &f);
+    // qblpack: verdict-1 lấy từ cache không chạy lại nhánh tên — nhận AI theo
+    // VTable bot đã học (bot dùng chung class → cùng VTable).
+    if (diag && diag->ai == 0 && f.hasVtable && f.vtable && g_espAIVTables.count(f.vtable)) {
+        diag->ai = 1;
+    }
     if ((f.bHidden & 0x1) || (f.bDead & 0x1)) {
         if (diag) diag->rule = -1;
         // Giữ verdict 1 để khi unhide/revive không cần phân loại lại từ đầu —
@@ -1152,7 +1172,16 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
             tr.fallback = 0;
             tr.parent = 0;
-            tr.height = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
+            uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
+            tr.mesh = meshComp;
+            tr.height = ESPActorBoxHeight(vmMap, meshComp);
+            tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
+            tr.isAI = dg.ai ? 1 : 0;
+            // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
+            if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
+                team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
+                ESPBonesConfigure(vmMap, meshComp);
+            }
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
                 if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
@@ -1657,7 +1686,11 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         tr.root = ESPIsUserPtr(dg.root) ? dg.root : 0;
         tr.fallback = 0;
         tr.parent = 0;
-        tr.height = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
+        uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
+        tr.mesh = meshComp;
+        tr.height = ESPActorBoxHeight(vmMap, meshComp);
+        tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
+        tr.isAI = dg.ai ? 1 : 0;
         if (team == ESPTeam_Dummy) {
             tr.kind = 3;
             if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
@@ -2301,6 +2334,324 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
     return ESPCamBasisProject(&basis, world, outX, outY, outDist);
 }
 
+// MARK: - Xương / skeleton (port hướng QBL getBoneWithRotationFast)
+//
+// QBL: getBoneWithRotationFast(actor, boneIndex, FTransform) đọc transform
+// xương trong SkeletalMeshComponent, nhân với ComponentToWorld rồi trả vị trí
+// world — sau đó project ra màn hình và nối các khớp.
+//
+// Dự án này dump chỉ có Mesh (0x510) + ComponentToWorld (0x1D0) + Bounds, KHÔNG
+// có offset mảng xương. Vì vậy engine tự dò (runtime auto-detect) thay vì chép
+// một hằng số có thể sai:
+//   1. Quét các ứng viên TArray<FTransform> trong mesh+[0x480..0xC00).
+//   2. Với mỗi ứng viên, thử 3 bảng index khớp phổ biến (UE4 mannequin /
+//      biến thể PUBG mobile) và VALIDATE bằng tỉ lệ cơ thể thật:
+//      đầu > cổ > ngực > hông, tay 2 bên ngược hướng, độ dài từng đoạn tay/chân
+//      trong khoảng người thật. Chỉ nhận khi TẤT CẢ điều kiện khớp.
+//   3. Mỗi tick còn kiểm tra chéo: đầu phải nằm quanh mép trên box. Lệch liên
+//      tục => tự tắt xương (tránh vẽ rác) + ghi log.
+// Không dò được => xương tắt (các tính năng khác không bị ảnh hưởng).
+// Muốn thêm bảng index cho bản game khác: thêm vào kESPBoneMaps bên dưới.
+
+static std::atomic_bool g_espBonesWant{false};
+static std::atomic_bool g_espBonesReady{false};   // đã dò được offset + bảng index
+static std::atomic_bool g_espBonesAutoOff{false}; // tự tắt vì kiểm tra chéo fail liên tục
+static std::atomic_int g_espBoneBadTicks{0};
+static uint32_t g_espBoneOff = 0;      // offset TArray<FTransform> trong mesh
+static int g_espBoneMap[ESP_Bone_Count] = {0};
+static CFAbsoluteTime g_espBoneTryAt = 0;
+static char g_espBoneStatus[64] = "bones off";
+
+// Thứ tự slot: head, neck, chest, pelvis, LShoulder, LElbow, LHand,
+// RShoulder, RElbow, RHand, LHip, LKnee, LFoot, RHip, RKnee, RFoot, Root.
+// A = UE4 mannequin chuẩn (khớp public cho PUBG mobile).
+static const int kESPBoneMapA[ESP_Bone_Count] = {
+    6, 5, 4, 1,
+    7, 8, 10, 11, 12, 14,
+    15, 16, 17, 19, 20, 21,
+    0
+};
+// B = rig có thêm 1 đốt spine (đầu 7, cổ 6, ngực 5) — vài bản skin/season.
+static const int kESPBoneMapB[ESP_Bone_Count] = {
+    7, 6, 5, 1,
+    8, 9, 11, 12, 13, 15,
+    16, 17, 18, 20, 21, 22,
+    0
+};
+// C = rig có pelvis_01 (hông 2) + đốt spine phụ.
+static const int kESPBoneMapC[ESP_Bone_Count] = {
+    7, 6, 5, 2,
+    8, 9, 11, 12, 13, 15,
+    16, 17, 18, 20, 21, 22,
+    1
+};
+static const int *const kESPBoneMaps[] = { kESPBoneMapA, kESPBoneMapB, kESPBoneMapC };
+#define ESP_BONE_MAP_COUNT ((int)(sizeof(kESPBoneMaps) / sizeof(kESPBoneMaps[0])))
+
+static inline BOOL ESPFiniteV(float f) { return f == f && fabsf(f) < 1e9f; }
+
+// Đổi world => có thể đổi mode/rig: dò lại từ đầu (chỉ khi toggle đang bật).
+static void ESPBonesReset(void) {
+    g_espBonesReady.store(false);
+    g_espBonesAutoOff.store(false);
+    g_espBoneBadTicks.store(0);
+    g_espBoneTryAt = 0;
+    g_espBoneOff = 0;
+    memset(g_espBoneMap, 0, sizeof(g_espBoneMap));
+    snprintf(g_espBoneStatus, sizeof(g_espBoneStatus),
+             g_espBonesWant.load() ? "bones detect" : "bones off");
+}
+
+// Khoảng cách 3D giữa 2 khớp (component space, cm).
+static float ESPBoneDist(const ESPVector *p, int a, int b) {
+    float dx = p[a].x - p[b].x, dy = p[a].y - p[b].y, dz = p[a].z - p[b].z;
+    return sqrtf(dx*dx + dy*dy + dz*dz);
+}
+
+// Validate 1 bảng index trên vị trí component-space của các xương.
+static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
+    if (!p || !map || count < 8) return NO;
+    for (int i = 0; i < ESP_Bone_Count; i++) {
+        if (map[i] < 0 || map[i] >= count) return NO;
+    }
+    const ESPVector &head = p[map[ESPBone_Head]];
+    const ESPVector &neck = p[map[ESPBone_Neck]];
+    const ESPVector &chest = p[map[ESPBone_Chest]];
+    const ESPVector &pelvis = p[map[ESPBone_Pelvis]];
+    // 1) Chuỗi thân thẳng đứng: đầu > cổ > ngực > hông, mỗi đoạn 3..60cm,
+    //    đầu-hông 45..130cm (người 1m4..2m + sai số).
+    float dHeadPelvis = ESPBoneDist(p, map[ESPBone_Head], map[ESPBone_Pelvis]);
+    if (dHeadPelvis < 45.0f || dHeadPelvis > 130.0f) return NO;
+    if (!(head.z > neck.z + 3.0f && neck.z > chest.z + 3.0f && chest.z > pelvis.z + 3.0f)) return NO;
+    if (ESPBoneDist(p, map[ESPBone_Head], map[ESPBone_Neck]) > 40.0f) return NO;
+    // 2) Tay: vai gần ngực, vai-khuỷu và khuỷu-bàn tay 15..45cm.
+    for (int side = 0; side < 2; side++) {
+        int s = side ? ESPBone_RShoulder : ESPBone_LShoulder;
+        int e = side ? ESPBone_RElbow : ESPBone_LElbow;
+        int h = side ? ESPBone_RHand : ESPBone_LHand;
+        if (ESPBoneDist(p, map[s], map[ESPBone_Chest]) > 45.0f) return NO;
+        if (ESPBoneDist(p, map[s], map[e]) < 15.0f || ESPBoneDist(p, map[s], map[e]) > 45.0f) return NO;
+        if (ESPBoneDist(p, map[e], map[h]) < 15.0f || ESPBoneDist(p, map[e], map[h]) > 45.0f) return NO;
+    }
+    // 3) Chân: hông sát hông, hông-gối và gối-bàn chân 25..70cm, bàn chân thấp
+    //    hơn hông (trục Z hướng lên).
+    for (int side = 0; side < 2; side++) {
+        int hp = side ? ESPBone_RHip : ESPBone_LHip;
+        int kn = side ? ESPBone_RKnee : ESPBone_LKnee;
+        int ft = side ? ESPBone_RFoot : ESPBone_LFoot;
+        if (ESPBoneDist(p, map[hp], map[ESPBone_Pelvis]) > 40.0f) return NO;
+        if (ESPBoneDist(p, map[hp], map[kn]) < 25.0f || ESPBoneDist(p, map[hp], map[kn]) > 70.0f) return NO;
+        if (ESPBoneDist(p, map[kn], map[ft]) < 25.0f || ESPBoneDist(p, map[kn], map[ft]) > 70.0f) return NO;
+        if (!(p[map[ft]].z < p[map[kn]].z + 3.0f && p[map[kn]].z < p[map[hp]].z + 3.0f)) return NO;
+    }
+    // 4) 2 vai phải ở 2 phía ngực (tích vô hướng vector ngực->vai không dương).
+    {
+        const ESPVector &c = p[map[ESPBone_Chest]];
+        const ESPVector &l = p[map[ESPBone_LShoulder]];
+        const ESPVector &r = p[map[ESPBone_RShoulder]];
+        float ux = l.x - c.x, uy = l.y - c.y, uz = l.z - c.z;
+        float vx = r.x - c.x, vy = r.y - c.y, vz = r.z - c.z;
+        float ul = sqrtf(ux*ux + uy*uy + uz*uz);
+        float vl = sqrtf(vx*vx + vy*vy + vz*vz);
+        if (ul < 1.0f || vl < 1.0f) return NO;
+        if ((ux*vx + uy*vy + uz*vz) / (ul * vl) > 0.2f) return NO;
+        // 2 vai cách nhau 20..80cm (rộng vai người thật).
+        float dx = l.x - r.x, dy = l.y - r.y, dz = l.z - r.z;
+        float sep = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (sep < 20.0f || sep > 80.0f) return NO;
+    }
+    return YES;
+}
+
+// Đọc header TArray<FTransform> tại mesh+off. data/user-ptr + count 15..800.
+static BOOL ESPBoneArrayAt(uint64_t vmMap, uint64_t mesh, uint32_t off,
+                           uint64_t *outData, uint32_t *outCount) {
+    uint8_t hdr[16];
+    if (!ESPMemoryRead(vmMap, mesh + off, hdr, sizeof(hdr))) return NO;
+    uint64_t d = 0;
+    uint32_t c = 0;
+    memcpy(&d, hdr, 8);
+    memcpy(&c, hdr + 8, 4);
+    if (!ESPIsUserPtr(d) || c < 15 || c > 800) return NO;
+    if (outData) *outData = d;
+    if (outCount) *outCount = c;
+    return YES;
+}
+
+// Đọc translation (component space) của `count` FTransform đầu trong mảng.
+static BOOL ESPReadBoneLocals(uint64_t vmMap, uint64_t data, ESPVector *out, int count) {
+    if (!out || count <= 0 || count > (int)ESPOff_Bone_NumMax) return NO;
+    uint8_t buf[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
+    if (!ESPMemoryRead(vmMap, data, buf, (size_t)count * ESPOff_BoneTransformSize)) return NO;
+    for (int i = 0; i < count; i++) {
+        float x = 0, y = 0, z = 0;
+        memcpy(&x, buf + (size_t)i * ESPOff_BoneTransformSize + ESPOff_Transform_Translation + 0, 4);
+        memcpy(&y, buf + (size_t)i * ESPOff_BoneTransformSize + ESPOff_Transform_Translation + 4, 4);
+        memcpy(&z, buf + (size_t)i * ESPOff_BoneTransformSize + ESPOff_Transform_Translation + 8, 4);
+        // Component space quanh mesh: người cao 2m thì |toạ độ| < ~250cm.
+        if (!ESPFiniteV(x) || !ESPFiniteV(y) || !ESPFiniteV(z)) return NO;
+        if (fabsf(x) > 400.0f || fabsf(y) > 400.0f || fabsf(z) > 400.0f) return NO;
+        out[i] = (ESPVector){ x, y, z };
+    }
+    return YES;
+}
+
+// Dò (offset mảng xương, bảng index) trên 1 mesh player thật. Throttle 2s/lần.
+// Mutex riêng: configure chạy từ queue scan nền, sample chạy từ tick 60Hz —
+// mutex chỉ nhận ở đường configure (hiếm), reader chỉ snapshot (xem ESPBonesSample).
+static std::mutex g_espBoneCfgMutex;
+static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh) {
+    std::lock_guard<std::mutex> lk(g_espBoneCfgMutex);
+    if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
+    if (!vmMap || !ESPIsUserPtr(mesh)) return NO;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (g_espBoneTryAt > 0 && now - g_espBoneTryAt < 2.0) return NO;
+    g_espBoneTryAt = now;
+    snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones detect");
+    static ESPVector pts[ESPOff_Bone_NumMax];
+    for (uint32_t off = ESPOff_Mesh_BoneScanStart; off + 16 <= ESPOff_Mesh_BoneScanEnd; off += 8) {
+        uint64_t data = 0;
+        uint32_t count = 0;
+        if (!ESPBoneArrayAt(vmMap, mesh, off, &data, &count)) continue;
+        int n = (int)(count < ESPOff_Bone_NumMax ? count : ESPOff_Bone_NumMax);
+        if (n < 15) continue;
+        if (!ESPReadBoneLocals(vmMap, data, pts, n)) continue;
+        for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
+            if (!ESPBoneMapValidate(pts, n, kESPBoneMaps[m])) continue;
+            g_espBoneOff = off;
+            memcpy(g_espBoneMap, kESPBoneMaps[m], sizeof(g_espBoneMap));
+            g_espBoneBadTicks.store(0);
+            g_espBonesReady.store(true); // store cuối: reader chỉ dùng cfg khi đã ready
+            snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones 0x%x ok", (unsigned)off);
+            ESPLog("bones: offset=0x%x map=%d bones=%u (auto-detect)", (unsigned)off, m, (unsigned)count);
+            return YES;
+        }
+    }
+    // Không ứng viên nào qua validate: giữ tắt, thử lại sau (world khác có thể khác rig).
+    snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones no-match");
+    return NO;
+}
+
+// Nhân FTransform (component -> world) rồi project 1 khớp.
+static void ESPBoneWorldFromLocal(const uint8_t *c2w, const ESPVector *local, ESPVector *out) {
+    float qx = 0, qy = 0, qz = 0, qw = 1;
+    float tx = 0, ty = 0, tz = 0;
+    float sx = 1, sy = 1, sz = 1;
+    memcpy(&qx, c2w + 0x0, 4);
+    memcpy(&qy, c2w + 0x4, 4);
+    memcpy(&qz, c2w + 0x8, 4);
+    memcpy(&qw, c2w + 0xC, 4);
+    memcpy(&tx, c2w + ESPOff_Transform_Translation + 0, 4);
+    memcpy(&ty, c2w + ESPOff_Transform_Translation + 4, 4);
+    memcpy(&tz, c2w + ESPOff_Transform_Translation + 8, 4);
+    memcpy(&sx, c2w + 0x20, 4);
+    memcpy(&sy, c2w + 0x24, 4);
+    memcpy(&sz, c2w + 0x28, 4);
+    if (!ESPFiniteV(sx) || sx < 0.01f || sx > 100.0f) sx = 1.0f;
+    if (!ESPFiniteV(sy) || sy < 0.01f || sy > 100.0f) sy = 1.0f;
+    if (!ESPFiniteV(sz) || sz < 0.01f || sz > 100.0f) sz = 1.0f;
+    if (!ESPFiniteV(qw)) qw = 1.0f;
+    float vx = local->x * sx, vy = local->y * sy, vz = local->z * sz;
+    // v' = v + 2*cross(q.xyz, cross(q.xyz, v) + q.w*v)
+    float cx = qy*vz - qz*vy;
+    float cy = qz*vx - qx*vz;
+    float cz = qx*vy - qy*vx;
+    float ux = 2.0f * (cx + qw*vx);
+    float uy = 2.0f * (cy + qw*vy);
+    float uz = 2.0f * (cz + qw*vz);
+    out->x = vx + (qy*uz - qz*uy) + tx;
+    out->y = vy + (qz*ux - qx*uz) + ty;
+    out->z = vz + (qx*uy - qy*ux) + tz;
+}
+
+// Điền box->bones[] cho 1 player. Trả về số khớp project được.
+// boxTopY/boxH dùng để kiểm tra chéo mép đầu (chống nhận nhầm hệ quy chiếu).
+static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basis,
+                          ESPBox2D *box, float boxTopY, float boxH) {
+    if (!box) return 0;
+    box->boneCount = 0;
+    for (int i = 0; i < ESP_Bone_Count; i++) box->bones[i].ok = 0;
+    if (!g_espBonesReady.load() || !g_espBonesWant.load()) return 0;
+    if (!vmMap || !basis || !ESPIsUserPtr(mesh)) return 0;
+    // Snapshot cấu hình (off/map) — nếu đổi world đúng lúc này thì frame này có
+    // thể lệch; bounds check bên dưới chặn đọc sai, box vẫn vẽ bình thường.
+    const uint32_t boneOff = g_espBoneOff;
+    int boneMap[ESP_Bone_Count];
+    memcpy(boneMap, g_espBoneMap, sizeof(boneMap));
+    uint64_t data = 0;
+    uint32_t count = 0;
+    if (!ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
+    int need = 0;
+    for (int i = 0; i < ESP_Bone_Count; i++) {
+        if (boneMap[i] + 1 > need) need = boneMap[i] + 1;
+    }
+    if (need <= 0 || (uint32_t)need > count || need > (int)ESPOff_Bone_NumMax) return 0;
+    uint8_t buf[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
+    if (!ESPMemoryRead(vmMap, data, buf, (size_t)need * ESPOff_BoneTransformSize)) return 0;
+    uint8_t c2w[0x30];
+    if (!ESPMemoryRead(vmMap, mesh + ESPOff_Comp_ComponentToWorld, c2w, sizeof(c2w))) return 0;
+    int ok = 0;
+    for (int i = 0; i < ESP_Bone_Count; i++) {
+        int bi = boneMap[i];
+        if (bi < 0 || bi >= need) continue;
+        ESPVector local;
+        memcpy(&local, buf + (size_t)bi * ESPOff_BoneTransformSize + ESPOff_Transform_Translation, sizeof(local));
+        if (!ESPFiniteV(local.x) || !ESPFiniteV(local.y) || !ESPFiniteV(local.z)) continue;
+        ESPVector w;
+        ESPBoneWorldFromLocal(c2w, &local, &w);
+        float sx = 0, sy = 0;
+        if (!ESPCamBasisProject(basis, w, &sx, &sy, NULL)) continue;
+        box->bones[i].x = sx;
+        box->bones[i].y = sy;
+        box->bones[i].ok = 1;
+        ok++;
+    }
+    // Kiểm tra chéo: đầu phải quanh mép trên box (box = capsule ± height/2).
+    // Lệch dai dẳng => offset/index sai => tự tắt để không vẽ rác.
+    if (ok > 0 && box->bones[ESPBone_Head].ok) {
+        float hy = box->bones[ESPBone_Head].y;
+        float top = boxTopY, h = (boxH > 1.0f ? boxH : 1.0f);
+        if (hy < top - 0.55f * h || hy > top + 0.65f * h) {
+            for (int i = 0; i < ESP_Bone_Count; i++) box->bones[i].ok = 0;
+            box->boneCount = 0;
+            if (!g_espBonesAutoOff.load() && g_espBoneBadTicks.fetch_add(1) + 1 > 600) { // ~10s @60Hz
+                g_espBonesAutoOff.store(true);
+                g_espBonesReady.store(false);
+                snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones auto-off");
+                ESPLog("bones: auto-off (head/box mismatch)");
+            }
+            return 0;
+        }
+        g_espBoneBadTicks.store(0);
+    }
+    box->boneCount = (uint8_t)ok;
+    return ok;
+}
+
+void ESPEngineSetBonesEnabled(BOOL enabled) {
+    bool want = enabled ? true : false;
+    bool prev = g_espBonesWant.exchange(want);
+    if (want && !prev) {
+        // Bật lại: cho phép dò lại kể cả sau auto-off (user đã đổi ý/đổi bản game).
+        if (!g_espBonesReady.load()) {
+            g_espBonesAutoOff.store(false);
+            g_espBoneBadTicks.store(0);
+            g_espBoneTryAt = 0;
+            snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones detect");
+        }
+    } else if (!want) {
+        snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones off");
+    }
+}
+
+BOOL ESPEngineBonesEnabled(void) {
+    return g_espBonesWant.load() ? YES : NO;
+}
+
+const char *ESPEngineBonesStatus(void) {
+    return g_espBoneStatus;
+}
+
 int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *outBoxes, int maxBoxes) {
     if (!outBoxes || maxBoxes <= 0) return 0;
 #if !USE_DARKSWORD
@@ -2365,7 +2716,14 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         if (!ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) continue;
         cEne++;
         // Chiều cao box: extent mesh đọc 1 lần/actor/scan, dùng cho cả tracked.
-        float actorH = ESPActorBoxHeight(vmMap, ESPBoxMesh(vmMap, actor, &dg, team));
+        uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
+        float actorH = ESPActorBoxHeight(vmMap, meshComp);
+        // qblpack: dò bảng xương trên player thật đầu tiên có mesh (throttle 2s
+        // bên trong; chỉ chạy khi toggle bật và chưa dò được).
+        if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
+            team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
+            ESPBonesConfigure(vmMap, meshComp);
+        }
         uint64_t rootComp = ESPIsUserPtr(dg.root) ? dg.root : 0;
         if (foundTracked.size() < 64) {
             ESPTrackedActor tr;
@@ -2373,7 +2731,10 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             tr.root = rootComp;
             tr.fallback = (team == ESPTeam_Dummy && ESPIsUserPtr(dg.tMesh)) ? dg.tMesh : 0;
             tr.parent = 0;
+            tr.mesh = meshComp;
             tr.height = actorH;
+            tr.isAI = dg.ai ? 1 : 0; // qblpack: AIMarkDifferent (VTable bot/tên AI)
+            tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
             if (tr.root) {
                 BOOL okp = NO;
                 uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
@@ -2460,6 +2821,10 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         // kernrw49: nick + kind cho đường scan đầy đủ (giống RefreshBoxes).
         ESPBox2D box = { centerX - boxW*0.5f, topY, boxW, boxH, dist, ESPHPPercent(vmMap, actor, (team == ESPTeam_Dummy) ? 3 : 1), 1, actor, {0}, 0 };
         box.kind = (team == ESPTeam_Dummy) ? 3 : 1;
+        // qblpack: TeamID + AI mark (giống 2 field của QBL: player.TeamID,
+        // player.AIMarkDifferent).
+        box.team = (box.kind == 3 || team < 0 || team > 200000000) ? INT_MIN : team;
+        box.isAI = (uint8_t)(dg.ai ? 1 : 0);
         if (box.kind == 3) {
             strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
         } else if (ESPPlayerNickName(vmMap, actor, box.nick)) {
@@ -2975,7 +3340,10 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         // mỗi tick gần như free; hỏng thì "Unknown" như Kernel GetPlayerName.
         ESPBox2D box = { centerX - boxW*0.5f, topY, boxW, boxH, dist, h->hpPct, 1, tr->actor, {0}, 0 };
         box.kind = (uint8_t)tr->kind;
-        if (tr->kind == 3) {
+        // qblpack: TeamID + AI mark + xương (giống RenderSnapshot của QBL).
+        box.team = (tr->kind == 3) ? INT_MIN : tr->team;
+        box.isAI = tr->isAI;
+        if (box.kind == 3) {
             strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
         } else if (ESPPlayerNickName(vmMap, tr->actor, box.nick)) {
             // giữ nguyên nick
@@ -2983,6 +3351,10 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
         }
         box.nick[sizeof(box.nick) - 1] = '\0';
+        if (box.kind == 1 && g_espBonesWant.load() && g_espBonesReady.load() &&
+            tr->mesh && ESPIsUserPtr(tr->mesh)) {
+            (void)ESPBonesSample(vmMap, tr->mesh, &basis, &box, box.y, box.h);
+        }
         outBoxes[n++] = box;
     }
     static CFAbsoluteTime s_zeroSince = 0;       // bắt đầu chuỗi 0 box (0 = đang có box)

@@ -850,16 +850,43 @@ static BOOL ds_esp_feature_pref(NSDictionary *prefs, NSString *key) {
     return YES;
 }
 
+// qblpack: như trên nhưng default cấu hình được (Bones/Scale mặc định OFF).
+static BOOL ds_esp_feature_pref_default(NSDictionary *prefs, NSString *key, BOOL def) {
+    NSNumber *n = prefs ? prefs[key] : nil;
+    if (n) return n.boolValue;
+    NSNumber *direct = nil;
+    @try { direct = [NSUserDefaults.standardUserDefaults objectForKey:key]; } @catch (__unused NSException *e) {}
+    if (direct) return direct.boolValue;
+    return def;
+}
+
 // "ESP Box" CHỈ là toggle của khung 2D. Các thành phần khác (Snapline,
 // Tên, Máu, Khoảng cách) phải chạy độc lập — trước đây cả overlay bị gate
 // theo mỗi ESP Box nên tắt Box là Line/Name/Health/Distance cũng không chạy.
 // Overlay chỉ tắt hẳn khi TẤT CẢ đều OFF.
 static BOOL ds_esp_any_feature_from_prefs(NSDictionary *prefs) {
     if (ds_show_esp_from_prefs(prefs)) return YES;
-    return ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowLine) ||
-           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowName) ||
-           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowHealth) ||
-           ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowDistance);
+    if (ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowLine) ||
+        ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowName) ||
+        ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowHealth) ||
+        ds_esp_feature_pref(prefs, HUDUserDefaultsKeyESPShowDistance)) {
+        return YES;
+    }
+    // qblpack: key mới mặc định ON, nhưng CHỈ giữ module chạy khi user đã set
+    // tường minh = YES — để "tắt hết" vẫn tắt được như trước (không tự bật lại
+    // chỉ vì key chưa tồn tại trong NSUserDefaults).
+    NSArray<NSString *> *extra = @[
+        HUDUserDefaultsKeyESPShowTeamID,
+        HUDUserDefaultsKeyESPShowHeadDot,
+        HUDUserDefaultsKeyESPShowAIMark,
+        HUDUserDefaultsKeyESPShowBones,
+        HUDUserDefaultsKeyESPESPScale,
+    ];
+    for (NSString *key in extra) {
+        NSNumber *n = prefs ? prefs[key] : nil;
+        if (n && n.boolValue) return YES;
+    }
+    return NO;
 }
 
 NSString *DSBridgeESPStatus(void) {
@@ -923,6 +950,16 @@ NSString *DSBridgeESPScanInfo(void) {
 #if USE_DARKSWORD
     @try {
         NSString *s = ESPEngineScanInfoText();
+        // qblpack: gắn trạng thái xương vào dòng scan của app (chỉ khi toggle
+        // Bones đang bật) để verify trên máy: detect / 0x<off> ok / no-match /
+        // auto-off. Tắt bones -> không đổi gì (giữ dòng scan như cũ).
+        if (ESPEngineBonesEnabled()) {
+            const char *bs = ESPEngineBonesStatus();
+            if (bs && bs[0]) {
+                NSString *suffix = [NSString stringWithFormat:@" · %s", bs];
+                return s.length ? [s stringByAppendingString:suffix] : suffix;
+            }
+        }
         return s ?: @"scan idle";
     } @catch (__unused NSException *e) {
         return @"scan idle";
@@ -1616,6 +1653,16 @@ static uint64_t ds_remote_get_u64_on_main(RemoteCall *process, uint64_t target,
 
 static BOOL ds_remote_set_double_on_main(RemoteCall *process, uint64_t target,
                                          const char *selectorName, double value) {
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
+                                    &argument, 1);
+}
+
+// qblpack: property kiểu `float` (CALayer.speed, shadowOpacity...) — NSInvocation
+// copy đúng sizeof(type)=4 byte từ buffer, nên double 8 byte ở đây là SAI
+// (little-endian: 4 byte thấp của 1000.0 = 0 -> speed 0, path không cập nhật).
+static BOOL ds_remote_set_float_on_main(RemoteCall *process, uint64_t target,
+                                        const char *selectorName, float value) {
     DSRemoteArgument argument = { &value, sizeof(value) };
     return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
                                     &argument, 1);
@@ -2489,7 +2536,741 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
     return ok;
 }
 
-static void ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
+// ===========================================================================
+// MARK: - QBL-style renderer: Frame builder + batched presenter
+// ---------------------------------------------------------------------------
+// Port kiến trúc QBL (QBLDrawList -> DSOverlay::PresentFrame):
+//   1. ds_qbl_build_frame() gom TOÀN BỘ primitive của 1 frame vào draw list
+//      CPU (ESPOverlay.mm) — đúng bộ hàm QBL dùng: AddRect/AddRectFilled/
+//      AddLine/AddCircle/AddTriangleFilled/AddOutlinedText.
+//   2. ds_qbl_present() bắn sang SpringBoard theo BATCH:
+//        - mỗi style (box/box AI/snapline/xương/head dot/AI mark/HP) là 1
+//          CAShapeLayer tái sử dụng;
+//        - rect gom 1 lần bằng CGPathAddRects, polyline bằng CGPathAddLines
+//          (points/rects nằm trong 1 buffer remote, write 1 lần/frame);
+//        - text vào pool UILabel (setText khi đổi, setFrame 30Hz) — thay cho
+//          attributed-string stroke của QBL bằng shadow đen set 1 lần.
+//   3. Frame trùng hash (không có gì đổi) -> bỏ qua toàn bộ remote call.
+// Toàn bộ nằm trong 1 UIView gốc (g_qblRoot) => hide/show 1 call.
+// Cờ DS_ESP_RENDER_COMMANDLIST=0 để quay lại renderer per-box cũ.
+// ===========================================================================
+#ifndef DS_ESP_RENDER_COMMANDLIST
+#define DS_ESP_RENDER_COMMANDLIST 1
+#endif
+
+enum {
+    kQBLBucketBox = 0,   // viền box player (trắng)
+    kQBLBucketBoxAI,     // viền box AI (vàng, đậm hơn)
+    kQBLBucketLine,      // snapline (trắng)
+    kQBLBucketBone,      // xương (xanh lá)
+    kQBLBucketDot,       // head dot (trắng, tô)
+    kQBLBucketAIMark,    // tam giác AI + dot AI (vàng, tô + viền)
+    kQBLBucketHpBg,      // nền thanh máu (đen, tô)
+    kQBLBucketHpRed,     // máu < 30% (tô)
+    kQBLBucketHpYellow,  // máu 30-59% (tô)
+    kQBLBucketHpGreen,   // máu >= 60% (tô)
+    kQBLBucketCount
+};
+
+// 0xAARRGGBB — cùng quy ước màu với QBL draw list.
+static const uint32_t kQBLColorBox = 0xFFFFFFFFu;
+static const uint32_t kQBLColorAI  = 0xFFFFD040u;
+static const uint32_t kQBLColorLine = 0xFFFFFFFFu;
+static const uint32_t kQBLColorBone = 0xFF35E06Au;
+static const uint32_t kQBLColorDot = 0xFFFFFFFFu;
+static const uint32_t kQBLColorHpBg = 0xFF000000u;
+static const uint32_t kQBLColorHpRed = 0xFFFF3B30u;
+static const uint32_t kQBLColorHpYellow = 0xFFFFCC00u;
+static const uint32_t kQBLColorHpGreen = 0xFF34C759u;
+
+static uint32_t ds_qbl_bucket_color(int bucket) {
+    switch (bucket) {
+        case kQBLBucketBox: return kQBLColorBox;
+        case kQBLBucketBoxAI: return kQBLColorAI;
+        case kQBLBucketLine: return kQBLColorLine;
+        case kQBLBucketBone: return kQBLColorBone;
+        case kQBLBucketDot: return kQBLColorDot;
+        case kQBLBucketAIMark: return kQBLColorAI;
+        case kQBLBucketHpBg: return kQBLColorHpBg;
+        case kQBLBucketHpRed: return kQBLColorHpRed;
+        case kQBLBucketHpYellow: return kQBLColorHpYellow;
+        case kQBLBucketHpGreen: return kQBLColorHpGreen;
+        default: return 0xFFFFFFFFu;
+    }
+}
+
+static float ds_qbl_bucket_width(int bucket) {
+    switch (bucket) {
+        case kQBLBucketBox: return 1.5f;
+        case kQBLBucketBoxAI: return 2.0f;
+        case kQBLBucketLine: return 1.0f;
+        case kQBLBucketBone: return 1.2f;
+        case kQBLBucketAIMark: return 1.5f;
+        default: return 1.0f;
+    }
+}
+
+static BOOL ds_qbl_bucket_filled(int bucket) {
+    return bucket == kQBLBucketDot || bucket == kQBLBucketAIMark ||
+           bucket >= kQBLBucketHpBg;
+}
+
+static BOOL ds_qbl_bucket_stroked(int bucket) {
+    return bucket <= kQBLBucketAIMark; // box/line/bone/dot/AIMark đều có viền
+}
+
+#define kQBLLabelCount (ESPOverlayMaxBoxes * 2) // 0..7 = tên/máu, 8..15 = TeamID
+#define DS_QBL_MAX_RECTS 32
+#define DS_QBL_MAX_POLYS 16
+
+typedef struct {
+    BOOL box, line, name, dist, health, teamID, headDot, aiMark, bones;
+    float scale;
+} DSQBLFeat;
+
+typedef struct {
+    int start;
+    int count;
+} DSQBLPolyRef;
+
+// --- remote object cache (theo pid SpringBoard; pid đổi = dựng lại) ---
+static pid_t g_qblPid = 0;
+static uint64_t g_qblContainer = 0;
+static uint64_t g_qblRoot = 0;
+static uint64_t g_qblShape[kQBLBucketCount];
+static uint64_t g_qblShapePath[kQBLBucketCount];
+static uint64_t g_qblLabel[kQBLLabelCount];
+static uint32_t g_qblLabelColor[kQBLLabelCount];
+static char g_qblLabelText[kQBLLabelCount][112];
+static CGRect g_qblLabelRect[kQBLLabelCount];
+static BOOL g_qblLabelRectValid[kQBLLabelCount];
+static BOOL g_qblLabelShown[kQBLLabelCount];
+static CFAbsoluteTime g_qblLabelAt[kQBLLabelCount];
+static BOOL g_qblRootHidden = YES;
+static CGRect g_qblRootFrame;
+static CGRect g_qblWindowFrame;
+static uint64_t g_qblBufAddr = 0;
+static int g_qblBufCap = 0;
+static uint64_t g_qblFrameHash = 0;
+static unsigned long g_qblFrames = 0;
+static unsigned long g_qblSkips = 0;
+
+// --- per-frame accumulators (mapped sang portrait) ---
+static CGRect s_qblRects[kQBLBucketCount][DS_QBL_MAX_RECTS];
+static int s_qblRectCount[kQBLBucketCount];
+static DSQBLPolyRef s_qblPolys[kQBLBucketCount][DS_QBL_MAX_POLYS];
+static int s_qblPolyCount[kQBLBucketCount];
+static CGPoint s_qblPts[ESP_DRAW_MAX_POINTS];
+static int s_qblPtCount = 0;
+static CGRect s_qblAllRects[kQBLBucketCount * DS_QBL_MAX_RECTS];
+
+static void ds_qbl_reset_remote(void) {
+    g_qblPid = 0;
+    g_qblContainer = 0;
+    g_qblRoot = 0;
+    memset(g_qblShape, 0, sizeof(g_qblShape));
+    memset(g_qblShapePath, 0, sizeof(g_qblShapePath));
+    memset(g_qblLabel, 0, sizeof(g_qblLabel));
+    memset(g_qblLabelRectValid, 0, sizeof(g_qblLabelRectValid));
+    memset(g_qblLabelShown, 0, sizeof(g_qblLabelShown));
+    memset(g_qblLabelText, 0, sizeof(g_qblLabelText));
+    memset(g_qblLabelColor, 0, sizeof(g_qblLabelColor));
+    memset(g_qblLabelAt, 0, sizeof(g_qblLabelAt));
+    g_qblBufAddr = 0;
+    g_qblBufCap = 0;
+    g_qblRootHidden = YES;
+    g_qblRootFrame = CGRectZero;
+    g_qblWindowFrame = CGRectZero;
+    g_qblFrameHash = 0;
+}
+
+static uint64_t ds_qbl_color_obj(RemoteCall *process, uint32_t argb) {
+    uint64_t cls = ds_remote_class(process, "UIColor");
+    if (!cls) return 0;
+    double r = (double)((argb >> 16) & 0xFF) / 255.0;
+    double g = (double)((argb >> 8) & 0xFF) / 255.0;
+    double b = (double)(argb & 0xFF) / 255.0;
+    double a = (double)((argb >> 24) & 0xFF) / 255.0;
+    DSRemoteArgument args[] = {
+        { &r, sizeof(r) }, { &g, sizeof(g) }, { &b, sizeof(b) }, { &a, sizeof(a) },
+    };
+    return ds_remote_get_retained_object_on_main(
+        process, cls, "colorWithRed:green:blue:alpha:", args, 4);
+}
+
+static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
+    if (!process || !process.trojanMem || bytes == 0) return NO;
+    if (g_qblBufAddr && (size_t)g_qblBufCap >= bytes) return YES;
+    if (g_qblBufAddr) {
+        void *freeSym = ds_remote_system_symbol("free");
+        if (freeSym) DSRemoteArbCallWithTimeout(1, process, freeSym, g_qblBufAddr);
+        g_qblBufAddr = 0;
+        g_qblBufCap = 0;
+    }
+    void *mallocSym = ds_remote_system_symbol("malloc");
+    if (!mallocSym) return NO;
+    int cap = bytes < 16384 ? 16384 : (int)bytes;
+    uint64_t addr = (uint64_t)DSRemoteArbCallWithTimeout(1, process, mallocSym, (uint64_t)cap);
+    if (!addr) return NO;
+    g_qblBufAddr = addr;
+    g_qblBufCap = cap;
+    return YES;
+}
+
+// setPath: + release path cũ (path mới do layer giữ).
+static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
+    if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
+    if (!ds_perform_on_springboard_main(process, g_qblShape[bucket],
+                                        ds_remote_sel(process, "setPath:"), path, YES)) {
+        if (path) {
+            void *rel = ds_remote_system_symbol("CGPathRelease");
+            if (rel) DSRemoteArbCallWithTimeout(1, process, rel, path);
+        }
+        return NO;
+    }
+    if (g_qblShapePath[bucket]) {
+        void *rel = ds_remote_system_symbol("CGPathRelease");
+        if (rel) DSRemoteArbCallWithTimeout(1, process, rel, g_qblShapePath[bucket]);
+    }
+    g_qblShapePath[bucket] = path;
+    return YES;
+}
+
+static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
+    if (!process || !process.trojanMem) return NO;
+    if (g_qblPid != (pid_t)process.pid) ds_qbl_reset_remote();
+    if (g_qblRoot && g_qblContainer == g_espContainer) {
+        if (!CGRectEqualToRect(g_qblRootFrame, portraitBounds)) {
+            ds_remote_set_rect_on_main(process, g_qblRoot, "setFrame:", portraitBounds);
+            for (int i = 0; i < kQBLBucketCount; i++) {
+                if (g_qblShape[i]) {
+                    ds_remote_set_rect_on_main(process, g_qblShape[i], "setFrame:", portraitBounds);
+                }
+            }
+            g_qblRootFrame = portraitBounds;
+        }
+        return YES;
+    }
+    if (g_qblRoot) ds_qbl_reset_remote(); // container cũ bị thay: bỏ cache, leak root cũ
+    if (!g_espContainer) return NO;
+    g_qblPid = (pid_t)process.pid;
+
+    uint64_t viewClass = ds_remote_class(process, "UIView");
+    uint64_t shapeClass = ds_remote_class(process, "CAShapeLayer");
+    uint64_t labelClass = ds_remote_class(process, "UILabel");
+    uint64_t colorClass = ds_remote_class(process, "UIColor");
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t addSubview = ds_remote_sel(process, "addSubview:");
+    uint64_t addSublayer = ds_remote_sel(process, "addSublayer:");
+    uint64_t clear = colorClass ? ds_remote_get_object_on_main(process, colorClass, "clearColor") : 0;
+    if (!viewClass || !shapeClass || !labelClass || !alloc || !clear) {
+        ESPLog("qbl ensure fail class view=%llx shape=%llx lbl=%llx",
+               (unsigned long long)viewClass, (unsigned long long)shapeClass,
+               (unsigned long long)labelClass);
+        return NO;
+    }
+
+    uint64_t root = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
+    if (!root || !ds_remote_invoke_noarg_on_main(process, root, "init")) return NO;
+    ds_remote_set_rect_on_main(process, root, "setFrame:", portraitBounds);
+    ds_remote_set_u64_on_main(process, root, "setUserInteractionEnabled:", 0);
+    ds_perform_on_springboard_main(process, root, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+    if (!ds_perform_on_springboard_main(process, g_espContainer, addSubview, root, YES)) return NO;
+    uint64_t rootLayer = ds_remote_get_object_on_main(process, root, "layer");
+    if (!rootLayer) return NO;
+
+    for (int i = 0; i < kQBLBucketCount; i++) {
+        uint64_t layer = remote_msg(process, shapeClass, alloc, 0, 0, 0, 0);
+        if (!layer || !ds_remote_invoke_noarg_on_main(process, layer, "init")) continue;
+        ds_remote_set_rect_on_main(process, layer, "setFrame:", portraitBounds);
+        ds_remote_set_float_on_main(process, layer, "setSpeed:", 1000.0f);
+        ds_remote_set_double_on_main(process, layer, "setLineWidth:", (double)ds_qbl_bucket_width(i));
+        // Màu: CAShapeLayer nhận CGColorRef -> lấy từ UIColor (CF object, bridge an toàn).
+        uint32_t argb = ds_qbl_bucket_color(i);
+        uint64_t color = ds_qbl_color_obj(process, argb);
+        uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
+        if (cg) {
+            if (ds_qbl_bucket_stroked(i)) {
+                ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setStrokeColor:"), cg, YES);
+            }
+            if (ds_qbl_bucket_filled(i)) {
+                ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setFillColor:"), cg, YES);
+            }
+        }
+        ds_perform_on_springboard_main(process, rootLayer, addSublayer, layer, YES);
+        g_qblShape[i] = layer;
+    }
+
+    uint64_t fontMain = ds_remote_font(process, 13.0, YES);
+    uint64_t fontSmall = ds_remote_font(process, 11.0, YES);
+    uint64_t white = ds_qbl_color_obj(process, 0xFFFFFFFFu);
+    uint64_t shadow = ds_qbl_color_obj(process, 0xFF000000u);
+    uint64_t shadowCG = shadow ? ds_remote_get_object_on_main(process, shadow, "CGColor") : 0;
+    for (int i = 0; i < kQBLLabelCount; i++) {
+        uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
+        if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) continue;
+        ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
+        ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+        ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (i % 2 == 0) ? 2 : 1);
+        ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"), white, YES);
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
+        uint64_t f = (i % 2 == 0) ? fontMain : fontSmall;
+        if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
+        // QBL AddOutlinedText: chữ viền đen. UILabel không có stroke -> dùng
+        // shadow đen (bán kính 1.2, offset 0) set MỘT lần lúc tạo, 0 chi phí/frame.
+        uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
+        if (lbLayer && shadowCG) {
+            ds_perform_on_springboard_main(process, lbLayer, ds_remote_sel(process, "setShadowColor:"), shadowCG, YES);
+            ds_remote_set_float_on_main(process, lbLayer, "setShadowOpacity:", 1.0f);
+            ds_remote_set_double_on_main(process, lbLayer, "setShadowRadius:", 1.2);
+            ds_remote_set_point_on_main(process, lbLayer, "setShadowOffset:", CGPointMake(0, 0));
+        }
+        ds_perform_on_springboard_main(process, root, addSubview, lb, YES);
+        g_qblLabel[i] = lb;
+        g_qblLabelColor[i] = 0xFFFFFFFFu;
+        g_qblLabelText[i][0] = '\0';
+    }
+
+    g_qblRoot = root;
+    g_qblRootFrame = portraitBounds;
+    g_qblRootHidden = YES;
+    ESPLog("qbl ensure ok pid=%d root=0x%llx layers=%d labels=%d",
+           (int)process.pid, (unsigned long long)root, kQBLBucketCount, kQBLLabelCount);
+    return YES;
+}
+
+// Một polyline xương/người: DFS có retrace để retraced segment trùng khít
+// segment đã vẽ (CGPathAddLines chỉ vẽ 1 subpath/lần -> 1 call cho cả bộ xương).
+static void ds_qbl_emit_bones(const ESPBox2D *b, float sx, float sy, float ox, float oy) {
+    if (!b || b->boneCount < 2) return;
+    CGPoint p[ESP_Bone_Count];
+    BOOL ok[ESP_Bone_Count];
+    for (int i = 0; i < ESP_Bone_Count; i++) {
+        p[i] = CGPointMake((b->bones[i].x - ox) * sx + ox,
+                           (b->bones[i].y - oy) * sy + oy);
+        ok[i] = b->bones[i].ok != 0;
+    }
+    CGPoint pts[40];
+    int n = 0;
+#define QBL_BONE_PUT(idx) do { if (ok[(idx)]) pts[n++] = p[(idx)]; } while (0)
+    // Thân: đầu -> cổ -> ngực -> hông -> ngực (retrace).
+    QBL_BONE_PUT(ESPBone_Head);
+    QBL_BONE_PUT(ESPBone_Neck);
+    QBL_BONE_PUT(ESPBone_Chest);
+    if (ok[ESPBone_Pelvis]) {
+        QBL_BONE_PUT(ESPBone_Pelvis);
+        QBL_BONE_PUT(ESPBone_Chest);
+    }
+    // 2 tay từ ngực: vai -> khuỷu -> bàn tay -> khuỷu -> vai -> ngực.
+    for (int side = 0; side < 2; side++) {
+        int sh = side ? ESPBone_RShoulder : ESPBone_LShoulder;
+        int el = side ? ESPBone_RElbow : ESPBone_LElbow;
+        int hd = side ? ESPBone_RHand : ESPBone_LHand;
+        if (!ok[ESPBone_Chest] || !ok[sh]) continue;
+        pts[n++] = p[sh];
+        if (ok[el]) {
+            pts[n++] = p[el];
+            if (ok[hd]) pts[n++] = p[hd];
+            pts[n++] = p[el];
+        }
+        pts[n++] = p[sh];
+        pts[n++] = p[ESPBone_Chest];
+    }
+    // 2 chân từ hông: hip -> knee -> foot -> knee -> hip -> hông.
+    for (int side = 0; side < 2; side++) {
+        int hp = side ? ESPBone_RHip : ESPBone_LHip;
+        int kn = side ? ESPBone_RKnee : ESPBone_LKnee;
+        int ft = side ? ESPBone_RFoot : ESPBone_LFoot;
+        if (!ok[ESPBone_Pelvis] || !ok[hp]) continue;
+        pts[n++] = p[hp];
+        if (ok[kn]) {
+            pts[n++] = p[kn];
+            if (ok[ft]) pts[n++] = p[ft];
+            pts[n++] = p[kn];
+        }
+        pts[n++] = p[hp];
+        pts[n++] = p[ESPBone_Pelvis];
+    }
+#undef QBL_BONE_PUT
+    if (n >= 2) {
+        ESPDrawAddPolyline(pts, n, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
+    }
+}
+
+static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds,
+                               int orientation, const DSQBLFeat *f) {
+    (void)orientation; // toạ độ build ở hệ game-landscape; presenter mới map
+    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
+    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
+    ESPDrawFrameBegin(CGSizeMake(landW, landH));
+    if (!boxes || count <= 0 || !f) return;
+
+    // Snapline của MỌI player gộp 1 polyline: start -> đỉnh box -> start -> ...
+    // (start trùng nhau nên đoạn quay lại không tạo đường lạ — như bản cũ).
+    CGPoint linePts[2 + ESPOverlayMaxBoxes * 2];
+    int lineN = 0;
+    CGPoint lineStart = CGPointMake(landW * 0.5f, 25.0f);
+    float scale = (f->scale >= 1.0f && f->scale <= 2.0f) ? f->scale : 1.0f;
+
+    for (int i = 0; i < count; i++) {
+        const ESPBox2D *b = &boxes[i];
+        if (b->visible == 0 || b->w < 1.0f || b->h < 2.0f) continue;
+        // ESPScale (QBL player.ESPScale): phóng quanh tâm box.
+        CGFloat bw = b->w * scale;
+        CGFloat bh = b->h * scale;
+        CGFloat bcx = b->x + b->w * 0.5f;
+        CGFloat bcy = b->y + b->h * 0.5f;
+        CGFloat bx = bcx - bw * 0.5f;
+        CGFloat by = bcy - bh * 0.5f;
+        if (by + bh < -60.0f || by > landH + 60.0f) continue;
+        if (bx + bw < -60.0f || bx > landW + 60.0f) continue;
+
+        BOOL ai = (b->isAI != 0) && f->aiMark;
+        uint32_t mainColor = ai ? kQBLColorAI : kQBLColorBox;
+
+        if (f->box) {
+            ESPDrawAddRect(CGRectMake(bx, by, bw, bh), mainColor,
+                           ai ? 2.0f : 1.5f,
+                           ai ? kQBLBucketBoxAI : kQBLBucketBox, NO);
+        }
+
+        // Thanh máu trái box, fill mọc từ đáy (giống bản per-box cũ).
+        if (f->health && b->health >= 0 && b->health <= 100 && bh >= 8.0f) {
+            CGFloat barW = 5.0f, pad = 4.0f;
+            CGFloat barX = bx - barW - pad;
+            CGFloat fillH = bh * ((float)b->health) / 100.0f;
+            ESPDrawAddRect(CGRectMake(barX, by, barW, bh), kQBLColorHpBg, 1.0f, kQBLBucketHpBg, YES);
+            if (fillH > 0.5f) {
+                int bk = (b->health < 30) ? kQBLBucketHpRed
+                       : (b->health < 60) ? kQBLBucketHpYellow : kQBLBucketHpGreen;
+                ESPDrawAddRect(CGRectMake(barX, by + bh - fillH, barW, fillH),
+                               ds_qbl_bucket_color(bk), 1.0f, bk, YES);
+            }
+        }
+
+        // Head dot: ưu tiên khớp đầu thật (bones), không có thì 8% từ đỉnh box.
+        CGFloat headX = bcx;
+        CGFloat headY = by + bh * 0.08f;
+        if (f->bones && b->boneCount >= 2 && b->bones[ESPBone_Head].ok) {
+            headX = (b->bones[ESPBone_Head].x - bcx) * scale + bcx;
+            headY = (b->bones[ESPBone_Head].y - bcy) * scale + bcy;
+        }
+        if (f->headDot && b->kind == 1) {
+            ESPDrawAddCircle(CGPointMake(headX, headY), 3.0f,
+                             ai ? kQBLColorAI : kQBLColorDot, 1.0f,
+                             ai ? kQBLBucketAIMark : kQBLBucketDot, YES);
+        }
+
+        // Skeleton (chỉ player; không vẽ hình nhân).
+        if (f->bones && b->kind == 1 && b->boneCount >= 2) {
+            ds_qbl_emit_bones(b, scale, scale, bcx, bcy);
+        }
+
+        // AI mark: tam giác vàng trên đỉnh box (QBL AIMarkDifferent).
+        if (ai) {
+            CGFloat tx = bx + bw * 0.5f;
+            CGFloat ty = by - 5.0f;
+            CGPoint tri[3] = {
+                CGPointMake(tx, ty - 9.0f),
+                CGPointMake(tx - 7.0f, ty),
+                CGPointMake(tx + 7.0f, ty),
+            };
+            ESPDrawAddPolyline(tri, 3, kQBLColorAI, 1.5f, kQBLBucketAIMark, YES);
+        }
+
+        // Snapline chỉ player (dummy không có line như Kernel/QBL).
+        if (f->line && b->kind == 1 && lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
+            linePts[lineN++] = lineStart;
+            linePts[lineN++] = CGPointMake(bx + bw * 0.5f, by);
+        }
+
+        // Text: LUÔN 2 lệnh/box (kể cả rỗng) để slot label không bị lệch.
+        char txt[96];
+        ds_esp_build_label_text(*b, f->name, f->dist, txt, (int)sizeof(txt));
+        ESPDrawAddText(txt, CGPointMake(bcx, by + bh), 13.0f, mainColor, YES, 1);
+        char teamTxt[40];
+        teamTxt[0] = '\0';
+        if (f->teamID && b->kind == 1 && b->team >= 0 && b->team <= 200000000) {
+            snprintf(teamTxt, sizeof(teamTxt), "T%d%s", b->team, ai ? " AI" : "");
+        }
+        ESPDrawAddText(teamTxt, CGPointMake(bcx, by), 11.0f, mainColor, YES, 1);
+    }
+
+    if (lineN >= 2) {
+        ESPDrawAddPolyline(linePts, lineN, kQBLColorLine, 1.0f, kQBLBucketLine, NO);
+    }
+}
+
+// Đặt 1 label theo lệnh text. Text đổi -> setText (rẻ, chỉ khi đổi); vị trí
+// cập nhật tối đa 30Hz + ngưỡng 0.5pt như bản per-box cũ.
+static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
+                               CGFloat landW, CGFloat landH, CGPoint winCenter,
+                               int mapOrient, CFAbsoluteTime now) {
+    if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
+    uint64_t lb = g_qblLabel[slot];
+    if (!lb) return;
+    if (!c->text[0]) {
+        if (g_qblLabelShown[slot]) {
+            ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
+            g_qblLabelShown[slot] = NO;
+        }
+        return;
+    }
+    if (!g_qblLabelShown[slot]) {
+        ds_remote_set_u64_on_main(process, lb, "setHidden:", 0);
+        g_qblLabelShown[slot] = YES;
+    }
+    if (strncmp(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1) != 0) {
+        NSString *s = [NSString stringWithUTF8String:c->text];
+        if (s && ds_remote_set_text_on_main(process, lb, s)) {
+            strncpy(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1);
+            g_qblLabelText[slot][sizeof(g_qblLabelText[slot]) - 1] = '\0';
+        }
+    }
+    if (g_qblLabelColor[slot] != c->color) {
+        uint64_t col = ds_qbl_color_obj(process, c->color);
+        if (col && ds_perform_on_springboard_main(process, lb,
+                ds_remote_sel(process, "setTextColor:"), col, YES)) {
+            g_qblLabelColor[slot] = c->color;
+        }
+    }
+    if (now - g_qblLabelAt[slot] < (1.0 / 30.0)) return;
+    CGPoint anchor = ds_esp_map_point(CGPointMake(c->tx, c->ty), landW, landH, winCenter, mapOrient);
+    CGRect r;
+    if (slot % 2 == 0) {
+        // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
+        // nên cao 32pt để dòng 2 không bị cắt.
+        r = CGRectMake(anchor.x - 90.0, anchor.y + 3.0, 180.0, 32.0);
+    } else {
+        // TeamID ngay trên box.
+        r = CGRectMake(anchor.x - 42.0, anchor.y - 16.0, 84.0, 15.0);
+    }
+    if (!g_qblLabelRectValid[slot] ||
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) > 0.5 ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) > 0.5 ||
+        fabs(g_qblLabelRect[slot].size.width - r.size.width) > 0.5) {
+        ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
+        g_qblLabelRect[slot] = r;
+        g_qblLabelRectValid[slot] = YES;
+    }
+    g_qblLabelAt[slot] = now;
+}
+
+static uint64_t ds_qbl_hash_frame(const DSQBLFeat *f, CGRect bounds, int orient) {
+    // FNV-1a trên command list + point pool + feature/bounds. Command đã memset
+    // nên padding = 0 -> hash ổn định giữa các frame giống nhau.
+    const unsigned char *cmds = (const unsigned char *)ESPDrawFrameCommands();
+    const unsigned char *pts = (const unsigned char *)ESPDrawFramePoints();
+    size_t cmdBytes = (size_t)ESPDrawFrameCount() * sizeof(ESPDrawCommand);
+    size_t ptBytes = (size_t)ESPDrawFramePointCount() * sizeof(CGPoint);
+    uint64_t h = 1469598103934665603ULL;
+#define QBL_HASH_BYTE(byte) do { h ^= (uint64_t)(uint8_t)(byte); h *= 1099511628211ULL; } while (0)
+    // Hash từng field một — KHÔNG hash cả struct (padding chưa khởi tạo sẽ làm
+    // hash đổi giữa các frame giống nhau -> mất tác dụng bỏ qua frame trùng).
+    QBL_HASH_BYTE(f->box); QBL_HASH_BYTE(f->line); QBL_HASH_BYTE(f->name);
+    QBL_HASH_BYTE(f->dist); QBL_HASH_BYTE(f->health); QBL_HASH_BYTE(f->teamID);
+    QBL_HASH_BYTE(f->headDot); QBL_HASH_BYTE(f->aiMark); QBL_HASH_BYTE(f->bones);
+    {
+        const unsigned char *sc = (const unsigned char *)&f->scale;
+        for (size_t i = 0; i < sizeof(f->scale); i++) QBL_HASH_BYTE(sc[i]);
+    }
+    {
+        const unsigned char *bb = (const unsigned char *)&bounds;
+        for (size_t i = 0; i < sizeof(bounds); i++) QBL_HASH_BYTE(bb[i]);
+    }
+    for (size_t i = 0; i < cmdBytes; i++) QBL_HASH_BYTE(cmds[i]);
+    for (size_t i = 0; i < ptBytes; i++) QBL_HASH_BYTE(pts[i]);
+    QBL_HASH_BYTE((uint32_t)orient); QBL_HASH_BYTE(((uint32_t)orient) >> 8);
+    QBL_HASH_BYTE(((uint32_t)orient) >> 16); QBL_HASH_BYTE(((uint32_t)orient) >> 24);
+#undef QBL_HASH_BYTE
+    return h;
+}
+
+static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
+                           CGRect portraitBounds, int orientation) {
+    if (!process || !process.trojanMem) return;
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
+    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
+
+    // ---- prefs 1Hz (đọc NSUserDefaults như bản cũ) ----
+    static CFAbsoluteTime s_prefAt = 0;
+    static DSQBLFeat s_feat = {
+        YES, YES, YES, YES, YES, YES, YES, YES, NO, 1.0f
+    };
+    static BOOL s_featDirty = YES;
+    if (nowP - s_prefAt > 1.0) {
+        s_prefAt = nowP;
+        NSDictionary *p = nil;
+        @try { p = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+        DSQBLFeat f;
+        f.box = ds_show_esp_from_prefs(p);
+        f.line = ds_esp_feature_pref(p, HUDUserDefaultsKeyESPShowLine);
+        f.name = ds_esp_feature_pref(p, HUDUserDefaultsKeyESPShowName);
+        f.dist = ds_esp_feature_pref(p, HUDUserDefaultsKeyESPShowDistance);
+        f.health = ds_esp_feature_pref(p, HUDUserDefaultsKeyESPShowHealth);
+        f.teamID = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowTeamID, YES);
+        f.headDot = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowHeadDot, YES);
+        f.aiMark = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowAIMark, YES);
+        f.bones = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowBones, NO);
+        BOOL sc = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPESPScale, NO);
+        f.scale = sc ? 1.15f : 1.0f;
+        if (f.box != s_feat.box || f.line != s_feat.line || f.name != s_feat.name ||
+            f.dist != s_feat.dist || f.health != s_feat.health ||
+            f.teamID != s_feat.teamID || f.headDot != s_feat.headDot ||
+            f.aiMark != s_feat.aiMark || f.bones != s_feat.bones ||
+            f.scale != s_feat.scale) {
+            s_featDirty = YES;
+        }
+        s_feat = f;
+        // Engine chỉ đọc xương khi được bật (mặc định OFF để không thêm chi phí).
+        ESPEngineSetBonesEnabled(s_feat.bones);
+    }
+    (void)s_featDirty;
+
+    // ---- show/hide window (1 call) ----
+    BOOL wantHidden = (count <= 0);
+    if (wantHidden != g_espWindowHiddenCache) {
+        ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", wantHidden ? 1 : 0);
+        g_espWindowHiddenCache = wantHidden;
+    }
+    if (wantHidden) return;
+    if (!ds_qbl_ensure(process, portraitBounds)) return;
+    if (!CGRectEqualToRect(g_qblWindowFrame, portraitBounds)) {
+        ds_remote_set_rect_on_main(process, g_espWindow, "setFrame:", portraitBounds);
+        ds_remote_set_rect_on_main(process, g_espContainer, "setFrame:", portraitBounds);
+        g_qblWindowFrame = portraitBounds;
+    }
+
+    ds_qbl_build_frame(boxes, count, portraitBounds, orientation, &s_feat);
+    ESPDrawFrameEnd();
+    uint64_t hash = ds_qbl_hash_frame(&s_feat, portraitBounds, orientation);
+    if (hash == g_qblFrameHash) {
+        g_qblSkips++;
+        ESPDrawFrameReset();
+        return;
+    }
+    g_qblFrameHash = hash;
+    g_qblFrames++;
+
+    CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
+    CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
+    CGPoint winCenter = CGPointMake(CGRectGetMidX(portraitBounds), CGRectGetMidY(portraitBounds));
+    BOOL scenePortrait = portraitBounds.size.height > portraitBounds.size.width;
+    int mapOrient = (scenePortrait &&
+                     (orientation == UIInterfaceOrientationLandscapeLeft ||
+                      orientation == UIInterfaceOrientationLandscapeRight))
+                        ? orientation : UIInterfaceOrientationPortrait;
+
+    for (int b = 0; b < kQBLBucketCount; b++) {
+        s_qblRectCount[b] = 0;
+        s_qblPolyCount[b] = 0;
+    }
+    s_qblPtCount = 0;
+
+    ds_remote_pool_begin(process);
+    @try {
+        const ESPDrawCommand *cmds = ESPDrawFrameCommands();
+        int ncmds = ESPDrawFrameCount();
+        int labelSlot = 0;
+        for (int i = 0; i < ncmds; i++) {
+            const ESPDrawCommand *c = &cmds[i];
+            if (c->prim == ESPDrawPrimText) {
+                ds_qbl_place_label(process, labelSlot, c, landW, landH, winCenter, mapOrient, nowP);
+                labelSlot++;
+                continue;
+            }
+            int bk = c->bucket;
+            if (bk < 0 || bk >= kQBLBucketCount) continue;
+            if (c->prim == ESPDrawPrimRect) {
+                if (s_qblRectCount[bk] >= DS_QBL_MAX_RECTS) continue;
+                s_qblRects[bk][s_qblRectCount[bk]++] =
+                    ds_esp_map_rect(c->rect, landW, landH, winCenter, mapOrient);
+            } else if (c->prim == ESPDrawPrimPolyline) {
+                if (s_qblPolyCount[bk] >= DS_QBL_MAX_POLYS) continue;
+                const CGPoint *src = ESPDrawFramePoints() + c->pointStart;
+                int pc = c->pointCount;
+                if (pc < 2 || pc > 128) continue;
+                if (s_qblPtCount + pc > ESP_DRAW_MAX_POINTS) continue;
+                int start = s_qblPtCount;
+                for (int k = 0; k < pc; k++) {
+                    s_qblPts[s_qblPtCount++] =
+                        ds_esp_map_point(src[k], landW, landH, winCenter, mapOrient);
+                }
+                s_qblPolys[bk][s_qblPolyCount[bk]].start = start;
+                s_qblPolys[bk][s_qblPolyCount[bk]].count = pc;
+                s_qblPolyCount[bk]++;
+            }
+        }
+        // Label dư (số box giảm) -> ẩn.
+        for (int i = labelSlot; i < kQBLLabelCount; i++) {
+            if (g_qblLabelShown[i] && g_qblLabel[i]) {
+                ds_remote_set_u64_on_main(process, g_qblLabel[i], "setHidden:", 1);
+                g_qblLabelShown[i] = NO;
+            }
+        }
+
+        // ---- gom rect + point vào 1 buffer remote (1 write/frame) ----
+        int rectOffset[kQBLBucketCount];
+        int rectTotal = 0;
+        for (int b = 0; b < kQBLBucketCount; b++) {
+            rectOffset[b] = rectTotal;
+            for (int r = 0; r < s_qblRectCount[b]; r++) {
+                s_qblAllRects[rectTotal++] = s_qblRects[b][r];
+            }
+        }
+        size_t ptsBytes = (size_t)s_qblPtCount * sizeof(CGPoint);
+        size_t rectsBytes = (size_t)rectTotal * sizeof(CGRect);
+        if ((ptsBytes || rectsBytes) && !ds_qbl_buf(process, ptsBytes + rectsBytes)) {
+            ESPDrawFrameReset();
+            return;
+        }
+        uint64_t ptsAddr = g_qblBufAddr;
+        uint64_t rectsAddr = g_qblBufAddr + (uint64_t)ptsBytes;
+        if (ptsBytes) {
+            if (![process remote_write:ptsAddr from:s_qblPts size:(uint64_t)ptsBytes]) return;
+        }
+        if (rectsBytes) {
+            if (![process remote_write:rectsAddr from:s_qblAllRects size:(uint64_t)rectsBytes]) return;
+        }
+
+        void *createSym = ds_remote_system_symbol("CGPathCreateMutable");
+        void *addRectsSym = ds_remote_system_symbol("CGPathAddRects");
+        void *addLinesSym = ds_remote_system_symbol("CGPathAddLines");
+        for (int b = 0; b < kQBLBucketCount; b++) {
+            if (!g_qblShape[b]) continue;
+            int nR = s_qblRectCount[b];
+            int nP = s_qblPolyCount[b];
+            if (!nR && !nP) {
+                if (g_qblShapePath[b]) ds_qbl_set_path(process, b, 0);
+                continue;
+            }
+            if (!createSym) continue;
+            uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
+            if (!path) continue;
+            if (nR && addRectsSym) {
+                DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0,
+                                           rectsAddr + (uint64_t)rectOffset[b] * sizeof(CGRect),
+                                           (uint64_t)nR);
+            }
+            if (addLinesSym) {
+                for (int p = 0; p < nP; p++) {
+                    DSRemoteArbCallWithTimeout(1, process, addLinesSym, path, 0,
+                                               ptsAddr + (uint64_t)s_qblPolys[b][p].start * sizeof(CGPoint),
+                                               (uint64_t)s_qblPolys[b][p].count);
+                }
+            }
+            ds_qbl_set_path(process, b, path);
+        }
+    } @finally {
+        ds_remote_pool_end(process);
+    }
+    if (g_qblRoot && g_qblRootHidden) g_qblRootHidden = NO;
+    ESPDrawFrameReset();
+}
+
+static void __attribute__((unused))
+ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                   CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
     // Vẽ per-box trực tiếp trên bridge dưới batch lock (kernrw43: bitmap đã
@@ -3170,8 +3951,14 @@ static void ds_esp_present_single(DSESPFrame *frame) {
             if (kPresentMinInterval <= 0 || (nowPu - s_lastPresentUpdate >= kPresentMinInterval)) {
                 s_lastPresentUpdate = nowPu;
                 CFAbsoluteTime tPres = CFAbsoluteTimeGetCurrent();
+#if DS_ESP_RENDER_COMMANDLIST
+                // QBL-style: build draw list -> present batch (xem ds_qbl_present).
+                ds_qbl_present(g_springBoard, frame->boxes, frame->count,
+                               frame->bounds, frame->orient);
+#else
                 ds_esp_overlay_update(g_springBoard, frame->boxes, frame->count,
                                       frame->bounds, frame->orient);
+#endif
                 double usP = (CFAbsoluteTimeGetCurrent() - tPres) * 1000000.0;
                 if (usP < 0) usP = 0;
                 s_lastPresentMs = usP / 1000.0; // backpressure tick sau

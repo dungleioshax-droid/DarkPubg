@@ -73,6 +73,16 @@ BOOL ESPEngineActorGone(uint64_t actor, double withinSec);
 // @"R trk=8 hid=1 pos=0 w2s=5 h=1 ok=2", @"F camFail". Dùng khi B=0 mà P>0.
 const char *ESPEngineLastBoxDiag(void);
 
+// qblpack: xương. Bridge đọc toggle từ prefs rồi gọi mỗi ~1s; khi tắt, refresh
+// KHÔNG đọc thêm gì. Bật -> engine tự dò offset mảng FTransform + bản đồ index
+// (validate theo tỉ lệ cơ thể), rồi điền ESPBox2D.bones mỗi tick.
+void ESPEngineSetBonesEnabled(BOOL enabled);
+BOOL ESPEngineBonesEnabled(void);
+
+// Trạng thái xương cho dòng status app: @"bones off", @"bones 0x5e0 ok",
+// @"bones 0x5e0 detect", @"bones no-match", @"bones auto-off".
+const char *ESPEngineBonesStatus(void);
+
 // Mẫu HP gần nhất cho chẩn đoán offsets (đọc từ ESP.log dòng box perf):
 // cur/max raw, pct 0-100 (-1 fail), fails = số lần fail liên tiếp.
 void ESPEngineHPSample(float *cur, float *max, int *pct, int *fails);

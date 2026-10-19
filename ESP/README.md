@@ -44,6 +44,79 @@ Folder riêng cho ESP, không loạn dự án chính. Phase 1 đọc memory + đ
 - `diag vtHist(..) 0x..:n ...` — histogram VTable.
 - `scan done enemies=.. dummy=.. win=../.. vt=.. nm=.. dnm=.. ch=.. dm=.. no=..`
 
-## Phase 2 (chưa làm, để sẵn stub)
-- `ESPOverlay` sẽ tạo `UIWindow` full-screen trong SpringBoard + pool `UIView` viền box (4 view mỏng/box) + `UILabel` khoảng cách. Tính `WorldToScreen` từ `PlayerCameraManager::CameraCache (FMinimalViewInfo)`.
-- Cần thêm offsets: `PlayerController->PlayerCameraManager 0x...`, `CameraCacheEntry::POV`, `FMinimalViewInfo::{Location,Rotation,FOV}`, `ViewMatrix`. Lấy từ `SDK/Engine.hpp` khi cần.
+## Phase 2 (đã làm)
+`ESPOverlay` tạo `UIWindow` full-screen trong SpringBoard + pool view/label; `WorldToScreen`
+tính từ `PlayerCameraManager::CameraCache (FMinimalViewInfo)` — xem `ESPEngine.mm`
+(`ESPCamBasisBuild` / `ESPCamBasisProject`).
+
+## QBL render pack (port từ QBL-ESP-PUBGM-DS)
+
+Bộ tính năng + cách render lấy cảm hứng/kiến trúc từ QBL (app bundle
+`quangblue.QBL-ESP-PUBGM-DS`), **không dùng lại offset của QBL** (symbol debug của
+QBL có value 0) — mọi offset trong repo vẫn là offset của dump đang dùng.
+
+### Tính năng thêm (Setting → mục ESP)
+
+| Toggle | Pref key | Mặc định | Mô tả |
+|---|---|---|---|
+| ESP Team ID | `espShowTeamID` | ON | `T<id>` trên đỉnh box (chỉ player, không vẽ cho hình nhân) |
+| ESP Head Dot | `espShowHeadDot` | ON | Chấm tròn ở đầu — khớp xương đầu nếu Bones ON |
+| ESP AI Mark | `espShowAIMark` | ON | Bot/AI: box viền vàng đậm hơn + tam giác trên đầu + chữ vàng |
+| ESP Xương (Bones) | `espShowBones` | **OFF** | Skeleton ESP (xem dưới) |
+| ESP Scale | `espESPScale` | **OFF** | Phóng box +15% quanh tâm (như `player.ESPScale` của QBL) |
+
+Bones/Scale mặc định OFF vì đọc thêm bộ nhớ mỗi tick.
+
+### Kiến trúc render kiểu QBL (frame + command list)
+
+Trước đây mỗi box = 4 view viền + label + HP + path riêng (hàng trăm remote call/frame).
+Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
+
+1. **Builder** (`ds_qbl_build_frame` trong `darksword/DSBridge.mm`) gom tất cả
+   primitive của 1 frame vào draw list CPU (`ESPOverlay.mm`, 128 lệnh + 512 điểm,
+   0 remote call): box, thanh máu (nền + fill), head dot, tam giác AI, snapline
+   (1 polyline dùng chung), xương (1 polyline/player), text.
+2. **Presenter** (`ds_qbl_present`) bắn sang SpringBoard theo batch:
+   - mỗi style = 1 `CAShapeLayer` tái sử dụng (box trắng, box AI vàng, snapline,
+     xương xanh, head dot, AI mark, HP nền/đỏ/vàng/xanh = 10 layer, `speed=1000` để
+     không animate khi đổi path);
+   - rect gom 1 lần bằng `CGPathAddRects`, polyline bằng `CGPathAddLines`
+     (pointer + count — tham số an toàn qua RemoteCall); points/rects nằm trong
+     **1 buffer remote** (`malloc` 1 lần, giữ giữa các frame) → 2 `remote_write`/frame;
+   - text dùng pool 16 `UILabel` (2/box): setText **chỉ khi text đổi**, setFrame tối đa
+     30Hz + ngưỡng 0.5pt; viền chữ kiểu QBL (`AddOutlinedText`) xấp xỉ bằng shadow đen
+     radius 1.2 set **1 lần** lúc tạo (0 chi phí mỗi frame).
+   - frame trùng hash (không có gì đổi) → bỏ qua toàn bộ remote call.
+3. Tất cả nằm trong 1 `UIView` gốc (`g_qblRoot`) là con của container cũ → hide/show
+   1 call, window cleanup cũ giữ nguyên.
+
+Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
+renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
+(code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).
+
+### Bones (skeleton) — tự dò ở runtime
+
+QBL đọc xương trực tiếp bằng offset cố định; repo này **không** dùng offset QBL (không
+phục hồi được từ binary). Thay vào đó engine tự dò:
+
+- Quét ứng viên `TArray<FTransform>` trong `mesh+[0x480..0xC00)` bước 8
+  (`ESPOff_Mesh_BoneScanStart/End`), stride `0x30` (`ESPOff_BoneTransformSize`).
+- Với mỗi ứng viên thử 3 bảng index khớp phổ biến (UE4 mannequin + 2 biến thể rig)
+  và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay 15..45cm, chân
+  25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau 20..80cm.
+- Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
+  (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
+- Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0x<off> ok` /
+  `bones no-match` / `bones auto-off`.
+- Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
+- Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
+
+**Lưu ý:** xương là phần duy nhất chưa thể verify trên máy — cần bật thử trong trận,
+xem `ESP.log` dòng `bones: offset=0x... map=...`. Nếu toàn `bones no-match` thì rig
+khác bảng index (gửi log để thêm bảng mới), `bones auto-off` thì offset/map sai
+(engine tự tắt, các tính năng khác không ảnh hưởng).
+
+### Snapline
+
+Giống bản cũ (Kernel): từ `(W/2, 25)` → đỉnh box, **chỉ player** (`kind==1`), nhưng gộp
+tất cả vào 1 polyline `start→box1→start→box2…` → 1 `CGPathAddLines` cho cả frame.

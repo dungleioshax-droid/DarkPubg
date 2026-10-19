@@ -564,3 +564,24 @@ BOOL ESPIsPlayerCharacterName(const char *name) {
     }
     return NO;
 }
+
+// qblpack AIMarkDifferent: bot/AI pawn. Cố ý để HẸP — mọi tên ở đây đều là
+// class bot thật (bot PUBG mobile: BP_PlayerPawn_TPlanAI_C, FakePlayer_AIPawn,
+// AIPawn...). Người chơi thật không có các chuỗi này trong tên class/instance,
+// nên false-positive gần như không có; nếu máy bạn đổi tên class bot, thêm vào
+// list này là đủ (không cần sửa chỗ khác).
+BOOL ESPNameIsAIPawn(const char *name) {
+    if (!name || !name[0]) return NO;
+    static const char *keys[] = {
+        "TPlanAI",     // BP_PlayerPawn_TPlanAI_C (bot cũ) / _PlayerPawn_TPlanAI_C
+        "PlanAI",
+        "FakePlayer_AIPawn",
+        "AIPawn",
+        "AIBot",
+        "BotPawn",
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (strstr(name, keys[i]) != NULL) return YES;
+    }
+    return NO;
+}
