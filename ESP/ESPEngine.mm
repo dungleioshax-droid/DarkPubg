@@ -51,6 +51,11 @@ static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 static void ESPBonesReset(void); // qblpack: xoá cấu hình xương khi đổi world
 static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh); // qblpack: dò bảng xương (định nghĩa cuối file)
+// qblpack: cờ xương dùng ngay trong vòng quét (dòng ~1181) — khai báo trước vì
+// định nghĩa static ở cuối file (build kernrw58: undeclared identifier).
+static std::atomic_bool g_espBonesWant{false};
+static std::atomic_bool g_espBonesReady{false};   // đã dò được offset + bảng index
+static std::atomic_bool g_espBonesAutoOff{false}; // tự tắt vì kiểm tra chéo fail liên tục
 
 // --- Cửa sổ actor: 1 lần map page lấy HẾT field (trước đây ~8 lần map page) ---
 // 0x0 VTable, 0x18 FName, 0xE8 bHidden, 0x208 RootComponent,
@@ -2353,33 +2358,30 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
 // Không dò được => xương tắt (các tính năng khác không bị ảnh hưởng).
 // Muốn thêm bảng index cho bản game khác: thêm vào kESPBoneMaps bên dưới.
 
-static std::atomic_bool g_espBonesWant{false};
-static std::atomic_bool g_espBonesReady{false};   // đã dò được offset + bảng index
-static std::atomic_bool g_espBonesAutoOff{false}; // tự tắt vì kiểm tra chéo fail liên tục
 static std::atomic_int g_espBoneBadTicks{0};
 static uint32_t g_espBoneOff = 0;      // offset TArray<FTransform> trong mesh
-static int g_espBoneMap[ESP_Bone_Count] = {0};
+static int g_espBoneMap[ESPBone_Count] = {0};
 static CFAbsoluteTime g_espBoneTryAt = 0;
 static char g_espBoneStatus[64] = "bones off";
 
 // Thứ tự slot: head, neck, chest, pelvis, LShoulder, LElbow, LHand,
 // RShoulder, RElbow, RHand, LHip, LKnee, LFoot, RHip, RKnee, RFoot, Root.
 // A = UE4 mannequin chuẩn (khớp public cho PUBG mobile).
-static const int kESPBoneMapA[ESP_Bone_Count] = {
+static const int kESPBoneMapA[ESPBone_Count] = {
     6, 5, 4, 1,
     7, 8, 10, 11, 12, 14,
     15, 16, 17, 19, 20, 21,
     0
 };
 // B = rig có thêm 1 đốt spine (đầu 7, cổ 6, ngực 5) — vài bản skin/season.
-static const int kESPBoneMapB[ESP_Bone_Count] = {
+static const int kESPBoneMapB[ESPBone_Count] = {
     7, 6, 5, 1,
     8, 9, 11, 12, 13, 15,
     16, 17, 18, 20, 21, 22,
     0
 };
 // C = rig có pelvis_01 (hông 2) + đốt spine phụ.
-static const int kESPBoneMapC[ESP_Bone_Count] = {
+static const int kESPBoneMapC[ESPBone_Count] = {
     7, 6, 5, 2,
     8, 9, 11, 12, 13, 15,
     16, 17, 18, 20, 21, 22,
@@ -2411,7 +2413,7 @@ static float ESPBoneDist(const ESPVector *p, int a, int b) {
 // Validate 1 bảng index trên vị trí component-space của các xương.
 static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
     if (!p || !map || count < 8) return NO;
-    for (int i = 0; i < ESP_Bone_Count; i++) {
+    for (int i = 0; i < ESPBone_Count; i++) {
         if (map[i] < 0 || map[i] >= count) return NO;
     }
     const ESPVector &head = p[map[ESPBone_Head]];
@@ -2570,19 +2572,19 @@ static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basi
                           ESPBox2D *box, float boxTopY, float boxH) {
     if (!box) return 0;
     box->boneCount = 0;
-    for (int i = 0; i < ESP_Bone_Count; i++) box->bones[i].ok = 0;
+    for (int i = 0; i < ESPBone_Count; i++) box->bones[i].ok = 0;
     if (!g_espBonesReady.load() || !g_espBonesWant.load()) return 0;
     if (!vmMap || !basis || !ESPIsUserPtr(mesh)) return 0;
     // Snapshot cấu hình (off/map) — nếu đổi world đúng lúc này thì frame này có
     // thể lệch; bounds check bên dưới chặn đọc sai, box vẫn vẽ bình thường.
     const uint32_t boneOff = g_espBoneOff;
-    int boneMap[ESP_Bone_Count];
+    int boneMap[ESPBone_Count];
     memcpy(boneMap, g_espBoneMap, sizeof(boneMap));
     uint64_t data = 0;
     uint32_t count = 0;
     if (!ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
     int need = 0;
-    for (int i = 0; i < ESP_Bone_Count; i++) {
+    for (int i = 0; i < ESPBone_Count; i++) {
         if (boneMap[i] + 1 > need) need = boneMap[i] + 1;
     }
     if (need <= 0 || (uint32_t)need > count || need > (int)ESPOff_Bone_NumMax) return 0;
@@ -2591,7 +2593,7 @@ static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basi
     uint8_t c2w[0x30];
     if (!ESPMemoryRead(vmMap, mesh + ESPOff_Comp_ComponentToWorld, c2w, sizeof(c2w))) return 0;
     int ok = 0;
-    for (int i = 0; i < ESP_Bone_Count; i++) {
+    for (int i = 0; i < ESPBone_Count; i++) {
         int bi = boneMap[i];
         if (bi < 0 || bi >= need) continue;
         ESPVector local;
@@ -2612,7 +2614,7 @@ static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basi
         float hy = box->bones[ESPBone_Head].y;
         float top = boxTopY, h = (boxH > 1.0f ? boxH : 1.0f);
         if (hy < top - 0.55f * h || hy > top + 0.65f * h) {
-            for (int i = 0; i < ESP_Bone_Count; i++) box->bones[i].ok = 0;
+            for (int i = 0; i < ESPBone_Count; i++) box->bones[i].ok = 0;
             box->boneCount = 0;
             if (!g_espBonesAutoOff.load() && g_espBoneBadTicks.fetch_add(1) + 1 > 600) { // ~10s @60Hz
                 g_espBonesAutoOff.store(true);

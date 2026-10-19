@@ -2844,9 +2844,9 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
 // segment đã vẽ (CGPathAddLines chỉ vẽ 1 subpath/lần -> 1 call cho cả bộ xương).
 static void ds_qbl_emit_bones(const ESPBox2D *b, float sx, float sy, float ox, float oy) {
     if (!b || b->boneCount < 2) return;
-    CGPoint p[ESP_Bone_Count];
-    BOOL ok[ESP_Bone_Count];
-    for (int i = 0; i < ESP_Bone_Count; i++) {
+    CGPoint p[ESPBone_Count];
+    BOOL ok[ESPBone_Count];
+    for (int i = 0; i < ESPBone_Count; i++) {
         p[i] = CGPointMake((b->bones[i].x - ox) * sx + ox,
                            (b->bones[i].y - oy) * sy + oy);
         ok[i] = b->bones[i].ok != 0;
