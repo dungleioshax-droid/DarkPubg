@@ -1049,6 +1049,28 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
 }
 
 static UIInterfaceOrientation ds_interface_orientation(void) {
+    // kernrw52j: đảm bảo observer orientation được khởi tạo (cho HUD text window).
+    ds_esp_ensure_orientation_observer();
+    // Ưu tiên orientation của game (foreground) và thiết bị, không chỉ
+    // SpringBoard scene (kẹt portrait). Nếu không, HUD chỉ đúng khi xoay máy
+    // trước khi mở HUD — không tự xoay theo game.
+    int fg = g_foregroundOrientation.load();
+    if (fg == UIInterfaceOrientationLandscapeLeft || fg == UIInterfaceOrientationLandscapeRight ||
+        fg == UIInterfaceOrientationPortrait || fg == UIInterfaceOrientationPortraitUpsideDown) {
+        return (UIInterfaceOrientation)fg;
+    }
+    // Thiết bị vật lý
+    UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
+    UIInterfaceOrientation mapped = UIInterfaceOrientationUnknown;
+    switch (dev) {
+        case UIDeviceOrientationLandscapeLeft:  mapped = UIInterfaceOrientationLandscapeRight; break;
+        case UIDeviceOrientationLandscapeRight: mapped = UIInterfaceOrientationLandscapeLeft; break;
+        case UIDeviceOrientationPortrait:       mapped = UIInterfaceOrientationPortrait; break;
+        case UIDeviceOrientationPortraitUpsideDown: mapped = UIInterfaceOrientationPortraitUpsideDown; break;
+        default: break;
+    }
+    if (mapped != UIInterfaceOrientationUnknown) return mapped;
+    // SpringBoard scene (fallback)
     UIInterfaceOrientation remoteOrientation =
         (UIInterfaceOrientation)g_remoteOrientation.load();
     if (remoteOrientation != UIInterfaceOrientationUnknown) {
@@ -3057,7 +3079,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw57-features"
+#define DS_ESP_BUILD_TAG "kernrw57-hud"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
