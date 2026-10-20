@@ -92,7 +92,7 @@ Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
 
 #### Ổn định (bản sửa lỗi HUD đứng / ESP không hiện)
 
-Hai lỗi gốc của bản cmdlist đầu tiên:
+Ba lỗi gốc của bản cmdlist đầu tiên:
 
 1. **ESP không bao giờ hiện**: nhánh QBL `return YES` sớm trước đoạn
    `addSubview:container` + `setHidden:0` của window → `g_espWindow` đã khác 0 nên
@@ -104,7 +104,7 @@ Hai lỗi gốc của bản cmdlist đầu tiên:
    ẩn/không cập nhật được nữa. Giờ:
    - window ensure chỉ tạo window + container (bỏ 8 bộ view per-box ≈ 150 call);
    - shape/label **tạo lazy, tối đa 2 shape + 2 label mỗi tick**
-     (`kQBLShapeBudgetPerTick` / `kQBLLabelBudgetPerTick`);
+     (`kQBLShapeBudgetPerTick` / `kBQLLabelBudgetPerTick`);
    - geometry có **hash riêng từng bucket** + quantize 0.5pt → bucket không đổi thì
      không `setPath:`; frame đứng yên = 0 remote call;
    - label pass 30Hz tách riêng, chạy cả khi geometry skip (không mất update);
@@ -112,7 +112,22 @@ Hai lỗi gốc của bản cmdlist đầu tiên:
    - nếu disable không ẩn được window (session chết), địa chỉ HUD/ESP được giữ
      lại và enable sau ẩn bằng session mới (guard pid) → không đè 2 HUD/ESP;
    - log `ESP.log`: `qbl ensure ok`, `qbl shape/label created`, `qbl present: frames/skips`,
-     `qbl: RemoteCall session died during present`, `hud hide skipped/IMPOSSIBLE/done`.
+     `qbl: RemoteCall session died during present err=...`, `hud hide skipped/done`.
+
+3. **Session chết ngay trong lúc tạo style (log 12:00:28)**: `ds_qbl_style_ready`
+   từng tạo màu bằng `+[UIColor colorWithRed:green:blue:alpha:]` rồi `retain` ở
+   một remote call **kế tiếp**. Object trả về là autoreleased trong SpringBoard;
+   pool của SB có thể giải phóng nó trước khi `retain` chạm tới → `objc_msgSend`
+   fault → `RemoteCall` gọi `destroyRemoteCall` (`trojanMem=0`) → disable không
+   hide được HUD (`session=-1`), present treo 2×10s timeout.
+   - Style giờ **chỉ dùng màu singleton** (`+clearColor/+whiteColor/+blackColor/
+     +redColor/+yellowColor/+greenColor`) — đúng pattern renderer cũ đã chạy ổn;
+   - font **mượn từ label HUD** (`font` getter, UILabel giữ retain), không factory;
+   - `g_qblStyleOK` / `g_qblDead`: style fail 3 lần → bỏ QBL trong session đó để
+     **giữ session cho HUD**, không retry vô hạn;
+   - `ds_remove_springboard_hud`: nếu session đã chết, **mở session mới chỉ để
+     hide** HUD/ESP rồi destroy → tắt HUD luôn có tác dụng, không cần respring;
+   - log thêm `process.lastError` (tên call bị fault) vào `ESP.log`.
 
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`

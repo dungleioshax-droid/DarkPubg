@@ -2682,13 +2682,26 @@ static int g_qblBufCap = 0;
 static uint64_t g_qblFrameHash = 0;
 static unsigned long g_qblFrames = 0;
 static unsigned long g_qblSkips = 0;
-// Style dùng chung cho mọi label (tạo 1 lần, retain trong SB).
+// Style dùng chung cho mọi label/layer.
+// QUAN TRỌNG: chỉ dùng màu SINGLETON của UIColor (+clearColor/+whiteColor/
+// +blackColor/+redColor/+yellowColor/+greenColor). KHÔNG dùng
+// +colorWithRed:green:blue:alpha: qua RemoteCall: object trả về là autoreleased
+// trong SpringBoard, pool của SB có thể giải phóng nó trước khi lệnh `retain`
+// kế tiếp chạm tới -> objc_msgSend fault -> RemoteCall tự destroyRemoteCall
+// (trojanMem=0) -> HUD không hide được nữa. Đây đúng là lỗi trong log
+// 12:00:28 (style ok shadow=0 font=0/0 rồi disable session=-1).
 static uint64_t g_qblClearColor = 0;
 static uint64_t g_qblWhiteColor = 0;
-static uint64_t g_qblAIColor = 0;
+static uint64_t g_qblAIColor = 0;      // +yellowColor
+static uint64_t g_qblBlackColor = 0;   // +blackColor (shadow + HP nền)
+static uint64_t g_qblRedColor = 0;     // +redColor
+static uint64_t g_qblGreenColor = 0;   // +greenColor
 static uint64_t g_qblShadowCG = 0;
-static uint64_t g_qblFontMain = 0;
+static uint64_t g_qblFontMain = 0;     // mượn font của label HUD (label giữ retain)
 static uint64_t g_qblFontSmall = 0;
+static BOOL g_qblStyleOK = NO;
+static uint8_t g_qblStyleFails = 0;    // fail liên tiếp -> tắt QBL, tránh giết session
+static BOOL g_qblDead = NO;            // đường vẽ QBL đã bị bỏ trong session này
 // Đếm số lần tạo fail để không kẹt vòng "missing -> present mãi".
 static uint8_t g_qblShapeFail[kQBLBucketCount];
 static uint8_t g_qblLabelFail[kQBLLabelCount];
@@ -2735,9 +2748,15 @@ static void ds_qbl_reset_remote(void) {
     g_qblClearColor = 0;
     g_qblWhiteColor = 0;
     g_qblAIColor = 0;
+    g_qblBlackColor = 0;
+    g_qblRedColor = 0;
+    g_qblGreenColor = 0;
     g_qblShadowCG = 0;
     g_qblFontMain = 0;
     g_qblFontSmall = 0;
+    g_qblStyleOK = NO;
+    g_qblStyleFails = 0;
+    g_qblDead = NO;
     memset(g_qblShapeFail, 0, sizeof(g_qblShapeFail));
     memset(g_qblLabelFail, 0, sizeof(g_qblLabelFail));
     s_qblShapeBudget = 0;
@@ -2745,18 +2764,23 @@ static void ds_qbl_reset_remote(void) {
     s_qblTextCount = 0;
 }
 
-static uint64_t ds_qbl_color_obj(RemoteCall *process, uint32_t argb) {
-    uint64_t cls = ds_remote_class(process, "UIColor");
-    if (!cls) return 0;
-    double r = (double)((argb >> 16) & 0xFF) / 255.0;
-    double g = (double)((argb >> 8) & 0xFF) / 255.0;
-    double b = (double)(argb & 0xFF) / 255.0;
-    double a = (double)((argb >> 24) & 0xFF) / 255.0;
-    DSRemoteArgument args[] = {
-        { &r, sizeof(r) }, { &g, sizeof(g) }, { &b, sizeof(b) }, { &a, sizeof(a) },
-    };
-    return ds_remote_get_retained_object_on_main(
-        process, cls, "colorWithRed:green:blue:alpha:", args, 4);
+// Trả UIColor singleton theo bucket — KHÔNG tạo object mới, KHÔNG retain.
+// Màu gần đúng với QBL draw list (yellow/green/red của UIKit) nhưng an toàn
+// tuyệt đối vì các singleton sống suốt đời SpringBoard.
+static uint64_t ds_qbl_color_for_bucket(int bucket) {
+    switch (bucket) {
+        case kQBLBucketBox:      return g_qblWhiteColor;
+        case kQBLBucketBoxAI:    return g_qblAIColor ? g_qblAIColor : g_qblWhiteColor;
+        case kQBLBucketLine:     return g_qblWhiteColor;
+        case kQBLBucketBone:     return g_qblGreenColor ? g_qblGreenColor : g_qblWhiteColor;
+        case kQBLBucketDot:      return g_qblWhiteColor;
+        case kQBLBucketAIMark:   return g_qblAIColor ? g_qblAIColor : g_qblWhiteColor;
+        case kQBLBucketHpBg:     return g_qblBlackColor ? g_qblBlackColor : g_qblWhiteColor;
+        case kQBLBucketHpRed:    return g_qblRedColor ? g_qblRedColor : g_qblWhiteColor;
+        case kQBLBucketHpYellow: return g_qblAIColor ? g_qblAIColor : g_qblWhiteColor;
+        case kQBLBucketHpGreen:  return g_qblGreenColor ? g_qblGreenColor : g_qblWhiteColor;
+        default:                 return g_qblWhiteColor;
+    }
 }
 
 static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
@@ -2797,26 +2821,50 @@ static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     return YES;
 }
 
-// --- style dùng chung: tạo 1 lần/session (label white/shadow/font/clear) ---
+// --- style dùng chung: tạo 1 lần/session ---
+// Chỉ dùng màu SINGLETON (proven path của renderer cũ) — không tạo object
+// autoreleased qua RemoteCall. Font mượn từ label HUD để khỏi factory/retain.
 static BOOL ds_qbl_style_ready(RemoteCall *process) {
-    if (g_qblClearColor && g_qblWhiteColor) return YES;
+    if (g_qblStyleOK) return YES;
     if (!process || !process.trojanMem) return NO;
     uint64_t colorClass = ds_remote_class(process, "UIColor");
     if (!colorClass) return NO;
-    g_qblClearColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
-    g_qblWhiteColor = ds_qbl_color_obj(process, 0xFFFFFFFFu);
-    g_qblAIColor = ds_qbl_color_obj(process, kQBLColorAI);
-    uint64_t shadow = ds_qbl_color_obj(process, 0xFF000000u);
-    g_qblShadowCG = shadow ? ds_remote_get_object_on_main(process, shadow, "CGColor") : 0;
-    g_qblFontMain = ds_remote_font(process, 13.0, YES);
-    g_qblFontSmall = ds_remote_font(process, 11.0, YES);
+
+    if (!g_qblClearColor) g_qblClearColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
+    if (!g_qblWhiteColor) g_qblWhiteColor = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
     if (!g_qblClearColor || !g_qblWhiteColor) {
-        ESPLog("qbl style fail clear=0x%llx white=0x%llx",
-               (unsigned long long)g_qblClearColor, (unsigned long long)g_qblWhiteColor);
+        const char *err = process.lastError.UTF8String;
+        ESPLog("qbl style fail clear=0x%llx white=0x%llx err=%s",
+               (unsigned long long)g_qblClearColor,
+               (unsigned long long)g_qblWhiteColor, err ? err : "-");
+        if (g_qblStyleFails < 255) g_qblStyleFails++;
         return NO;
     }
-    ESPLog("qbl style ok shadow=%d font=%d/%d", g_qblShadowCG ? 1 : 0,
-           g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0);
+    if (!g_qblAIColor)    g_qblAIColor    = ds_remote_get_object_on_main(process, colorClass, "yellowColor");
+    if (!g_qblBlackColor) g_qblBlackColor = ds_remote_get_object_on_main(process, colorClass, "blackColor");
+    if (!g_qblRedColor)   g_qblRedColor   = ds_remote_get_object_on_main(process, colorClass, "redColor");
+    if (!g_qblGreenColor) g_qblGreenColor = ds_remote_get_object_on_main(process, colorClass, "greenColor");
+    if (!g_qblAIColor)    g_qblAIColor    = g_qblWhiteColor;
+    if (!g_qblBlackColor) g_qblBlackColor = g_qblWhiteColor;
+    if (!g_qblRedColor)   g_qblRedColor   = g_qblWhiteColor;
+    if (!g_qblGreenColor) g_qblGreenColor = g_qblWhiteColor;
+
+    // Font: UILabel HUD giữ retain font của nó -> getter an toàn, không cần
+    // retain. Không lấy được thì để UILabel tự dùng font mặc định (vẫn hiện).
+    if (!g_qblFontMain && g_remoteLabel && g_remoteWindowPid == (pid_t)process.pid) {
+        g_qblFontMain = ds_remote_get_object_on_main(process, g_remoteLabel, "font");
+    }
+    g_qblFontSmall = g_qblFontMain;
+
+    // Shadow text: CGColor của blackColor (getter, không retain CF object).
+    if (!g_qblShadowCG) {
+        g_qblShadowCG = ds_remote_get_object_on_main(process, g_qblBlackColor, "CGColor");
+    }
+    g_qblStyleOK = YES;
+    g_qblStyleFails = 0;
+    ESPLog("qbl style ok shadow=%d font=%d ai=%d green=%d red=%d",
+           g_qblShadowCG ? 1 : 0, g_qblFontMain ? 1 : 0,
+           g_qblAIColor ? 1 : 0, g_qblGreenColor ? 1 : 0, g_qblRedColor ? 1 : 0);
     return YES;
 }
 
@@ -2846,9 +2894,9 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
     ds_remote_set_rect_on_main(process, layer, "setFrame:", g_qblRootFrame);
     ds_remote_set_float_on_main(process, layer, "setSpeed:", 1000.0f);
     ds_remote_set_double_on_main(process, layer, "setLineWidth:", (double)ds_qbl_bucket_width(bucket));
-    // CAShapeLayer nhận CGColorRef -> lấy từ UIColor (CF object, bridge an toàn —
-    // cùng pattern setBorderColor:/setStrokeColor: của renderer cũ).
-    uint64_t color = ds_qbl_color_obj(process, ds_qbl_bucket_color(bucket));
+    // CAShapeLayer nhận CGColorRef -> lấy từ UIColor singleton (getter, không
+    // retain CF; cùng pattern setBorderColor:/setStrokeColor: của renderer cũ).
+    uint64_t color = ds_qbl_color_for_bucket(bucket);
     uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
     if (cg) {
         if (ds_qbl_bucket_stroked(bucket)) {
@@ -2931,7 +2979,7 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
 }
 
 static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
-    if (!process || !process.trojanMem) return NO;
+    if (!process || !process.trojanMem || g_qblDead) return NO;
     // pid/container đổi = mọi địa chỉ cache vô nghĩa (respring hoặc rebuild overlay).
     if (g_qblPid != (pid_t)process.pid || g_qblContainer != g_espContainer) {
         ds_qbl_reset_remote();
@@ -2956,16 +3004,25 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
     uint64_t viewClass = ds_remote_class(process, "UIView");
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t addSubview = ds_remote_sel(process, "addSubview:");
-    if (!viewClass || !alloc || !addSubview || !ds_qbl_style_ready(process)) {
+    if (!viewClass || !alloc || !addSubview) {
         ESPLog("qbl ensure fail: class=0x%llx alloc=0x%llx addSub=0x%llx",
                (unsigned long long)viewClass, (unsigned long long)alloc,
                (unsigned long long)addSubview);
         return NO;
     }
+    if (!ds_qbl_style_ready(process)) {
+        if (g_qblStyleFails >= 3) {
+            g_qblDead = YES;
+            ESPLog("qbl: style fail 3x -> bo QBL renderer (giu session cho HUD)");
+        }
+        return NO;
+    }
 
     uint64_t root = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
     if (!root || !ds_remote_invoke_noarg_on_main(process, root, "init")) {
-        ESPLog("qbl ensure fail: root=0x%llx", (unsigned long long)root);
+        const char *err = process.lastError.UTF8String;
+        ESPLog("qbl ensure fail: root=0x%llx err=%s",
+               (unsigned long long)root, err ? err : "-");
         return NO;
     }
     ds_remote_set_rect_on_main(process, root, "setFrame:", portraitBounds);
@@ -3236,12 +3293,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         }
     }
     if (g_qblLabelColor[slot] != c->color) {
-        // Chỉ 2 màu text (trắng player / vàng AI) -> dùng object cache, không
-        // tạo UIColor mới mỗi lần box đổi slot (leak trong SpringBoard).
+        // Chỉ 2 màu text (trắng player / vàng AI) — dùng singleton, không tạo
+        // UIColor mới (tránh factory autoreleased + retain race trong SB).
         uint64_t col = 0;
-        if (c->color == 0xFFFFFFFFu && g_qblWhiteColor) col = g_qblWhiteColor;
-        else if (c->color == kQBLColorAI && g_qblAIColor) col = g_qblAIColor;
-        else col = ds_qbl_color_obj(process, c->color);
+        if (c->color == 0xFFFFFFFFu) col = g_qblWhiteColor;
+        else if (c->color == kQBLColorAI) col = g_qblAIColor;
         if (col && ds_perform_on_springboard_main(process, lb,
                 ds_remote_sel(process, "setTextColor:"), col, YES)) {
             g_qblLabelColor[slot] = c->color;
@@ -3261,6 +3317,7 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
                            CGRect portraitBounds, int orientation) {
     if (!process || !process.trojanMem) return;
+    if (g_qblDead) return;
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
 
@@ -3561,8 +3618,11 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         static CFAbsoluteTime s_lastDeadLog = 0;
         if (nowP - s_lastDeadLog > 1.0) {
             s_lastDeadLog = nowP;
-            ESPLog("qbl: RemoteCall session died during present (HUD will be frozen)");
+            const char *err = process.lastError.UTF8String;
+            ESPLog("qbl: RemoteCall session died during present err=%s (bo QBL, giu HUD)",
+                   err ? err : "-");
         }
+        g_qblDead = YES;
     }
     if (g_qblRoot && g_qblRootHidden) g_qblRootHidden = NO;
     ESPDrawFrameReset();
@@ -4002,7 +4062,31 @@ static void ds_remove_springboard_hud(RemoteCall *process) {
         return;
     }
     if (!process.trojanMem) {
-        ESPLog("hud hide IMPOSSIBLE: RemoteCall session already dead");
+        // Session đã chết (RemoteCall tự destroy sau 1 remote call fault) nhưng
+        // HUD vẫn nằm trong SpringBoard. Mở session MỚI chỉ để hide rồi destroy;
+        // không có bước này thì HUD đè màn hình đến khi respring.
+        ESPLog("hud hide: session dead -> thu session moi");
+        RemoteCall *tmp = nil;
+        @try {
+            tmp = [[RemoteCall alloc] initWithProcess:@"SpringBoard" useMigFilterBypass:NO];
+        } @catch (NSException *e) {
+            const char *msg = e.reason.UTF8String;
+            ESPLog("hud hide retry init exception: %s", msg ? msg : "-");
+        }
+        if (tmp && tmp.trojanMem && tmp.pid == g_remoteWindowPid) {
+            if (g_remoteContainer) {
+                ds_perform_on_springboard_main(tmp, g_remoteContainer,
+                                               ds_remote_sel(tmp, "removeFromSuperview"), 0, YES);
+            }
+            ds_remote_set_u64_on_main(tmp, g_remoteWindow, "setHidden:", 1);
+            if (g_espWindow) ds_remote_set_u64_on_main(tmp, g_espWindow, "setHidden:", 1);
+            ESPLog("hud hide RETRY ok win=0x%llx", (unsigned long long)g_remoteWindow);
+        } else {
+            ESPLog("hud hide RETRY failed (session init)");
+        }
+        if (tmp) {
+            @try { [tmp destroyRemoteCall]; } @catch (__unused NSException *e) {}
+        }
         return;
     }
     if (g_remoteContainer) {
@@ -4171,7 +4255,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw59-offsets"
+#define DS_ESP_BUILD_TAG "kernrw60-hudfix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
