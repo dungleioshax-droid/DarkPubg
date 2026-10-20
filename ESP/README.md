@@ -73,13 +73,13 @@ Trước đây mỗi box = 4 view viền + label + HP + path riêng (hàng trăm
 Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
 
 1. **Builder** (`ds_qbl_build_frame` trong `darksword/DSBridge.mm`) gom tất cả
-   primitive của 1 frame vào draw list CPU (`ESPOverlay.mm`, 128 lệnh + 512 điểm,
+   primitive của 1 frame vào draw list CPU (`ESPOverlay.mm`, 128 lệnh + 1024 điểm,
    0 remote call): box, thanh máu (nền + fill), head dot, tam giác AI, snapline
    (1 polyline dùng chung), xương (1 polyline/player), text.
 2. **Presenter** (`ds_qbl_present`) bắn sang SpringBoard theo batch:
    - mỗi style = 1 `CAShapeLayer` tái sử dụng (box trắng, box AI vàng, snapline,
      xương xanh, head dot, AI mark, HP nền/đỏ/vàng/xanh = 10 layer, `speed=1000` để
-     không animate khi đổi path);
+     không animate khi đổi path), **tạo lazy** khi frame đầu tiên cần tới;
    - rect gom 1 lần bằng `CGPathAddRects`, polyline bằng `CGPathAddLines`
      (pointer + count — tham số an toàn qua RemoteCall); points/rects nằm trong
      **1 buffer remote** (`malloc` 1 lần, giữ giữa các frame) → 2 `remote_write`/frame;
@@ -89,6 +89,30 @@ Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
    - frame trùng hash (không có gì đổi) → bỏ qua toàn bộ remote call.
 3. Tất cả nằm trong 1 `UIView` gốc (`g_qblRoot`) là con của container cũ → hide/show
    1 call, window cleanup cũ giữ nguyên.
+
+#### Ổn định (bản sửa lỗi HUD đứng / ESP không hiện)
+
+Hai lỗi gốc của bản cmdlist đầu tiên:
+
+1. **ESP không bao giờ hiện**: nhánh QBL `return YES` sớm trước đoạn
+   `addSubview:container` + `setHidden:0` của window → `g_espWindow` đã khác 0 nên
+   `ds_esp_overlay_ensure` không bao giờ chạy lại. Giờ chỉ compile-out phần tạo
+   view per-box; đoạn attach/show window dùng chung, luôn chạy.
+2. **HUD đứng + bật lại đè HUD + kill app respring**: bản đầu tạo 10 shape layer +
+   16 label (~350 remote call) trong **một tick** ngay sau khi HUD attach. Chỉ cần
+   1 call timeout là `RemoteCall` tự `destroyRemoteCall` (trojanMem=0) → HUD không
+   ẩn/không cập nhật được nữa. Giờ:
+   - window ensure chỉ tạo window + container (bỏ 8 bộ view per-box ≈ 150 call);
+   - shape/label **tạo lazy, tối đa 2 shape + 2 label mỗi tick**
+     (`kQBLShapeBudgetPerTick` / `kQBLLabelBudgetPerTick`);
+   - geometry có **hash riêng từng bucket** + quantize 0.5pt → bucket không đổi thì
+     không `setPath:`; frame đứng yên = 0 remote call;
+   - label pass 30Hz tách riêng, chạy cả khi geometry skip (không mất update);
+   - pid SpringBoard đổi (respring) → tự reset cache và dựng lại overlay;
+   - nếu disable không ẩn được window (session chết), địa chỉ HUD/ESP được giữ
+     lại và enable sau ẩn bằng session mới (guard pid) → không đè 2 HUD/ESP;
+   - log `ESP.log`: `qbl ensure ok`, `qbl shape/label created`, `qbl present: frames/skips`,
+     `qbl: RemoteCall session died during present`, `hud hide skipped/IMPOSSIBLE/done`.
 
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`

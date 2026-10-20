@@ -158,6 +158,13 @@ static uint64_t g_remoteSecureCanvas = 0;
 static uint64_t g_remoteWindow = 0;
 static uint64_t g_remoteWindowScene = 0;
 static pid_t g_remoteWindowPid = 0;
+// Window của session TRƯỚC, giữ lại để enable sau dọn bằng RemoteCall mới khi
+// lần disable trước không ẩn được (session đã chết -> trojanMem=0). Chỉ dùng
+// khi pid SpringBoard trùng; sau respring pid đổi nên địa chỉ cũ bị bỏ.
+static uint64_t g_staleHudWindow = 0;
+static pid_t g_staleHudPid = 0;
+static uint64_t g_staleEspWindow = 0;
+static pid_t g_staleEspPid = 0;
 // ESP overlay (box thật): window full-screen + container xoay theo orientation
 // + pool ESPOverlayMaxBoxes*(4 viền + 1 label). Intentionally leak như HUD.
 static uint64_t g_espWindow = 0;
@@ -190,8 +197,16 @@ static BOOL g_espRectValid[ESPOverlayMaxBoxes] = {NO};
 static CGRect g_espLastContainerBounds = CGRectZero;
 static int g_espLastMapOrient = UIInterfaceOrientationUnknown;
 
+// Renderer QBL (frame + command list). 0 = quay lại renderer per-box cũ.
+// Định nghĩa ở đây (không phải cạnh block QBL) để ds_esp_overlay_ensure_impl
+// phía trên dùng được.
+#ifndef DS_ESP_RENDER_COMMANDLIST
+#define DS_ESP_RENDER_COMMANDLIST 1
+#endif
+
 // Batch path layer: 1 CAShapeLayer vẽ MỌI box bằng 1 CGPath dựng trong process
 // đích -> ~5 remote call/frame BẤT KỂ số box (thay vì ~2 × N).
+static pid_t g_espWindowPid = 0;         // pid SpringBoard sở hữu g_espWindow
 static uint64_t g_espPathLayer = 0;      // CAShapeLayer trong process đích
 static uint64_t g_espPathObj = 0;        // CGPath đang gắn vào layer (để release)
 static uint64_t g_espRectsAddr = 0;      // buffer CGRect[] malloc trong process đích
@@ -2317,11 +2332,17 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     g_dsGreenColor = 0;
     ds_inv_cache_drop();
     if (g_espWindow && g_espContainer) {
+#if DS_ESP_RENDER_COMMANDLIST
+        // QBL: window+container là đủ. Layer/label do ds_qbl_present dựng lazy
+        // theo frame đầu tiên cần tới (xem kQBLShapeBudgetPerTick).
+        return YES;
+#else
         BOOL ok = YES;
         for (int i = 0; i < ESPOverlayMaxBoxes && ok; i++) {
             ok = (g_espBorders[i][0] != 0) && (g_espLabels[i] != 0);
         }
         if (ok) return YES;
+#endif
     }
     // KHÔNG dọn stale trong đường ensure nữa: cleanup quét toàn bộ window của
     // SpringBoard bằng remote call, chỉ cần 1 call fail là RemoteCall tự
@@ -2378,7 +2399,6 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     g_dsRedColor = red;
     g_dsYellowColor = yellow;
     g_dsGreenColor = green;
-    BOOL hpColorOK = (black && green && yellow);
     if (!clear || !red || !white) return NO;
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
     ds_perform_on_springboard_main(process, container, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
@@ -2387,6 +2407,8 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_remote_set_u64_on_main(process, container, "setHidden:", 0);
     ds_remote_set_rect_on_main(process, container, "setFrame:", portraitBounds);
 
+#if !DS_ESP_RENDER_COMMANDLIST
+    BOOL hpColorOK = (black && green && yellow);
     uint64_t font = ds_remote_font(process, 10.0, YES);
     if (!font) { ESPLog("esp ensure fail: font"); return NO; }
 
@@ -2496,6 +2518,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
             ESPLog("esp path layer FAIL (shape=0x%llx) -> per-box", (unsigned long long)shapeClass);
         }
     }
+#endif // !DS_ESP_RENDER_COMMANDLIST
 
     ds_trace("esp ensure: attaching window");
     ds_perform_on_springboard_main(process, window, ds_remote_sel(process, "addSubview:"), container, YES);
@@ -2503,9 +2526,14 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_trace("esp ensure: window shown");
     g_espWindow = window;
     g_espContainer = container;
+    g_espWindowPid = (pid_t)process.pid;
     g_espWindowHiddenCache = NO;
     g_espLastContainerBounds = CGRectZero;
     g_espLastMapOrient = UIInterfaceOrientationUnknown;
+    ESPLog("esp ensure ok pid=%d win=0x%llx cont=0x%llx renderer=%s",
+           (int)process.pid, (unsigned long long)window,
+           (unsigned long long)container,
+           DS_ESP_RENDER_COMMANDLIST ? "qbl" : "per-box");
     return YES;
 }
 
@@ -2553,10 +2581,8 @@ static BOOL ds_esp_overlay_ensure(RemoteCall *process, CGRect portraitBounds) {
 //   3. Frame trùng hash (không có gì đổi) -> bỏ qua toàn bộ remote call.
 // Toàn bộ nằm trong 1 UIView gốc (g_qblRoot) => hide/show 1 call.
 // Cờ DS_ESP_RENDER_COMMANDLIST=0 để quay lại renderer per-box cũ.
+// (Cờ được định nghĩa ở đầu file để ds_esp_overlay_ensure_impl dùng được.)
 // ===========================================================================
-#ifndef DS_ESP_RENDER_COMMANDLIST
-#define DS_ESP_RENDER_COMMANDLIST 1
-#endif
 
 enum {
     kQBLBucketBox = 0,   // viền box player (trắng)
@@ -2637,8 +2663,10 @@ typedef struct {
 static pid_t g_qblPid = 0;
 static uint64_t g_qblContainer = 0;
 static uint64_t g_qblRoot = 0;
+static uint64_t g_qblRootLayer = 0;
 static uint64_t g_qblShape[kQBLBucketCount];
 static uint64_t g_qblShapePath[kQBLBucketCount];
+static uint64_t g_qblShapeHash[kQBLBucketCount]; // hash nội dung path đã set (dirty per-bucket)
 static uint64_t g_qblLabel[kQBLLabelCount];
 static uint32_t g_qblLabelColor[kQBLLabelCount];
 static char g_qblLabelText[kQBLLabelCount][112];
@@ -2654,6 +2682,21 @@ static int g_qblBufCap = 0;
 static uint64_t g_qblFrameHash = 0;
 static unsigned long g_qblFrames = 0;
 static unsigned long g_qblSkips = 0;
+// Style dùng chung cho mọi label (tạo 1 lần, retain trong SB).
+static uint64_t g_qblClearColor = 0;
+static uint64_t g_qblWhiteColor = 0;
+static uint64_t g_qblAIColor = 0;
+static uint64_t g_qblShadowCG = 0;
+static uint64_t g_qblFontMain = 0;
+static uint64_t g_qblFontSmall = 0;
+// Đếm số lần tạo fail để không kẹt vòng "missing -> present mãi".
+static uint8_t g_qblShapeFail[kQBLBucketCount];
+static uint8_t g_qblLabelFail[kQBLLabelCount];
+// Lazy creation: mỗi tick tối đa N object mới (tránh dồn ~180 remote call).
+#define kQBLShapeBudgetPerTick 2
+#define kQBLLabelBudgetPerTick 2
+static int s_qblShapeBudget = 0;
+static int s_qblLabelBudget = 0;
 
 // --- per-frame accumulators (mapped sang portrait) ---
 static CGRect s_qblRects[kQBLBucketCount][DS_QBL_MAX_RECTS];
@@ -2663,13 +2706,20 @@ static int s_qblPolyCount[kQBLBucketCount];
 static CGPoint s_qblPts[ESP_DRAW_MAX_POINTS];
 static int s_qblPtCount = 0;
 static CGRect s_qblAllRects[kQBLBucketCount * DS_QBL_MAX_RECTS];
+// Text tách khỏi geometry: label đặt theo anchor đã map + quantize 0.5pt.
+static ESPDrawCommand s_qblTexts[kQBLLabelCount];
+static CGPoint s_qblTextAnchor[kQBLLabelCount];
+static uint64_t s_qblTextHash[kQBLLabelCount];
+static int s_qblTextCount = 0;
 
 static void ds_qbl_reset_remote(void) {
     g_qblPid = 0;
     g_qblContainer = 0;
     g_qblRoot = 0;
+    g_qblRootLayer = 0;
     memset(g_qblShape, 0, sizeof(g_qblShape));
     memset(g_qblShapePath, 0, sizeof(g_qblShapePath));
+    memset(g_qblShapeHash, 0, sizeof(g_qblShapeHash));
     memset(g_qblLabel, 0, sizeof(g_qblLabel));
     memset(g_qblLabelRectValid, 0, sizeof(g_qblLabelRectValid));
     memset(g_qblLabelShown, 0, sizeof(g_qblLabelShown));
@@ -2682,6 +2732,17 @@ static void ds_qbl_reset_remote(void) {
     g_qblRootFrame = CGRectZero;
     g_qblWindowFrame = CGRectZero;
     g_qblFrameHash = 0;
+    g_qblClearColor = 0;
+    g_qblWhiteColor = 0;
+    g_qblAIColor = 0;
+    g_qblShadowCG = 0;
+    g_qblFontMain = 0;
+    g_qblFontSmall = 0;
+    memset(g_qblShapeFail, 0, sizeof(g_qblShapeFail));
+    memset(g_qblLabelFail, 0, sizeof(g_qblLabelFail));
+    s_qblShapeBudget = 0;
+    s_qblLabelBudget = 0;
+    s_qblTextCount = 0;
 }
 
 static uint64_t ds_qbl_color_obj(RemoteCall *process, uint32_t argb) {
@@ -2736,10 +2797,146 @@ static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     return YES;
 }
 
+// --- style dùng chung: tạo 1 lần/session (label white/shadow/font/clear) ---
+static BOOL ds_qbl_style_ready(RemoteCall *process) {
+    if (g_qblClearColor && g_qblWhiteColor) return YES;
+    if (!process || !process.trojanMem) return NO;
+    uint64_t colorClass = ds_remote_class(process, "UIColor");
+    if (!colorClass) return NO;
+    g_qblClearColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
+    g_qblWhiteColor = ds_qbl_color_obj(process, 0xFFFFFFFFu);
+    g_qblAIColor = ds_qbl_color_obj(process, kQBLColorAI);
+    uint64_t shadow = ds_qbl_color_obj(process, 0xFF000000u);
+    g_qblShadowCG = shadow ? ds_remote_get_object_on_main(process, shadow, "CGColor") : 0;
+    g_qblFontMain = ds_remote_font(process, 13.0, YES);
+    g_qblFontSmall = ds_remote_font(process, 11.0, YES);
+    if (!g_qblClearColor || !g_qblWhiteColor) {
+        ESPLog("qbl style fail clear=0x%llx white=0x%llx",
+               (unsigned long long)g_qblClearColor, (unsigned long long)g_qblWhiteColor);
+        return NO;
+    }
+    ESPLog("qbl style ok shadow=%d font=%d/%d", g_qblShadowCG ? 1 : 0,
+           g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0);
+    return YES;
+}
+
+// Tạo CAShapeLayer theo nhu cầu, tối đa kQBLShapeBudgetPerTick object/tick.
+// Budget là hàng rào chống dồn hàng trăm remote call trong 1 tick (mỗi remote
+// call timeout = RemoteCall tự destroy -> HUD đứng, ESP mất).
+static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
+    if (bucket < 0 || bucket >= kQBLBucketCount) return 0;
+    if (g_qblShape[bucket]) return g_qblShape[bucket];
+    if (!process || !process.trojanMem || !g_qblRootLayer) return 0;
+    if (s_qblShapeBudget <= 0) return 0;
+    uint64_t shapeClass = ds_remote_class(process, "CAShapeLayer");
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t addSublayer = ds_remote_sel(process, "addSublayer:");
+    if (!shapeClass || !alloc || !addSublayer) {
+        if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
+        ESPLog("qbl shape fail: class=0x%llx alloc=0x%llx addSub=0x%llx",
+               (unsigned long long)shapeClass, (unsigned long long)alloc,
+               (unsigned long long)addSublayer);
+        return 0;
+    }
+    uint64_t layer = remote_msg(process, shapeClass, alloc, 0, 0, 0, 0);
+    if (!layer || !ds_remote_invoke_noarg_on_main(process, layer, "init")) {
+        if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
+        return 0;
+    }
+    ds_remote_set_rect_on_main(process, layer, "setFrame:", g_qblRootFrame);
+    ds_remote_set_float_on_main(process, layer, "setSpeed:", 1000.0f);
+    ds_remote_set_double_on_main(process, layer, "setLineWidth:", (double)ds_qbl_bucket_width(bucket));
+    // CAShapeLayer nhận CGColorRef -> lấy từ UIColor (CF object, bridge an toàn —
+    // cùng pattern setBorderColor:/setStrokeColor: của renderer cũ).
+    uint64_t color = ds_qbl_color_obj(process, ds_qbl_bucket_color(bucket));
+    uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
+    if (cg) {
+        if (ds_qbl_bucket_stroked(bucket)) {
+            ds_perform_on_springboard_main(process, layer, ds_remote_sel(process,
+                "setStrokeColor:"), cg, YES);
+        }
+        if (ds_qbl_bucket_filled(bucket)) {
+            ds_perform_on_springboard_main(process, layer, ds_remote_sel(process,
+                "setFillColor:"), cg, YES);
+        }
+    }
+    if (!ds_perform_on_springboard_main(process, g_qblRootLayer, addSublayer, layer, YES)) {
+        if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
+        return 0;
+    }
+    s_qblShapeBudget--;
+    g_qblShape[bucket] = layer;
+    g_qblShapeHash[bucket] = 0;
+    ESPLog("qbl shape %d created (budget %d)", bucket, s_qblShapeBudget);
+    return layer;
+}
+
+// UILabel lazy. Slot chẵn = tên + mét (2 dòng), slot lẻ = TeamID (1 dòng).
+static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
+    if (slot < 0 || slot >= kQBLLabelCount) return 0;
+    if (g_qblLabel[slot]) return g_qblLabel[slot];
+    if (!process || !process.trojanMem || !g_qblRoot) return 0;
+    if (!ds_qbl_style_ready(process)) {
+        if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
+        return 0;
+    }
+    if (s_qblLabelBudget <= 0) return 0;
+    uint64_t labelClass = ds_remote_class(process, "UILabel");
+    uint64_t alloc = ds_remote_sel(process, "alloc");
+    uint64_t addSubview = ds_remote_sel(process, "addSubview:");
+    if (!labelClass || !alloc || !addSubview) {
+        if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
+        return 0;
+    }
+    uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
+    if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) {
+        if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
+        return 0;
+    }
+    ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
+    ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+    ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (slot % 2 == 0) ? 2 : 1);
+    ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
+    ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"),
+                                   g_qblWhiteColor, YES);
+    ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"),
+                                   g_qblClearColor, YES);
+    uint64_t f = (slot % 2 == 0) ? g_qblFontMain : g_qblFontSmall;
+    if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
+    // QBL AddOutlinedText: UILabel không có stroke -> shadow đen (bán kính 1.2,
+    // offset 0) set MỘT lần lúc tạo, 0 chi phí/frame.
+    if (g_qblShadowCG) {
+        uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
+        if (lbLayer) {
+            ds_perform_on_springboard_main(process, lbLayer, ds_remote_sel(process,
+                "setShadowColor:"), g_qblShadowCG, YES);
+            ds_remote_set_float_on_main(process, lbLayer, "setShadowOpacity:", 1.0f);
+            ds_remote_set_double_on_main(process, lbLayer, "setShadowRadius:", 1.2);
+            ds_remote_set_point_on_main(process, lbLayer, "setShadowOffset:", CGPointMake(0, 0));
+        }
+    }
+    if (!ds_perform_on_springboard_main(process, g_qblRoot, addSubview, lb, YES)) {
+        if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
+        return 0;
+    }
+    s_qblLabelBudget--;
+    g_qblLabel[slot] = lb;
+    g_qblLabelColor[slot] = 0xFFFFFFFFu;
+    g_qblLabelText[slot][0] = '\0';
+    g_qblLabelRectValid[slot] = NO;
+    g_qblLabelShown[slot] = NO;
+    g_qblLabelAt[slot] = 0;
+    ESPLog("qbl label %d created (budget %d)", slot, s_qblLabelBudget);
+    return lb;
+}
+
 static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
     if (!process || !process.trojanMem) return NO;
-    if (g_qblPid != (pid_t)process.pid) ds_qbl_reset_remote();
-    if (g_qblRoot && g_qblContainer == g_espContainer) {
+    // pid/container đổi = mọi địa chỉ cache vô nghĩa (respring hoặc rebuild overlay).
+    if (g_qblPid != (pid_t)process.pid || g_qblContainer != g_espContainer) {
+        ds_qbl_reset_remote();
+    }
+    if (g_qblRoot && g_qblRootLayer) {
         if (!CGRectEqualToRect(g_qblRootFrame, portraitBounds)) {
             ds_remote_set_rect_on_main(process, g_qblRoot, "setFrame:", portraitBounds);
             for (int i = 0; i < kQBLBucketCount; i++) {
@@ -2751,92 +2948,48 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
         }
         return YES;
     }
-    if (g_qblRoot) ds_qbl_reset_remote(); // container cũ bị thay: bỏ cache, leak root cũ
-    if (!g_espContainer) return NO;
-    g_qblPid = (pid_t)process.pid;
+    if (!g_espContainer) {
+        ESPLog("qbl ensure fail: no esp container");
+        return NO;
+    }
 
     uint64_t viewClass = ds_remote_class(process, "UIView");
-    uint64_t shapeClass = ds_remote_class(process, "CAShapeLayer");
-    uint64_t labelClass = ds_remote_class(process, "UILabel");
-    uint64_t colorClass = ds_remote_class(process, "UIColor");
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t addSubview = ds_remote_sel(process, "addSubview:");
-    uint64_t addSublayer = ds_remote_sel(process, "addSublayer:");
-    uint64_t clear = colorClass ? ds_remote_get_object_on_main(process, colorClass, "clearColor") : 0;
-    if (!viewClass || !shapeClass || !labelClass || !alloc || !clear) {
-        ESPLog("qbl ensure fail class view=%llx shape=%llx lbl=%llx",
-               (unsigned long long)viewClass, (unsigned long long)shapeClass,
-               (unsigned long long)labelClass);
+    if (!viewClass || !alloc || !addSubview || !ds_qbl_style_ready(process)) {
+        ESPLog("qbl ensure fail: class=0x%llx alloc=0x%llx addSub=0x%llx",
+               (unsigned long long)viewClass, (unsigned long long)alloc,
+               (unsigned long long)addSubview);
         return NO;
     }
 
     uint64_t root = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
-    if (!root || !ds_remote_invoke_noarg_on_main(process, root, "init")) return NO;
+    if (!root || !ds_remote_invoke_noarg_on_main(process, root, "init")) {
+        ESPLog("qbl ensure fail: root=0x%llx", (unsigned long long)root);
+        return NO;
+    }
     ds_remote_set_rect_on_main(process, root, "setFrame:", portraitBounds);
     ds_remote_set_u64_on_main(process, root, "setUserInteractionEnabled:", 0);
-    ds_perform_on_springboard_main(process, root, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
-    if (!ds_perform_on_springboard_main(process, g_espContainer, addSubview, root, YES)) return NO;
+    ds_perform_on_springboard_main(process, root, ds_remote_sel(process, "setBackgroundColor:"),
+                                   g_qblClearColor, YES);
+    if (!ds_perform_on_springboard_main(process, g_espContainer, addSubview, root, YES)) {
+        ESPLog("qbl ensure fail: addSubview");
+        return NO;
+    }
     uint64_t rootLayer = ds_remote_get_object_on_main(process, root, "layer");
-    if (!rootLayer) return NO;
-
-    for (int i = 0; i < kQBLBucketCount; i++) {
-        uint64_t layer = remote_msg(process, shapeClass, alloc, 0, 0, 0, 0);
-        if (!layer || !ds_remote_invoke_noarg_on_main(process, layer, "init")) continue;
-        ds_remote_set_rect_on_main(process, layer, "setFrame:", portraitBounds);
-        ds_remote_set_float_on_main(process, layer, "setSpeed:", 1000.0f);
-        ds_remote_set_double_on_main(process, layer, "setLineWidth:", (double)ds_qbl_bucket_width(i));
-        // Màu: CAShapeLayer nhận CGColorRef -> lấy từ UIColor (CF object, bridge an toàn).
-        uint32_t argb = ds_qbl_bucket_color(i);
-        uint64_t color = ds_qbl_color_obj(process, argb);
-        uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
-        if (cg) {
-            if (ds_qbl_bucket_stroked(i)) {
-                ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setStrokeColor:"), cg, YES);
-            }
-            if (ds_qbl_bucket_filled(i)) {
-                ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setFillColor:"), cg, YES);
-            }
-        }
-        ds_perform_on_springboard_main(process, rootLayer, addSublayer, layer, YES);
-        g_qblShape[i] = layer;
+    if (!rootLayer) {
+        ESPLog("qbl ensure fail: root layer");
+        return NO;
     }
 
-    uint64_t fontMain = ds_remote_font(process, 13.0, YES);
-    uint64_t fontSmall = ds_remote_font(process, 11.0, YES);
-    uint64_t white = ds_qbl_color_obj(process, 0xFFFFFFFFu);
-    uint64_t shadow = ds_qbl_color_obj(process, 0xFF000000u);
-    uint64_t shadowCG = shadow ? ds_remote_get_object_on_main(process, shadow, "CGColor") : 0;
-    for (int i = 0; i < kQBLLabelCount; i++) {
-        uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
-        if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) continue;
-        ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
-        ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
-        ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (i % 2 == 0) ? 2 : 1);
-        ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
-        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"), white, YES);
-        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
-        uint64_t f = (i % 2 == 0) ? fontMain : fontSmall;
-        if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
-        // QBL AddOutlinedText: chữ viền đen. UILabel không có stroke -> dùng
-        // shadow đen (bán kính 1.2, offset 0) set MỘT lần lúc tạo, 0 chi phí/frame.
-        uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
-        if (lbLayer && shadowCG) {
-            ds_perform_on_springboard_main(process, lbLayer, ds_remote_sel(process, "setShadowColor:"), shadowCG, YES);
-            ds_remote_set_float_on_main(process, lbLayer, "setShadowOpacity:", 1.0f);
-            ds_remote_set_double_on_main(process, lbLayer, "setShadowRadius:", 1.2);
-            ds_remote_set_point_on_main(process, lbLayer, "setShadowOffset:", CGPointMake(0, 0));
-        }
-        ds_perform_on_springboard_main(process, root, addSubview, lb, YES);
-        g_qblLabel[i] = lb;
-        g_qblLabelColor[i] = 0xFFFFFFFFu;
-        g_qblLabelText[i][0] = '\0';
-    }
-
+    g_qblPid = (pid_t)process.pid;
+    g_qblContainer = g_espContainer;
     g_qblRoot = root;
+    g_qblRootLayer = rootLayer;
     g_qblRootFrame = portraitBounds;
     g_qblRootHidden = YES;
-    ESPLog("qbl ensure ok pid=%d root=0x%llx layers=%d labels=%d",
-           (int)process.pid, (unsigned long long)root, kQBLBucketCount, kQBLLabelCount);
+    ESPLog("qbl ensure ok pid=%d root=0x%llx (layers/labels lazy)",
+           (int)process.pid, (unsigned long long)root);
     return YES;
 }
 
@@ -3004,19 +3157,73 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
 
 // Đặt 1 label theo lệnh text. Text đổi -> setText (rẻ, chỉ khi đổi); vị trí
 // cập nhật tối đa 30Hz + ngưỡng 0.5pt như bản per-box cũ.
+// ---------------------------------------------------------------------------
+// Presenter (frame -> SpringBoard, dirty theo từng bucket)
+// ---------------------------------------------------------------------------
+
+// Quantize 0.5pt: triệt tiêu jitter w2s dưới ngưỡng nhìn thấy. Nhờ vậy frame
+// đứng yên mới hash giống nhau và skip được (dirty tracking như renderer cũ).
+static inline CGFloat ds_qbl_q(CGFloat v) { return round(v * 2.0) / 2.0; }
+
+static inline CGPoint ds_qbl_qpoint(CGPoint p) {
+    return CGPointMake(ds_qbl_q(p.x), ds_qbl_q(p.y));
+}
+
+static inline CGRect ds_qbl_qrect(CGRect r) {
+    CGFloat w = ds_qbl_q(r.size.width);
+    CGFloat h = ds_qbl_q(r.size.height);
+    if (w < 1.0) w = 1.0;
+    if (h < 1.0) h = 1.0;
+    return CGRectMake(ds_qbl_q(r.origin.x), ds_qbl_q(r.origin.y), w, h);
+}
+
+static inline void ds_qbl_hash_bytes(uint64_t *h, const void *ptr, size_t n) {
+    const unsigned char *p = (const unsigned char *)ptr;
+    for (size_t i = 0; i < n; i++) {
+        *h ^= (uint64_t)p[i];
+        *h *= 1099511628211ULL;
+    }
+}
+
+static uint64_t ds_qbl_hash_bucket(int b) {
+    uint64_t h = 1469598103934665603ULL;
+    for (int r = 0; r < s_qblRectCount[b]; r++) {
+        ds_qbl_hash_bytes(&h, &s_qblRects[b][r], sizeof(CGRect));
+    }
+    for (int p = 0; p < s_qblPolyCount[b]; p++) {
+        int start = s_qblPolys[b][p].start;
+        int n = s_qblPolys[b][p].count;
+        if (start < 0 || n <= 0 || start + n > s_qblPtCount) continue;
+        ds_qbl_hash_bytes(&h, &s_qblPts[start], (size_t)n * sizeof(CGPoint));
+    }
+    return h;
+}
+
+// Rect của label suy TỪ anchor hiện tại (không lưu hàng đợi) -> gate 30Hz
+// không bao giờ làm mất update, pass sau luôn đọc vị trí mới nhất.
+static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
+    if (slot % 2 == 0) {
+        // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
+        // nên cao 32pt để dòng 2 không bị cắt.
+        return CGRectMake(anchor.x - 90.0, anchor.y + 3.0, 180.0, 32.0);
+    }
+    // TeamID ngay trên box.
+    return CGRectMake(anchor.x - 42.0, anchor.y - 16.0, 84.0, 15.0);
+}
+
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
-                               CGFloat landW, CGFloat landH, CGPoint winCenter,
-                               int mapOrient, CFAbsoluteTime now) {
+                               CGPoint anchor) {
     if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
-    uint64_t lb = g_qblLabel[slot];
-    if (!lb) return;
     if (!c->text[0]) {
-        if (g_qblLabelShown[slot]) {
-            ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
+        uint64_t hidden = g_qblLabel[slot];
+        if (hidden && g_qblLabelShown[slot]) {
+            ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
             g_qblLabelShown[slot] = NO;
         }
         return;
     }
+    uint64_t lb = ds_qbl_label_for(process, slot);
+    if (!lb) return;
     if (!g_qblLabelShown[slot]) {
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 0);
         g_qblLabelShown[slot] = YES;
@@ -3029,23 +3236,18 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         }
     }
     if (g_qblLabelColor[slot] != c->color) {
-        uint64_t col = ds_qbl_color_obj(process, c->color);
+        // Chỉ 2 màu text (trắng player / vàng AI) -> dùng object cache, không
+        // tạo UIColor mới mỗi lần box đổi slot (leak trong SpringBoard).
+        uint64_t col = 0;
+        if (c->color == 0xFFFFFFFFu && g_qblWhiteColor) col = g_qblWhiteColor;
+        else if (c->color == kQBLColorAI && g_qblAIColor) col = g_qblAIColor;
+        else col = ds_qbl_color_obj(process, c->color);
         if (col && ds_perform_on_springboard_main(process, lb,
                 ds_remote_sel(process, "setTextColor:"), col, YES)) {
             g_qblLabelColor[slot] = c->color;
         }
     }
-    if (now - g_qblLabelAt[slot] < (1.0 / 30.0)) return;
-    CGPoint anchor = ds_esp_map_point(CGPointMake(c->tx, c->ty), landW, landH, winCenter, mapOrient);
-    CGRect r;
-    if (slot % 2 == 0) {
-        // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
-        // nên cao 32pt để dòng 2 không bị cắt.
-        r = CGRectMake(anchor.x - 90.0, anchor.y + 3.0, 180.0, 32.0);
-    } else {
-        // TeamID ngay trên box.
-        r = CGRectMake(anchor.x - 42.0, anchor.y - 16.0, 84.0, 15.0);
-    }
+    CGRect r = ds_qbl_label_rect(slot, anchor);
     if (!g_qblLabelRectValid[slot] ||
         fabs(g_qblLabelRect[slot].origin.x - r.origin.x) > 0.5 ||
         fabs(g_qblLabelRect[slot].origin.y - r.origin.y) > 0.5 ||
@@ -3054,37 +3256,6 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
     }
-    g_qblLabelAt[slot] = now;
-}
-
-static uint64_t ds_qbl_hash_frame(const DSQBLFeat *f, CGRect bounds, int orient) {
-    // FNV-1a trên command list + point pool + feature/bounds. Command đã memset
-    // nên padding = 0 -> hash ổn định giữa các frame giống nhau.
-    const unsigned char *cmds = (const unsigned char *)ESPDrawFrameCommands();
-    const unsigned char *pts = (const unsigned char *)ESPDrawFramePoints();
-    size_t cmdBytes = (size_t)ESPDrawFrameCount() * sizeof(ESPDrawCommand);
-    size_t ptBytes = (size_t)ESPDrawFramePointCount() * sizeof(CGPoint);
-    uint64_t h = 1469598103934665603ULL;
-#define QBL_HASH_BYTE(byte) do { h ^= (uint64_t)(uint8_t)(byte); h *= 1099511628211ULL; } while (0)
-    // Hash từng field một — KHÔNG hash cả struct (padding chưa khởi tạo sẽ làm
-    // hash đổi giữa các frame giống nhau -> mất tác dụng bỏ qua frame trùng).
-    QBL_HASH_BYTE(f->box); QBL_HASH_BYTE(f->line); QBL_HASH_BYTE(f->name);
-    QBL_HASH_BYTE(f->dist); QBL_HASH_BYTE(f->health); QBL_HASH_BYTE(f->teamID);
-    QBL_HASH_BYTE(f->headDot); QBL_HASH_BYTE(f->aiMark); QBL_HASH_BYTE(f->bones);
-    {
-        const unsigned char *sc = (const unsigned char *)&f->scale;
-        for (size_t i = 0; i < sizeof(f->scale); i++) QBL_HASH_BYTE(sc[i]);
-    }
-    {
-        const unsigned char *bb = (const unsigned char *)&bounds;
-        for (size_t i = 0; i < sizeof(bounds); i++) QBL_HASH_BYTE(bb[i]);
-    }
-    for (size_t i = 0; i < cmdBytes; i++) QBL_HASH_BYTE(cmds[i]);
-    for (size_t i = 0; i < ptBytes; i++) QBL_HASH_BYTE(pts[i]);
-    QBL_HASH_BYTE((uint32_t)orient); QBL_HASH_BYTE(((uint32_t)orient) >> 8);
-    QBL_HASH_BYTE(((uint32_t)orient) >> 16); QBL_HASH_BYTE(((uint32_t)orient) >> 24);
-#undef QBL_HASH_BYTE
-    return h;
 }
 
 static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
@@ -3098,7 +3269,6 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     static DSQBLFeat s_feat = {
         YES, YES, YES, YES, YES, YES, YES, YES, NO, 1.0f
     };
-    static BOOL s_featDirty = YES;
     if (nowP - s_prefAt > 1.0) {
         s_prefAt = nowP;
         NSDictionary *p = nil;
@@ -3115,18 +3285,10 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         f.bones = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowBones, NO);
         BOOL sc = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPESPScale, NO);
         f.scale = sc ? 1.15f : 1.0f;
-        if (f.box != s_feat.box || f.line != s_feat.line || f.name != s_feat.name ||
-            f.dist != s_feat.dist || f.health != s_feat.health ||
-            f.teamID != s_feat.teamID || f.headDot != s_feat.headDot ||
-            f.aiMark != s_feat.aiMark || f.bones != s_feat.bones ||
-            f.scale != s_feat.scale) {
-            s_featDirty = YES;
-        }
         s_feat = f;
         // Engine chỉ đọc xương khi được bật (mặc định OFF để không thêm chi phí).
         ESPEngineSetBonesEnabled(s_feat.bones);
     }
-    (void)s_featDirty;
 
     // ---- show/hide window (1 call) ----
     BOOL wantHidden = (count <= 0);
@@ -3142,16 +3304,13 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         g_qblWindowFrame = portraitBounds;
     }
 
+    // Budget tạo object mới: tối đa 2 shape + 2 label/tick (xem chú thích ở
+    // kQBLShapeBudgetPerTick). Object dư sẽ được tạo ở các tick sau.
+    s_qblShapeBudget = kQBLShapeBudgetPerTick;
+    s_qblLabelBudget = kQBLLabelBudgetPerTick;
+
     ds_qbl_build_frame(boxes, count, portraitBounds, orientation, &s_feat);
     ESPDrawFrameEnd();
-    uint64_t hash = ds_qbl_hash_frame(&s_feat, portraitBounds, orientation);
-    if (hash == g_qblFrameHash) {
-        g_qblSkips++;
-        ESPDrawFrameReset();
-        return;
-    }
-    g_qblFrameHash = hash;
-    g_qblFrames++;
 
     CGFloat landW = MAX(portraitBounds.size.width, portraitBounds.size.height);
     CGFloat landH = MIN(portraitBounds.size.width, portraitBounds.size.height);
@@ -3167,87 +3326,218 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         s_qblPolyCount[b] = 0;
     }
     s_qblPtCount = 0;
+    s_qblTextCount = 0;
+
+    const ESPDrawCommand *cmds = ESPDrawFrameCommands();
+    int ncmds = ESPDrawFrameCount();
+    const CGPoint *framePts = ESPDrawFramePoints();
+    BOOL missing = NO;
+
+    // ---- gather (map + quantize 0.5pt) ----
+    for (int i = 0; i < ncmds; i++) {
+        const ESPDrawCommand *c = &cmds[i];
+        if (c->prim == ESPDrawPrimText) {
+            if (s_qblTextCount >= kQBLLabelCount) continue;
+            int slot = s_qblTextCount;
+            s_qblTexts[slot] = *c; // copy: command buffer reset sau present
+            s_qblTextAnchor[slot] = ds_qbl_qpoint(
+                ds_esp_map_point(CGPointMake(c->tx, c->ty), landW, landH, winCenter, mapOrient));
+            uint64_t th = 1469598103934665603ULL;
+            ds_qbl_hash_bytes(&th, c->text, sizeof(c->text));
+            ds_qbl_hash_bytes(&th, &c->color, sizeof(c->color));
+            ds_qbl_hash_bytes(&th, &s_qblTextAnchor[slot], sizeof(CGPoint));
+            s_qblTextHash[slot] = th;
+            if (c->text[0] && !g_qblLabel[slot] && g_qblLabelFail[slot] < 3) missing = YES;
+            s_qblTextCount++;
+            continue;
+        }
+        int bk = c->bucket;
+        if (bk < 0 || bk >= kQBLBucketCount) continue;
+        if (c->prim == ESPDrawPrimRect) {
+            if (s_qblRectCount[bk] >= DS_QBL_MAX_RECTS) continue;
+            s_qblRects[bk][s_qblRectCount[bk]++] =
+                ds_qbl_qrect(ds_esp_map_rect(c->rect, landW, landH, winCenter, mapOrient));
+        } else if (c->prim == ESPDrawPrimPolyline) {
+            if (s_qblPolyCount[bk] >= DS_QBL_MAX_POLYS) continue;
+            if (!framePts) continue;
+            const CGPoint *src = framePts + c->pointStart;
+            int pc = c->pointCount;
+            if (pc < 2 || pc > 128) continue;
+            if (s_qblPtCount + pc > ESP_DRAW_MAX_POINTS) continue;
+            int start = s_qblPtCount;
+            for (int k = 0; k < pc; k++) {
+                s_qblPts[s_qblPtCount++] =
+                    ds_qbl_qpoint(ds_esp_map_point(src[k], landW, landH, winCenter, mapOrient));
+            }
+            s_qblPolys[bk][s_qblPolyCount[bk]].start = start;
+            s_qblPolys[bk][s_qblPolyCount[bk]].count = pc;
+            s_qblPolyCount[bk]++;
+        }
+    }
+
+    // ---- hash theo bucket + hash tổng ----
+    // Hash từng field (không hash cả struct: padding chưa khởi tạo).
+    uint64_t bucketHash[kQBLBucketCount];
+    uint64_t hash = 1469598103934665603ULL;
+    ds_qbl_hash_bytes(&hash, &s_feat.box, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.line, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.name, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.dist, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.health, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.teamID, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.headDot, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.aiMark, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.bones, 1);
+    ds_qbl_hash_bytes(&hash, &s_feat.scale, sizeof(float));
+    ds_qbl_hash_bytes(&hash, &portraitBounds, sizeof(CGRect));
+    int32_t orient32 = orientation;
+    ds_qbl_hash_bytes(&hash, &orient32, sizeof(orient32));
+    for (int b = 0; b < kQBLBucketCount; b++) {
+        BOOL used = (s_qblRectCount[b] > 0 || s_qblPolyCount[b] > 0);
+        bucketHash[b] = used ? ds_qbl_hash_bucket(b) : 0;
+        ds_qbl_hash_bytes(&hash, &bucketHash[b], sizeof(uint64_t));
+        if (used && !g_qblShape[b] && g_qblShapeFail[b] < 3) missing = YES;
+    }
+    for (int t = 0; t < s_qblTextCount; t++) {
+        ds_qbl_hash_bytes(&hash, &s_qblTextHash[t], sizeof(uint64_t));
+    }
+
+    BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
+    if (skipGeometry) {
+        g_qblSkips++;
+    } else {
+        g_qblFrameHash = hash;
+        g_qblFrames++;
+    }
+
+    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
+    // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
+    // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
+    // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
+    static CFAbsoluteTime s_lastLabelPass = 0;
+    if (nowP - s_lastLabelPass >= (1.0 / 30.0)) {
+        BOOL labelWork = NO;
+        for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
+            if (t >= s_qblTextCount) {
+                if (g_qblLabelShown[t]) labelWork = YES;
+                continue;
+            }
+            const ESPDrawCommand *c = &s_qblTexts[t];
+            if (!c->text[0]) {
+                if (g_qblLabelShown[t]) labelWork = YES;
+                continue;
+            }
+            uint64_t lb = g_qblLabel[t];
+            if (!lb) {
+                if (g_qblLabelFail[t] < 3) { labelWork = YES; break; }
+                continue;
+            }
+            if (!g_qblLabelShown[t]) { labelWork = YES; break; }
+            if (strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0 ||
+                g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
+            CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
+            if (!g_qblLabelRectValid[t] ||
+                fabs(g_qblLabelRect[t].origin.x - lr.origin.x) > 0.5 ||
+                fabs(g_qblLabelRect[t].origin.y - lr.origin.y) > 0.5 ||
+                fabs(g_qblLabelRect[t].size.width - lr.size.width) > 0.5) {
+                labelWork = YES;
+            }
+        }
+        if (labelWork) {
+            s_lastLabelPass = nowP;
+            ds_remote_pool_begin(process);
+            @try {
+                for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
+                    ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t]);
+                }
+                for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
+                    if (g_qblLabelShown[t] && g_qblLabel[t]) {
+                        ds_remote_set_u64_on_main(process, g_qblLabel[t], "setHidden:", 1);
+                        g_qblLabelShown[t] = NO;
+                    }
+                }
+            } @finally {
+                ds_remote_pool_end(process);
+            }
+        }
+    }
+
+    if (skipGeometry) {
+        ESPDrawFrameReset();
+        return;
+    }
+
+    static CFAbsoluteTime s_lastStatLog = 0;
+    if (nowP - s_lastStatLog > 5.0) {
+        s_lastStatLog = nowP;
+        ESPLog("qbl present: frames=%lu skips=%lu cmds=%d texts=%d pts=%d missing=%d",
+               g_qblFrames, g_qblSkips, ncmds, s_qblTextCount, s_qblPtCount, missing ? 1 : 0);
+    }
+
+    // ---- gom rect + point vào 1 buffer remote (1 write/frame) ----
+    int rectOffset[kQBLBucketCount];
+    int rectTotal = 0;
+    for (int b = 0; b < kQBLBucketCount; b++) {
+        rectOffset[b] = rectTotal;
+        for (int r = 0; r < s_qblRectCount[b]; r++) {
+            s_qblAllRects[rectTotal++] = s_qblRects[b][r];
+        }
+    }
+    size_t ptsBytes = (size_t)s_qblPtCount * sizeof(CGPoint);
+    size_t rectsBytes = (size_t)rectTotal * sizeof(CGRect);
 
     ds_remote_pool_begin(process);
     @try {
-        const ESPDrawCommand *cmds = ESPDrawFrameCommands();
-        int ncmds = ESPDrawFrameCount();
-        int labelSlot = 0;
-        for (int i = 0; i < ncmds; i++) {
-            const ESPDrawCommand *c = &cmds[i];
-            if (c->prim == ESPDrawPrimText) {
-                ds_qbl_place_label(process, labelSlot, c, landW, landH, winCenter, mapOrient, nowP);
-                labelSlot++;
-                continue;
+        BOOL ok = YES;
+        if (ptsBytes || rectsBytes) {
+            if (!ds_qbl_buf(process, ptsBytes + rectsBytes)) {
+                ESPLog("qbl buf fail bytes=%zu", ptsBytes + rectsBytes);
+                ok = NO;
             }
-            int bk = c->bucket;
-            if (bk < 0 || bk >= kQBLBucketCount) continue;
-            if (c->prim == ESPDrawPrimRect) {
-                if (s_qblRectCount[bk] >= DS_QBL_MAX_RECTS) continue;
-                s_qblRects[bk][s_qblRectCount[bk]++] =
-                    ds_esp_map_rect(c->rect, landW, landH, winCenter, mapOrient);
-            } else if (c->prim == ESPDrawPrimPolyline) {
-                if (s_qblPolyCount[bk] >= DS_QBL_MAX_POLYS) continue;
-                const CGPoint *src = ESPDrawFramePoints() + c->pointStart;
-                int pc = c->pointCount;
-                if (pc < 2 || pc > 128) continue;
-                if (s_qblPtCount + pc > ESP_DRAW_MAX_POINTS) continue;
-                int start = s_qblPtCount;
-                for (int k = 0; k < pc; k++) {
-                    s_qblPts[s_qblPtCount++] =
-                        ds_esp_map_point(src[k], landW, landH, winCenter, mapOrient);
-                }
-                s_qblPolys[bk][s_qblPolyCount[bk]].start = start;
-                s_qblPolys[bk][s_qblPolyCount[bk]].count = pc;
-                s_qblPolyCount[bk]++;
-            }
-        }
-        // Label dư (số box giảm) -> ẩn.
-        for (int i = labelSlot; i < kQBLLabelCount; i++) {
-            if (g_qblLabelShown[i] && g_qblLabel[i]) {
-                ds_remote_set_u64_on_main(process, g_qblLabel[i], "setHidden:", 1);
-                g_qblLabelShown[i] = NO;
-            }
-        }
-
-        // ---- gom rect + point vào 1 buffer remote (1 write/frame) ----
-        int rectOffset[kQBLBucketCount];
-        int rectTotal = 0;
-        for (int b = 0; b < kQBLBucketCount; b++) {
-            rectOffset[b] = rectTotal;
-            for (int r = 0; r < s_qblRectCount[b]; r++) {
-                s_qblAllRects[rectTotal++] = s_qblRects[b][r];
-            }
-        }
-        size_t ptsBytes = (size_t)s_qblPtCount * sizeof(CGPoint);
-        size_t rectsBytes = (size_t)rectTotal * sizeof(CGRect);
-        if ((ptsBytes || rectsBytes) && !ds_qbl_buf(process, ptsBytes + rectsBytes)) {
-            ESPDrawFrameReset();
-            return;
         }
         uint64_t ptsAddr = g_qblBufAddr;
         uint64_t rectsAddr = g_qblBufAddr + (uint64_t)ptsBytes;
-        if (ptsBytes) {
-            if (![process remote_write:ptsAddr from:s_qblPts size:(uint64_t)ptsBytes]) return;
+        if (ok && ptsBytes &&
+            ![process remote_write:ptsAddr from:s_qblPts size:(uint64_t)ptsBytes]) {
+            ESPLog("qbl write pts fail bytes=%zu", ptsBytes);
+            ok = NO;
         }
-        if (rectsBytes) {
-            if (![process remote_write:rectsAddr from:s_qblAllRects size:(uint64_t)rectsBytes]) return;
+        if (ok && rectsBytes &&
+            ![process remote_write:rectsAddr from:s_qblAllRects size:(uint64_t)rectsBytes]) {
+            ESPLog("qbl write rects fail bytes=%zu", rectsBytes);
+            ok = NO;
         }
 
-        void *createSym = ds_remote_system_symbol("CGPathCreateMutable");
-        void *addRectsSym = ds_remote_system_symbol("CGPathAddRects");
-        void *addLinesSym = ds_remote_system_symbol("CGPathAddLines");
-        for (int b = 0; b < kQBLBucketCount; b++) {
-            if (!g_qblShape[b]) continue;
+        void *createSym = ok ? ds_remote_system_symbol("CGPathCreateMutable") : NULL;
+        void *addRectsSym = ok ? ds_remote_system_symbol("CGPathAddRects") : NULL;
+        void *addLinesSym = ok ? ds_remote_system_symbol("CGPathAddLines") : NULL;
+        if (ok && !createSym) {
+            static BOOL s_loggedNoCreate = NO;
+            if (!s_loggedNoCreate) {
+                s_loggedNoCreate = YES;
+                ESPLog("qbl: CGPathCreateMutable unavailable -> no geometry");
+            }
+        }
+
+        for (int b = 0; ok && b < kQBLBucketCount; b++) {
             int nR = s_qblRectCount[b];
             int nP = s_qblPolyCount[b];
-            if (!nR && !nP) {
-                if (g_qblShapePath[b]) ds_qbl_set_path(process, b, 0);
+            BOOL used = (nR > 0 || nP > 0);
+            if (!used) {
+                if (g_qblShapePath[b] && g_qblShape[b]) {
+                    ds_qbl_set_path(process, b, 0);
+                    g_qblShapeHash[b] = 0;
+                }
                 continue;
             }
-            if (!createSym) continue;
+            if (!g_qblShape[b] && g_qblShapeFail[b] >= 3) continue;
+            uint64_t shape = ds_qbl_shape_for(process, b);
+            if (!shape) continue; // budget hết / tạo fail -> tick sau
+            // Nội dung bucket không đổi -> giữ nguyên path (0 remote call).
+            if (g_qblShapePath[b] && g_qblShapeHash[b] == bucketHash[b]) continue;
+            if (!createSym) break;
             uint64_t path = (uint64_t)DSRemoteArbCallWithTimeout(1, process, createSym, (uint64_t)0);
-            if (!path) continue;
+            if (!path) break;
             if (nR && addRectsSym) {
                 DSRemoteArbCallWithTimeout(1, process, addRectsSym, path, 0,
                                            rectsAddr + (uint64_t)rectOffset[b] * sizeof(CGRect),
@@ -3260,10 +3550,19 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
                                                (uint64_t)s_qblPolys[b][p].count);
                 }
             }
-            ds_qbl_set_path(process, b, path);
+            if (!ds_qbl_set_path(process, b, path)) break;
+            g_qblShapeHash[b] = bucketHash[b];
+            if (!process.trojanMem) { ok = NO; break; }
         }
     } @finally {
         ds_remote_pool_end(process);
+    }
+    if (!process.trojanMem) {
+        static CFAbsoluteTime s_lastDeadLog = 0;
+        if (nowP - s_lastDeadLog > 1.0) {
+            s_lastDeadLog = nowP;
+            ESPLog("qbl: RemoteCall session died during present (HUD will be frozen)");
+        }
     }
     if (g_qblRoot && g_qblRootHidden) g_qblRootHidden = NO;
     ESPDrawFrameReset();
@@ -3696,12 +3995,22 @@ ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
 }
 
 static void ds_remove_springboard_hud(RemoteCall *process) {
-    if (!g_remoteWindow || g_remoteWindowPid != process.pid) return;
+    if (!g_remoteWindow || !process || g_remoteWindowPid != process.pid) {
+        ESPLog("hud hide skipped win=0x%llx pid=%d/%d",
+               (unsigned long long)g_remoteWindow,
+               (int)g_remoteWindowPid, process ? (int)process.pid : -1);
+        return;
+    }
+    if (!process.trojanMem) {
+        ESPLog("hud hide IMPOSSIBLE: RemoteCall session already dead");
+        return;
+    }
     if (g_remoteContainer) {
         ds_perform_on_springboard_main(process, g_remoteContainer,
                                        ds_remote_sel(process, "removeFromSuperview"), 0, YES);
     }
     ds_remote_set_u64_on_main(process, g_remoteWindow, "setHidden:", 1);
+    ESPLog("hud hide done win=0x%llx", (unsigned long long)g_remoteWindow);
 }
 
 static BOOL ds_apply_remote_presentation(RemoteCall *process,
@@ -3934,6 +4243,21 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     }
     std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
     @try {
+        if (g_espWindow && g_springBoard && g_espWindowPid != (pid_t)g_springBoard.pid) {
+            // SpringBoard respring: window/container cũ trỏ vào process đã chết.
+            // Gọi tiếp = gửi selector vào địa chỉ rác -> SB chết tiếp/HUD đứng.
+            ESPLog("esp: SpringBoard pid changed (%d -> %d) -> rebuild overlay",
+                   (int)g_espWindowPid, (int)g_springBoard.pid);
+            g_espWindow = 0;
+            g_espContainer = 0;
+            g_espWindowHiddenCache = YES;
+            g_espLastContainerBounds = CGRectZero;
+            g_espLastMapOrient = UIInterfaceOrientationUnknown;
+            g_espPathLayer = 0;
+            g_espPathObj = 0;
+            g_espWindowPid = 0;
+            ds_qbl_reset_remote();
+        }
         if (frame->count < 0) {
             // Lệnh hide từ worker.
             if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
@@ -4611,6 +4935,10 @@ static void ds_finish_disable(void) {
     ds_unregister_hud_notifications();
     ds_stop_rate_timer();
     RemoteCall *process = g_springBoard;
+    ESPLog("disable: session=%d hudWin=0x%llx hudPid=%d espWin=0x%llx espPid=%d",
+           process ? (process.trojanMem ? 1 : -1) : -2,
+           (unsigned long long)g_remoteWindow, (int)g_remoteWindowPid,
+           (unsigned long long)g_espWindow, (int)g_espWindowPid);
     g_springBoard = nil;
     ESPMemoryFlushPageCache(); // nhả mapping + port của world cũ
     ESPProviderShutdown(); // reset degraded/counters của provider
@@ -4635,6 +4963,16 @@ static void ds_finish_disable(void) {
             os_log_error(OS_LOG_DEFAULT, "[DSBridge] destroyRemoteCall exception: %{public}@", exception.reason);
         }
     }
+    // Nhớ window cũ: nếu ẩn thất bại (session chết) thì enable sau sẽ ẩn bằng
+    // session mới — tránh "bật lại đè lên HUD/ESP cũ".
+    if (g_remoteWindow && g_remoteWindowPid > 1) {
+        g_staleHudWindow = g_remoteWindow;
+        g_staleHudPid = g_remoteWindowPid;
+    }
+    if (g_espWindow && g_espWindowPid > 1) {
+        g_staleEspWindow = g_espWindow;
+        g_staleEspPid = g_espWindowPid;
+    }
     g_remoteContainer = 0;
     g_remoteBlurView = 0;
     g_remoteBlurEffect = 0;
@@ -4646,6 +4984,8 @@ static void ds_finish_disable(void) {
     g_remoteWindowPid = 0;
     g_espWindow = 0;
     g_espContainer = 0;
+    g_espWindowPid = 0;
+    ds_qbl_reset_remote(); // cache layer/label/buffer của session cũ
     for (int i = 0; i < ESPOverlayMaxBoxes; i++) {
         for (int e = 0; e < 4; e++)        g_espBorders[i][e] = 0;
         g_espBorderLayer[i] = 0;
@@ -4765,6 +5105,27 @@ static void ds_finish_enable(void) {
         ds_trace("enable: rc ok pid=%d trojan=0x%llx", (int)g_springBoard.pid,
                  (unsigned long long)g_springBoard.trojanMem);
         g_dsProgress.store(0.99);
+        // Dọn window của session trước nếu lần disable không ẩn được (vd session
+        // đã chết -> mọi remote call fail). Guard pid: respring thì địa chỉ cũ
+        // là rác, bỏ qua. Đây là chốt chặn cuối cho lỗi "bật lại đè HUD cũ".
+        if (g_staleHudWindow || g_staleEspWindow) {
+            @try {
+                if (g_staleHudWindow && g_staleHudPid == (pid_t)g_springBoard.pid) {
+                    ds_remote_set_u64_on_main(g_springBoard, g_staleHudWindow, "setHidden:", 1);
+                    ESPLog("enable: hid stale HUD win=0x%llx",
+                           (unsigned long long)g_staleHudWindow);
+                }
+                if (g_staleEspWindow && g_staleEspPid == (pid_t)g_springBoard.pid) {
+                    ds_remote_set_u64_on_main(g_springBoard, g_staleEspWindow, "setHidden:", 1);
+                    ESPLog("enable: hid stale ESP win=0x%llx",
+                           (unsigned long long)g_staleEspWindow);
+                }
+            } @catch (NSException *exception) {
+                ESPLog("stale window cleanup exception: %@", exception.reason);
+            }
+            g_staleHudWindow = 0; g_staleHudPid = 0;
+            g_staleEspWindow = 0; g_staleEspPid = 0;
+        }
         ds_set_stage(ds_localized(@"Creating SpringBoard HUD"));
         g_remoteLabel = ds_create_springboard_hud(g_springBoard);
         if (!g_remoteLabel) {
