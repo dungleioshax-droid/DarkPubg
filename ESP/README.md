@@ -118,16 +118,26 @@ Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có th
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).
 
-### Bones (skeleton) — tự dò ở runtime
+### Bones (skeleton) — offset DUMP + tự dò/validate ở runtime
 
-QBL đọc xương trực tiếp bằng offset cố định; repo này **không** dùng offset QBL (không
-phục hồi được từ binary). Thay vào đó engine tự dò:
+DUMP/SDK (`USkeletalMeshComponent`) xác nhận 2 mảng transform:
 
-- Quét ứng viên `TArray<FTransform>` trong `mesh+[0x480..0xC00)` bước 8
-  (`ESPOff_Mesh_BoneScanStart/End`), stride `0x30` (`ESPOff_BoneTransformSize`).
+| Offset | Field | Hệ quy chiếu |
+|---|---|---|
+| `0xCE0` | `CachedComponentSpaceTransforms` | component space (dùng cho ESP) |
+| `0xCD0` | `CachedBoneSpaceTransforms` | bone/parent space |
+
+`ComponentToWorld` = `0x208` (ngay sau `RelativeScale3D` `0x1FC`; SDK không liệt kê
+field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống tới `ComponentVelocity`
+`0x2C0`). Engine vẫn **validate runtime** trước khi dùng:
+
+- Thử lần lượt `0xCE0` → `0xCD0`; nếu không khớp mới quét dải cũ
+  `mesh+[0x480..0xC00)` bước 8 làm fallback (`ESPOff_Mesh_BoneScanStart/End`).
+  Stride `0x30` (`ESPOff_BoneTransformSize`).
 - Với mỗi ứng viên thử 3 bảng index khớp phổ biến (UE4 mannequin + 2 biến thể rig)
   và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay 15..45cm, chân
   25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau 20..80cm.
+  `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
 - Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
   (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
 - Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0x<off> ok` /
@@ -135,10 +145,16 @@ phục hồi được từ binary). Thay vào đó engine tự dò:
 - Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
 - Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
-**Lưu ý:** xương là phần duy nhất chưa thể verify trên máy — cần bật thử trong trận,
-xem `ESP.log` dòng `bones: offset=0x... map=...`. Nếu toàn `bones no-match` thì rig
-khác bảng index (gửi log để thêm bảng mới), `bones auto-off` thì offset/map sai
-(engine tự tắt, các tính năng khác không ảnh hưởng).
+**Lưu ý:** log `bones: offset=0xce0 ...` là kỳ vọng đúng với DUMP hiện tại. Nếu toàn
+`bones no-match` thì rig khác bảng index (gửi log để thêm bảng mới); `bones auto-off`
+thì offset/map sai (engine tự tắt, các tính năng khác không ảnh hưởng).
+
+### Chiều cao box
+
+`ESPActorBoxHeight` đọc `USkinnedMeshComponent::CachedLocalBounds.BoxExtent.Z`
+(`0xB8C + 0x14 = 0xBA0`, DUMP xác nhận qua field kế tiếp `bCachedLocalBoundsUpToDate`
+`0xBA8`) × 2. Giá trị ngoài khoảng 30..200cm → fallback `ESP_CHAR_HEIGHT_CM`.
+StaticMesh của hình nhân không có `CachedLocalBounds` nên luôn dùng fallback.
 
 ### Snapline
 

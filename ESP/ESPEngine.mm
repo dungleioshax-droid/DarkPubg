@@ -2345,10 +2345,12 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
 // xương trong SkeletalMeshComponent, nhân với ComponentToWorld rồi trả vị trí
 // world — sau đó project ra màn hình và nối các khớp.
 //
-// Dự án này dump chỉ có Mesh (0x510) + ComponentToWorld (0x1D0) + Bounds, KHÔNG
-// có offset mảng xương. Vì vậy engine tự dò (runtime auto-detect) thay vì chép
-// một hằng số có thể sai:
-//   1. Quét các ứng viên TArray<FTransform> trong mesh+[0x480..0xC00).
+// DUMP/SDK xác nhận mảng xương nằm trong USkeletalMeshComponent:
+//   0xCD0 CachedBoneSpaceTransforms / 0xCE0 CachedComponentSpaceTransforms.
+// ComponentToWorld cũng đã xác nhận ở 0x208 (xem ESPOffsets.h). Engine vẫn
+// validate runtime thay vì tin offset mù:
+//   1. Thử 0xCE0 rồi 0xCD0 (offset từ DUMP), sau đó quét dải cũ
+//      mesh+[0x480..0xC00) làm fallback nếu bản game sau dời field.
 //   2. Với mỗi ứng viên, thử 3 bảng index khớp phổ biến (UE4 mannequin /
 //      biến thể PUBG mobile) và VALIDATE bằng tỉ lệ cơ thể thật:
 //      đầu > cổ > ngực > hông, tay 2 bên ngược hướng, độ dài từng đoạn tay/chân
@@ -2502,6 +2504,28 @@ static BOOL ESPReadBoneLocals(uint64_t vmMap, uint64_t data, ESPVector *out, int
 // Mutex riêng: configure chạy từ queue scan nền, sample chạy từ tick 60Hz —
 // mutex chỉ nhận ở đường configure (hiếm), reader chỉ snapshot (xem ESPBonesSample).
 static std::mutex g_espBoneCfgMutex;
+// Thử 1 offset: đọc TArray<FTransform>, validate 3 bảng index, nhận nếu khớp.
+// Caller đã giữ g_espBoneCfgMutex.
+static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off, ESPVector *pts) {
+    uint64_t data = 0;
+    uint32_t count = 0;
+    if (!ESPBoneArrayAt(vmMap, mesh, off, &data, &count)) return NO;
+    int n = (int)(count < ESPOff_Bone_NumMax ? count : ESPOff_Bone_NumMax);
+    if (n < 15) return NO;
+    if (!ESPReadBoneLocals(vmMap, data, pts, n)) return NO;
+    for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
+        if (!ESPBoneMapValidate(pts, n, kESPBoneMaps[m])) continue;
+        g_espBoneOff = off;
+        memcpy(g_espBoneMap, kESPBoneMaps[m], sizeof(g_espBoneMap));
+        g_espBoneBadTicks.store(0);
+        g_espBonesReady.store(true); // store cuối: reader chỉ dùng cfg khi đã ready
+        snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones 0x%x ok", (unsigned)off);
+        ESPLog("bones: offset=0x%x map=%d bones=%u (auto-detect)", (unsigned)off, m, (unsigned)count);
+        return YES;
+    }
+    return NO;
+}
+
 static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh) {
     std::lock_guard<std::mutex> lk(g_espBoneCfgMutex);
     if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
@@ -2511,23 +2535,17 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh) {
     g_espBoneTryAt = now;
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones detect");
     static ESPVector pts[ESPOff_Bone_NumMax];
+    // 1) Offset đã xác nhận từ DUMP: component space (0xCE0) trước, bone space
+    //    (0xCD0) sau — validator sẽ loại cái sau nếu toạ độ không phải người.
+    static const uint32_t kDumpOffsets[] = {
+        ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace
+    };
+    for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
+        if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i], pts)) return YES;
+    }
+    // 2) Fallback: quét dải cũ phòng bản game sau dời field.
     for (uint32_t off = ESPOff_Mesh_BoneScanStart; off + 16 <= ESPOff_Mesh_BoneScanEnd; off += 8) {
-        uint64_t data = 0;
-        uint32_t count = 0;
-        if (!ESPBoneArrayAt(vmMap, mesh, off, &data, &count)) continue;
-        int n = (int)(count < ESPOff_Bone_NumMax ? count : ESPOff_Bone_NumMax);
-        if (n < 15) continue;
-        if (!ESPReadBoneLocals(vmMap, data, pts, n)) continue;
-        for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
-            if (!ESPBoneMapValidate(pts, n, kESPBoneMaps[m])) continue;
-            g_espBoneOff = off;
-            memcpy(g_espBoneMap, kESPBoneMaps[m], sizeof(g_espBoneMap));
-            g_espBoneBadTicks.store(0);
-            g_espBonesReady.store(true); // store cuối: reader chỉ dùng cfg khi đã ready
-            snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones 0x%x ok", (unsigned)off);
-            ESPLog("bones: offset=0x%x map=%d bones=%u (auto-detect)", (unsigned)off, m, (unsigned)count);
-            return YES;
-        }
+        if (ESPBoneTryOffsetLocked(vmMap, mesh, off, pts)) return YES;
     }
     // Không ứng viên nào qua validate: giữ tắt, thử lại sau (world khác có thể khác rig).
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones no-match");

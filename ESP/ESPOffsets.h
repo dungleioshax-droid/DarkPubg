@@ -78,15 +78,28 @@ static const uint32_t ESPOff_Target_MaxHealth = 0x4AC; // float
 static const uint32_t ESPOff_Target_Mesh = 0x4E8; // UStaticMeshComponent*
 static const uint32_t ESPOff_Target_IsUp = 0x4D4; // bool 0/1
 
-// USceneComponent
+// USceneComponent — đối chiếu DUMP/SDK/Engine.hpp (bản game hiện tại):
+//   AttachParent 0x188, AttachChildren 0x198, ClientAttachedChildren 0x1A8,
+//   RelativeLocation 0x1E4, RelativeRotation 0x1F0, RelativeScale3D 0x1FC.
+// ComponentToWorld không được SDK liệt kê (transient) nhưng theo đúng thứ tự
+// UE4 thì nó nằm ngay sau RelativeScale3D: 0x1FC + 0xC = 0x208 (FTransform
+// 0x30 -> hết 0x238, khớp khoảng trống trước ComponentVelocity 0x2C0).
+// 0x1D0 (offset cũ từ source Kernel của build khác) rơi vào vùng đệm ngay
+// trước RelativeLocation -> đọc ra rác, xương luôn sai vị trí.
 static const uint32_t ESPOff_Scene_RelativeLocation = 0x1E4; // FVector
 static const uint32_t ESPOff_Scene_AttachedParent = 0x188; // USceneComponent* (location = mình + parent)
-static const uint32_t ESPOff_Comp_ComponentToWorld = 0x1D0; // FTransform
+static const uint32_t ESPOff_Comp_ComponentToWorld = 0x208; // FTransform
 static const uint32_t ESPOff_Transform_Translation = 0x10;   // FQuat 0x0 + FVector 0x10
-// UPrimitiveComponent::Bounds (FBoxSphereBounds @ 0x134): Origin FVector 0x134,
-// BoxExtent FVector 0x14C -> BoxExtent.Z (float) @ 0x154. Source Kernel đọc
-// Mesh+0x14C (FVector) rồi .Z, nhân 2 = chiều cao địch vẽ box.
-static const uint32_t ESPOff_Mesh_BoxExtentZ = 0x154;
+
+// Chiều cao box — chỉ đúng cho SkeletalMesh của nhân vật:
+// USkinnedMeshComponent::CachedLocalBounds (FBoxSphereBounds) @ 0xB8C
+//   Origin 0xB8C, BoxExtent 0xB98 -> BoxExtent.Z @ 0xBA0.
+// DUMP xác nhận: field kế tiếp bCachedLocalBoundsUpToDate @ 0xBA8
+// (= 0xB8C + 0x1C đúng sizeof(FBoxSphereBounds)).
+// Đây là local bounds (scale mesh ~1) nên *2 ra chiều cao ~176cm.
+// Giá trị ngoài 30..200cm -> ESPActorBoxHeight fallback ESP_CHAR_HEIGHT_CM.
+// (StaticMesh của hình nhân không có CachedLocalBounds -> luôn fallback.)
+static const uint32_t ESPOff_Mesh_BoxExtentZ = 0xBA0;
 
 // Camera chain (PUBG UE4 — theo source Kernel ĐANG CHẠY ĐƯỢC, unity_api/offset.h)
 // UWorld 0x470 OwningGameInstance -> UGameInstance 0x48 LocalPlayers[TArray]
@@ -115,14 +128,16 @@ static const uint32_t ESPOff_Conn_LocalPC = 0x30;
 static const uint32_t ESPOff_PC_LocalPawn = 0x28D8; // ASTExtraPlayerController->STExtraBaseCharacter
 
 // --- Xương / skeleton (port hướng QBL getBoneWithRotationFast) ---
-// QBL đọc transform xương từ SkeletalMeshComponent: mảng FTransform (0x30 byte)
-// nằm ở 1 offset KHÔNG có trong dump của dự án này (dump chỉ có Mesh/Bounds).
-// Vì vậy engine TỰ DÒ offset lúc chạy (xem ESPBonesConfigure trong ESPEngine.mm):
-// quét các ứng viên TArray<FTransform> trong [Start,End) rồi VALIDATE bằng tỉ lệ
-// cơ thể (đầu trên hông, tay/chân có độ dài hợp lý) — chỉ nhận khi khớp hoàn
-// toàn, sai thì tắt xương (không vẽ rác). Có thể chỉnh khoảng quét ở đây.
-static const uint32_t ESPOff_Mesh_BoneScanStart = 0x480; // đầu vùng nghi TArray<FTransform>
-static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xC00; // cuối vùng (kết thúc trước 0xC00)
+// DUMP/SDK xác nhận 2 mảng transform trong USkeletalMeshComponent:
+//   0xCD0 = CachedBoneSpaceTransforms      (TArray<FTransform>, bone/parent space)
+//   0xCE0 = CachedComponentSpaceTransforms (TArray<FTransform>, component space)
+// ESP cần COMPONENT SPACE rồi nhân ComponentToWorld -> ưu tiên 0xCE0; 0xCD0
+// thử sau (validator tỉ lệ cơ thể sẽ tự loại vì toạ độ bone-space quá nhỏ).
+// Dải quét cũ vẫn giữ làm fallback nếu bản game sau dời field.
+static const uint32_t ESPOff_Mesh_BoneCompSpace = 0xCE0; // DUMP: CachedComponentSpaceTransforms
+static const uint32_t ESPOff_Mesh_BoneBoneSpace = 0xCD0; // DUMP: CachedBoneSpaceTransforms
+static const uint32_t ESPOff_Mesh_BoneScanStart = 0x480; // fallback: đầu vùng nghi TArray<FTransform>
+static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xC00; // fallback: cuối vùng (kết thúc trước 0xC00)
 static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale
 static const uint32_t ESPOff_Bone_NumMax        = 40;    // đọc tối đa 40 khớp đầu (đủ cho bản đồ index)
 
