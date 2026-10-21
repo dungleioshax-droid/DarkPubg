@@ -31,7 +31,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Pool overlay: 8 box player. Giữ nhỏ như bản cũ (RemoteCall 60Hz).
 static const int ESPOverlayMaxBoxes = 8;
 
-#define ESP_DRAW_MAX_COMMANDS 128
+#define ESP_DRAW_MAX_COMMANDS 256
 // 1024 điểm: 8 player × (xương ~29 + head dot 17 + tam giác 4 + snapline 2)
 // vẫn dư; pool lớn hơn không tốn thêm remote call nào (1 write/frame).
 #define ESP_DRAW_MAX_POINTS   1024

@@ -2769,7 +2769,7 @@ static BOOL ds_qbl_bucket_stroked(int bucket) {
 
 #define kQBLLabelCount (ESPOverlayMaxBoxes * 2) // 0..7 = tên/máu, 8..15 = TeamID
 #define DS_QBL_MAX_RECTS 32
-#define DS_QBL_MAX_POLYS 16
+#define DS_QBL_MAX_POLYS 64
 
 typedef struct {
     BOOL box, line, name, dist, health, teamID, headDot, aiMark, bones;
@@ -3224,51 +3224,39 @@ static void ds_qbl_emit_bones(const ESPBox2D *b, float sx, float sy, float ox, f
                            (b->bones[i].y - oy) * sy + oy);
         ok[i] = b->bones[i].ok != 0;
     }
-    CGPoint pts[40];
-    int n = 0;
-#define QBL_BONE_PUT(idx) do { if (ok[(idx)]) pts[n++] = p[(idx)]; } while (0)
-    // Thân: đầu -> cổ -> ngực -> hông -> ngực (retrace).
-    QBL_BONE_PUT(ESPBone_Head);
-    QBL_BONE_PUT(ESPBone_Neck);
-    QBL_BONE_PUT(ESPBone_Chest);
-    if (ok[ESPBone_Pelvis]) {
-        QBL_BONE_PUT(ESPBone_Pelvis);
-        QBL_BONE_PUT(ESPBone_Chest);
-    }
-    // 2 tay từ ngực: vai -> khuỷu -> bàn tay -> khuỷu -> vai -> ngực.
-    for (int side = 0; side < 2; side++) {
-        int sh = side ? ESPBone_RShoulder : ESPBone_LShoulder;
-        int el = side ? ESPBone_RElbow : ESPBone_LElbow;
-        int hd = side ? ESPBone_RHand : ESPBone_LHand;
-        if (!ok[ESPBone_Chest] || !ok[sh]) continue;
-        pts[n++] = p[sh];
-        if (ok[el]) {
-            pts[n++] = p[el];
-            if (ok[hd]) pts[n++] = p[hd];
-            pts[n++] = p[el];
+
+    auto emitSegment = [&](const int *joints, int count) {
+        CGPoint pts[8];
+        int n = 0;
+        for (int j = 0; j < count; j++) {
+            int idx = joints[j];
+            if (ok[idx]) pts[n++] = p[idx];
+            else break;
         }
-        pts[n++] = p[sh];
-        pts[n++] = p[ESPBone_Chest];
-    }
-    // 2 chân từ hông: hip -> knee -> foot -> knee -> hip -> hông.
-    for (int side = 0; side < 2; side++) {
-        int hp = side ? ESPBone_RHip : ESPBone_LHip;
-        int kn = side ? ESPBone_RKnee : ESPBone_LKnee;
-        int ft = side ? ESPBone_RFoot : ESPBone_LFoot;
-        if (!ok[ESPBone_Pelvis] || !ok[hp]) continue;
-        pts[n++] = p[hp];
-        if (ok[kn]) {
-            pts[n++] = p[kn];
-            if (ok[ft]) pts[n++] = p[ft];
-            pts[n++] = p[kn];
+        if (n >= 2) {
+            ESPDrawAddPolyline(pts, n, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
         }
-        pts[n++] = p[hp];
-        pts[n++] = p[ESPBone_Pelvis];
-    }
-#undef QBL_BONE_PUT
-    if (n >= 2) {
-        ESPDrawAddPolyline(pts, n, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
-    }
+    };
+
+    // 1. Cột sống / thân: Đầu -> Cổ -> Ngực -> Hông (Pelvis)
+    static const int spine[] = { ESPBone_Head, ESPBone_Neck, ESPBone_Chest, ESPBone_Pelvis };
+    emitSegment(spine, 4);
+
+    // 2. Tay trái: Ngực -> Vai trái -> Khuỷu trái -> Bàn tay trái
+    static const int larm[] = { ESPBone_Chest, ESPBone_LShoulder, ESPBone_LElbow, ESPBone_LHand };
+    emitSegment(larm, 4);
+
+    // 3. Tay phải: Ngực -> Vai phải -> Khuỷu phải -> Bàn tay phải
+    static const int rarm[] = { ESPBone_Chest, ESPBone_RShoulder, ESPBone_RElbow, ESPBone_RHand };
+    emitSegment(rarm, 4);
+
+    // 4. Chân trái: Hông -> Đùi trái -> Gối trái -> Bàn chân trái
+    static const int lleg[] = { ESPBone_Pelvis, ESPBone_LHip, ESPBone_LKnee, ESPBone_LFoot };
+    emitSegment(lleg, 4);
+
+    // 5. Chân phải: Hông -> Đùi phải -> Gối phải -> Bàn chân phải
+    static const int rleg[] = { ESPBone_Pelvis, ESPBone_RHip, ESPBone_RKnee, ESPBone_RFoot };
+    emitSegment(rleg, 4);
 }
 
 static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds,
@@ -3592,7 +3580,7 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         f.teamID = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowTeamID, YES);
         f.headDot = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowHeadDot, YES);
         f.aiMark = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowAIMark, YES);
-        f.bones = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowBones, NO);
+        f.bones = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPShowBones, YES);
         BOOL sc = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPESPScale, NO);
         f.scale = sc ? 1.15f : 1.0f;
         s_feat = f;
@@ -4523,7 +4511,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw66-autobones"
+#define DS_ESP_BUILD_TAG "kernrw67-bonesfix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

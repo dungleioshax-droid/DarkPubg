@@ -195,7 +195,7 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
             @"title": @"ESP Xương (Bones)",
             @"subtitle": @"Skeleton ESP — tự dò offset xương khi bật (đọc thêm bộ nhớ)",
             @"key": HUDUserDefaultsKeyESPShowBones,
-            @"default": @NO,
+            @"default": @YES,
             @"icon": @"figure.walk",
             @"iconColor": [UIColor colorWithRed:90/255.0 green:200/255.0 blue:250/255.0 alpha:1.0]
         },
