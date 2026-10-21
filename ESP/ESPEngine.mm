@@ -3392,8 +3392,12 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     }
     // 1) Offset đã xác nhận từ DUMP: component space (0xCE0) trước, bone space
     //    (0xCD0) sau — validator sẽ loại cái sau nếu toạ độ không phải người.
+    //    0xCA8 = ComponentSpaceTransforms (compact theo RequiredBones) cũng là
+    //    component space; thử trước vì có thể sống khi 0xCE0 bị xoá.
     static const uint32_t kDumpOffsets[] = {
-        ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace
+        ESPOff_Mesh_ComponentSpaceTransforms,
+        ESPOff_Mesh_BoneCompSpace,
+        ESPOff_Mesh_BoneBoneSpace
     };
     for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
         if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i],

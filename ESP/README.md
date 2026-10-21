@@ -208,7 +208,8 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
   (UE `FTransform::Multiply`) rồi validate 3 bảng index. BoneTree được thử
   `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index` cho mọi xương.
-- Fallback: thử lần lượt `0xCE0` → `0xCD0`; nếu header không phải TArray thì quét
+- Fallback: thử lần lượt `0xCA8` (component space compact) → `0xCE0` → `0xCD0`;
+  nếu header không phải TArray thì quét
   `mesh+[0x400..0xF00)` bước 8 (`ESPOff_Mesh_BoneScanStart/End`) — dải này đã
   phủ cả vùng `0xCD0/0xCE0` và các field có thể dời sau đó. Stride `0x30`.
 - **Backoff**: 3 lượt đầu thử mỗi 2s; sau đó 30s/lượt. Tránh đọc 352 offset
