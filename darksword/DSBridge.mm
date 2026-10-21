@@ -1446,6 +1446,11 @@ static void ds_remote_pool_end(RemoteCall *process) {
 // Session/view mới -> địa chỉ cũ vô nghĩa -> xả qua ds_inv_cache_drop()
 // (gọi ở ensure rebuild + disable); đổi trojanMem cũng tự xả.
 static NSMutableDictionary<NSString *, NSNumber *> *s_invCache = nil;
+// Cache invocation theo SELECTOR cho các setter "lạnh" (chỉ set 1 lần lúc tạo
+// object: numberOfLines/textAlignment/shadowOffset/...). Label mới = target
+// mới nên cache (target,selector) luôn miss; dùng template + setTarget: giảm
+// ~5 setup call/selector/label mà không ảnh hưởng setter nóng (setFrame:...).
+static NSMutableDictionary<NSString *, NSNumber *> *s_invColdCache = nil;
 static NSLock *s_invCacheLock = nil;
 static uint64_t s_invCacheTrojan = 0;
 
@@ -1453,6 +1458,7 @@ static void ds_inv_cache_ensure(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         s_invCache = [NSMutableDictionary dictionary];
+        s_invColdCache = [NSMutableDictionary dictionary];
         s_invCacheLock = [NSLock new];
     });
 }
@@ -1471,6 +1477,7 @@ static uint64_t ds_inv_cache_get(RemoteCall *process, uint64_t target, uint64_t 
     @try {
         if (s_invCacheTrojan != process.trojanMem) {
             [s_invCache removeAllObjects];
+            [s_invColdCache removeAllObjects];
             s_invCacheTrojan = process.trojanMem;
         } else {
             NSNumber *hit = s_invCache[ds_inv_cache_key(target, selector)];
@@ -1489,9 +1496,103 @@ static void ds_inv_cache_put(RemoteCall *process, uint64_t target, uint64_t sele
     @try {
         if (s_invCacheTrojan != process.trojanMem) {
             [s_invCache removeAllObjects];
+            [s_invColdCache removeAllObjects];
             s_invCacheTrojan = process.trojanMem;
         }
         s_invCache[ds_inv_cache_key(target, selector)] = @(invocation);
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+}
+
+static inline NSString *ds_inv_cold_key(uint64_t selector) {
+    return [NSString stringWithFormat:@"c%llx", (unsigned long long)selector];
+}
+
+static uint64_t ds_inv_cold_get(RemoteCall *process, uint64_t selector) {
+    if (!process || !process.trojanMem || !selector) return 0;
+    ds_inv_cache_ensure();
+    uint64_t inv = 0;
+    [s_invCacheLock lock];
+    @try {
+        if (s_invCacheTrojan != process.trojanMem) {
+            [s_invCache removeAllObjects];
+            [s_invColdCache removeAllObjects];
+            s_invCacheTrojan = process.trojanMem;
+        } else {
+            NSNumber *hit = s_invColdCache[ds_inv_cold_key(selector)];
+            inv = hit ? hit.unsignedLongLongValue : 0;
+        }
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+    return inv;
+}
+
+static void ds_inv_cold_put(RemoteCall *process, uint64_t selector, uint64_t invocation) {
+    if (!process || !process.trojanMem || !selector || !invocation) return;
+    ds_inv_cache_ensure();
+    [s_invCacheLock lock];
+    @try {
+        if (s_invCacheTrojan != process.trojanMem) {
+            [s_invCache removeAllObjects];
+            [s_invColdCache removeAllObjects];
+            s_invCacheTrojan = process.trojanMem;
+        }
+        s_invColdCache[ds_inv_cold_key(selector)] = @(invocation);
+    } @finally {
+        [s_invCacheLock unlock];
+    }
+}
+
+// Các setter chỉ dùng 1 lần lúc tạo object. Không đưa setFrame:/setHidden:/
+// setText:/setPath: vào đây — các setter đó chạy mỗi frame, cần cache theo
+// (target,selector) để khỏi setTarget: mỗi lần.
+static BOOL ds_selector_is_cold(RemoteCall *process, uint64_t selector) {
+    static uint64_t cold[32];
+    static int coldCount = 0;
+    static uint64_t coldTrojan = 0;
+    static uint64_t hotFrame = 0, hotHidden = 0, hotPath = 0, hotAlpha = 0;
+    if (!process || !process.trojanMem || !selector) return NO;
+    ds_inv_cache_ensure();
+    [s_invCacheLock lock];
+    @try {
+    if (coldTrojan != process.trojanMem) {
+        coldTrojan = process.trojanMem;
+        coldCount = 0;
+        hotFrame = hotHidden = hotPath = hotAlpha = 0;
+    }
+    // Fast path cho setter nóng: tránh resolve 21 selector lạnh ngay lượt
+    // setFrame:/setHidden: đầu tiên của session (làm chậm startup).
+    if (!hotFrame) hotFrame = ds_remote_sel(process, "setFrame:");
+    if (selector == hotFrame) return NO;
+    if (!hotHidden) hotHidden = ds_remote_sel(process, "setHidden:");
+    if (selector == hotHidden) return NO;
+    if (!hotPath) hotPath = ds_remote_sel(process, "setPath:");
+    if (selector == hotPath) return NO;
+    if (!hotAlpha) hotAlpha = ds_remote_sel(process, "setAlpha:");
+    if (selector == hotAlpha) return NO;
+    if (coldCount == 0) {
+        const char *names[] = {
+            "setNumberOfLines:", "setTextAlignment:", "setShadowOffset:",
+            "setUserInteractionEnabled:", "setTag:", "setSpeed:", "setOpaque:",
+            "setAutoresizingMask:", "setAdjustsFontSizeToFitWidth:",
+            "setSecureTextEntry:", "setBorderStyle:", "setReturnKeyType:",
+            "setKeyboardType:", "setContentVerticalAlignment:",
+            "setContentHorizontalAlignment:", "setScrollEnabled:",
+            "setWindowLevel:", "setMasksToBounds:", "setCornerRadius:",
+            "setBorderWidth:", "setLineWidth:"
+        };
+        int n = (int)(sizeof(names) / sizeof(names[0]));
+        for (int i = 0; i < n && coldCount < (int)(sizeof(cold) / sizeof(cold[0])); i++) {
+            uint64_t s = ds_remote_sel(process, names[i]);
+            if (s) cold[coldCount++] = s;
+        }
+    }
+    for (int i = 0; i < coldCount; i++) {
+        if (cold[i] == selector) return YES;
+    }
+    return NO;
     } @finally {
         [s_invCacheLock unlock];
     }
@@ -1504,6 +1605,7 @@ static void ds_inv_cache_drop(void) {
     [s_invCacheLock lock];
     @try {
         [s_invCache removeAllObjects];
+        [s_invColdCache removeAllObjects];
         s_invCacheTrojan = 0;
     } @finally {
         [s_invCacheLock unlock];
@@ -1526,8 +1628,12 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
     // Fast path kernrw18: invocation đã dựng + retain từ frame trước (chỉ cho
     // call không lấy return value: setFrame:/setHidden:/...). Getter đi đường cũ.
     BOOL wantResult = (result && resultSize > 0);
+    BOOL coldSel = !wantResult && ds_selector_is_cold(process, selector);
     uint64_t cachedInv = 0;
-    if (!wantResult) cachedInv = ds_inv_cache_get(process, target, selector);
+    if (!wantResult) {
+        cachedInv = coldSel ? ds_inv_cold_get(process, selector)
+                            : ds_inv_cache_get(process, target, selector);
+    }
 
     // depth>0 = caller đang giữ pool (ds_remote_pool_begin) -> dùng chung,
     // không tạo và không drain. depth==0 = nguyên bản: 1 pool cho đúng 1 lời gọi.
@@ -1550,6 +1656,7 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
     @try {
 
     uint64_t invocation = cachedInv;
+    BOOL builtInv = NO;
     if (!invocation) {
         uint64_t signature = remote_msg(process, target,
                                         ds_remote_sel(process, "methodSignatureForSelector:"),
@@ -1573,8 +1680,19 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
             // setArgument: copy bytes vào frame lúc gọi nên scratch tái dùng
             // an toàn; invoke gọi lại nhiều lần hợp lệ.
             remote_msg(process, invocation, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
-            if (process.trojanMem) ds_inv_cache_put(process, target, selector, invocation);
+            if (process.trojanMem) {
+                if (coldSel) ds_inv_cold_put(process, selector, invocation);
+                else ds_inv_cache_put(process, target, selector, invocation);
+            }
+            builtInv = YES;
         }
+    }
+
+    // Cold cache dùng chung invocation cho nhiều target -> setTarget: mỗi lần.
+    // Invocation vừa dựng đã set target ở trên nên bỏ qua.
+    if (coldSel && !builtInv) {
+        remote_msg(process, invocation, ds_remote_sel(process, "setTarget:"), target, 0, 0, 0);
+        if (!process.trojanMem) return NO;
     }
 
     uint64_t scratch = process.trojanMem + 0x800;
@@ -2928,7 +3046,9 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
 }
 
 // UILabel lazy. Slot chẵn = tên + mét (2 dòng), slot lẻ = TeamID (1 dòng).
-static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
+// frame được truyền ngay từ đầu để dùng initWithFrame: (bỏ init + setFrame
+// riêng, tiết kiệm ~8 remote call/label).
+static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
     if (slot < 0 || slot >= kQBLLabelCount) return 0;
     if (g_qblLabel[slot]) return g_qblLabel[slot];
     if (!process || !process.trojanMem || !g_qblRoot) return 0;
@@ -2946,31 +3066,31 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
     }
     ESPLog("qbl phase: label %d", slot);
     uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
-    if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) {
+    if (!lb) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
         return 0;
     }
-    ds_remote_set_u64_on_main(process, lb, "setHidden:", 1);
-    ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+    DSRemoteArgument frameArg = { &frame, sizeof(frame) };
+    lb = ds_remote_get_retained_object_on_main(process, lb, "initWithFrame:",
+                                               &frameArg, 1);
+    if (!lb) {
+        if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
+        return 0;
+    }
     ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (slot % 2 == 0) ? 2 : 1);
     ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
     ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"),
                                    g_qblWhiteColor, YES);
-    ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setBackgroundColor:"),
-                                   g_qblClearColor, YES);
     uint64_t f = (slot % 2 == 0) ? g_qblFontMain : g_qblFontSmall;
     if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
-    // QBL AddOutlinedText: UILabel không có stroke -> shadow đen (bán kính 1.2,
-    // offset 0) set MỘT lần lúc tạo, 0 chi phí/frame.
-    if (g_qblShadowCG) {
-        uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
-        if (lbLayer) {
-            ds_perform_on_springboard_main(process, lbLayer, ds_remote_sel(process,
-                "setShadowColor:"), g_qblShadowCG, YES);
-            ds_remote_set_float_on_main(process, lbLayer, "setShadowOpacity:", 1.0f);
-            ds_remote_set_double_on_main(process, lbLayer, "setShadowRadius:", 1.2);
-            ds_remote_set_point_on_main(process, lbLayer, "setShadowOffset:", CGPointMake(0, 0));
-        }
+    // QBL AddOutlinedText: UILabel không có stroke -> shadow đen, offset 0.
+    // Dùng shadow của UILabel (2 call) thay shadow của layer (1 getter + 4
+    // setter) để giảm mạnh thời gian tạo label; label nền clear + container
+    // không tương tác nên bỏ luôn setBackgroundColor:/setUserInteractionEnabled:.
+    if (g_qblBlackColor) {
+        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process,
+            "setShadowColor:"), g_qblBlackColor, YES);
+        ds_remote_set_point_on_main(process, lb, "setShadowOffset:", CGPointMake(0, 0));
     }
     if (!ds_perform_on_springboard_main(process, g_qblRoot, addSubview, lb, YES)) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
@@ -2980,8 +3100,12 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
     g_qblLabel[slot] = lb;
     g_qblLabelColor[slot] = 0xFFFFFFFFu;
     g_qblLabelText[slot][0] = '\0';
-    g_qblLabelRectValid[slot] = NO;
-    g_qblLabelShown[slot] = NO;
+    g_qblLabelRect[slot] = frame;
+    g_qblLabelRectValid[slot] = YES;
+    // Label mới chưa có text nên không cần setHidden:1 rồi setHidden:0 ngay
+    // sau đó. Đánh dấu shown=YES để place_label bỏ luôn call show đầu tiên;
+    // text được set ngay sau khi tạo. Khi text rỗng, place_label sẽ hide.
+    g_qblLabelShown[slot] = YES;
     g_qblLabelAt[slot] = 0;
     ESPLog("qbl label %d created (budget %d)", slot, s_qblLabelBudget);
     return lb;
@@ -3295,7 +3419,8 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         }
         return;
     }
-    uint64_t lb = ds_qbl_label_for(process, slot);
+    CGRect r = ds_qbl_label_rect(slot, anchor);
+    uint64_t lb = ds_qbl_label_for(process, slot, r);
     if (!lb) return;
     if (!g_qblLabelShown[slot]) {
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 0);
@@ -3319,7 +3444,6 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    CGRect r = ds_qbl_label_rect(slot, anchor);
     if (!g_qblLabelRectValid[slot] ||
         fabs(g_qblLabelRect[slot].origin.x - r.origin.x) > 0.5 ||
         fabs(g_qblLabelRect[slot].origin.y - r.origin.y) > 0.5 ||
@@ -3327,6 +3451,64 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
+    }
+}
+
+// Label pass tách khỏi geometry: chạy SAU khi box đã được vẽ, để việc tạo
+// label (15 remote call/label) không chặn box xuất hiện. Vẫn chạy khi geometry
+// không đổi để text/anchor cập nhật.
+static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
+    if (!process || !process.trojanMem || g_qblDead) return;
+    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
+    // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
+    // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
+    // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
+    static CFAbsoluteTime s_lastLabelPass = 0;
+    // qblpack: 30Hz (không phải 15Hz). 15Hz làm chữ trượt rõ khi player di
+    // chuyển; log present ổn định 0.3..5ms nên 30Hz vẫn an toàn.
+    if (nowP - s_lastLabelPass < (1.0 / 30.0)) return;
+    BOOL labelWork = NO;
+    for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
+        if (t >= s_qblTextCount) {
+            if (g_qblLabelShown[t]) labelWork = YES;
+            continue;
+        }
+        const ESPDrawCommand *c = &s_qblTexts[t];
+        if (!c->text[0]) {
+            if (g_qblLabelShown[t]) labelWork = YES;
+            continue;
+        }
+        uint64_t lb = g_qblLabel[t];
+        if (!lb) {
+            if (g_qblLabelFail[t] < 3) { labelWork = YES; break; }
+            continue;
+        }
+        if (!g_qblLabelShown[t]) { labelWork = YES; break; }
+        if (strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0 ||
+            g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
+        CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
+        if (!g_qblLabelRectValid[t] ||
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) > 0.5 ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) > 0.5 ||
+            fabs(g_qblLabelRect[t].size.width - lr.size.width) > 0.5) {
+            labelWork = YES;
+        }
+    }
+    if (!labelWork) return;
+    s_lastLabelPass = nowP;
+    ds_remote_pool_begin(process);
+    @try {
+        for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
+            ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t]);
+        }
+        for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
+            if (g_qblLabelShown[t] && g_qblLabel[t]) {
+                ds_remote_set_u64_on_main(process, g_qblLabel[t], "setHidden:", 1);
+                g_qblLabelShown[t] = NO;
+            }
+        }
+    } @finally {
+        ds_remote_pool_end(process);
     }
 }
 
@@ -3542,61 +3724,10 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         g_qblFrames++;
     }
 
-    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
-    // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
-    // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
-    // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
-    static CFAbsoluteTime s_lastLabelPass = 0;
-    // qblpack: 30Hz (không phải 15Hz). 15Hz làm chữ trượt rõ khi player di
-    // chuyển; log present ổn định 0.3..5ms nên 30Hz vẫn an toàn.
-    if (nowP - s_lastLabelPass >= (1.0 / 30.0)) {
-        BOOL labelWork = NO;
-        for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
-            if (t >= s_qblTextCount) {
-                if (g_qblLabelShown[t]) labelWork = YES;
-                continue;
-            }
-            const ESPDrawCommand *c = &s_qblTexts[t];
-            if (!c->text[0]) {
-                if (g_qblLabelShown[t]) labelWork = YES;
-                continue;
-            }
-            uint64_t lb = g_qblLabel[t];
-            if (!lb) {
-                if (g_qblLabelFail[t] < 3) { labelWork = YES; break; }
-                continue;
-            }
-            if (!g_qblLabelShown[t]) { labelWork = YES; break; }
-            if (strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0 ||
-                g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
-            CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
-            if (!g_qblLabelRectValid[t] ||
-                fabs(g_qblLabelRect[t].origin.x - lr.origin.x) > 0.5 ||
-                fabs(g_qblLabelRect[t].origin.y - lr.origin.y) > 0.5 ||
-                fabs(g_qblLabelRect[t].size.width - lr.size.width) > 0.5) {
-                labelWork = YES;
-            }
-        }
-        if (labelWork) {
-            s_lastLabelPass = nowP;
-            ds_remote_pool_begin(process);
-            @try {
-                for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
-                    ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t]);
-                }
-                for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
-                    if (g_qblLabelShown[t] && g_qblLabel[t]) {
-                        ds_remote_set_u64_on_main(process, g_qblLabel[t], "setHidden:", 1);
-                        g_qblLabelShown[t] = NO;
-                    }
-                }
-            } @finally {
-                ds_remote_pool_end(process);
-            }
-        }
-    }
-
     if (skipGeometry || deferGeometry) {
+        // Box không đổi nhưng text/anchor vẫn có thể đổi: label pass chạy sau
+        // geometry ở nhánh thường, ở đây chạy trước khi reset frame.
+        ds_qbl_label_pass(process, nowP);
         ESPDrawFrameReset();
         return;
     }
@@ -3704,6 +3835,8 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         }
         g_qblDead = YES;
     }
+    // Box đã vẽ xong; label (tạo/update) chạy sau để không chặn box.
+    ds_qbl_label_pass(process, nowP);
     if (g_qblRoot && g_qblRootHidden) g_qblRootHidden = NO;
     ESPDrawFrameReset();
 }
@@ -4335,7 +4468,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw64-fastdiag-bonecompose"
+#define DS_ESP_BUILD_TAG "kernrw65-labelbatch"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

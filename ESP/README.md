@@ -104,11 +104,30 @@ Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
      (pointer + count — tham số an toàn qua RemoteCall); points/rects nằm trong
      **1 buffer remote** (`malloc` 1 lần, giữ giữa các frame) → 2 `remote_write`/frame;
    - text dùng pool 16 `UILabel` (2/box): setText **chỉ khi text đổi**, setFrame tối đa
-     15Hz + ngưỡng 0.5pt; viền chữ kiểu QBL (`AddOutlinedText`) xấp xỉ bằng shadow đen
-     radius 1.2 set **1 lần** lúc tạo (0 chi phí mỗi frame).
+     30Hz + ngưỡng 0.5pt; viền chữ kiểu QBL (`AddOutlinedText`) xấp xỉ bằng
+     `UILabel.shadowColor` đen + `shadowOffset` 0 set **1 lần** lúc tạo (0 chi phí
+     mỗi frame).
    - frame trùng hash (không có gì đổi) → bỏ qua toàn bộ remote call.
 3. Tất cả nằm trong 1 `UIView` gốc (`g_qblRoot`) là con của container cũ → hide/show
    1 call, window cleanup cũ giữ nguyên.
+
+#### Thứ tự vẽ box/label + tạo label nhanh (kernrw65-labelbatch)
+
+- Presenter vẽ geometry (box/snapline/bone/HP) **trước**, label pass chạy **sau**.
+  Trước đây label pass chạy trước nên khi có nhiều địch mới, việc tạo label
+  (nhiều remote call) chặn box xuất hiện → box/label hiện lần lượt.
+- Label tạo bằng `initWithFrame:` (bỏ `init` + `setFrame:`), không set
+  `hidden`/`userInteractionEnabled`/`backgroundColor` thừa; shadow chuyển từ
+  `CALayer` (radius 1.2, ~5 call) sang `UILabel.shadowColor/shadowOffset`
+  (~2 call).
+- Invocation cache thêm nhánh **cold selector** (chỉ set 1 lần lúc tạo:
+  `setNumberOfLines:`/`setTextAlignment:`/`setShadowOffset:`/...): dùng 1
+  invocation theo selector + `setTarget:` thay vì dựng lại invocation cho từng
+  label. Setter nóng (`setFrame:`/`setHidden:`/`setText:`/`setPath:`/...) vẫn
+  cache theo `(target,selector)` để không thêm call mỗi frame.
+- Kết quả: box của tất cả địch hiện ngay trong frame đầu; label hiện nhanh hơn
+  nhiều nhưng vẫn lần lượt 1 label/tick (giữ budget để tránh dồn remote call
+  làm treo SpringBoard).
 
 #### Ổn định (bản sửa lỗi HUD đứng / ESP không hiện)
 
@@ -127,7 +146,7 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
      (`kQBLShapeBudgetPerTick` / `kBQLLabelBudgetPerTick`);
    - geometry có **hash riêng từng bucket** + quantize 0.5pt → bucket không đổi thì
      không `setPath:`; frame đứng yên = 0 remote call;
-   - label pass 15Hz tách riêng, chạy cả khi geometry skip (không mất update);
+   - label pass 30Hz tách riêng, chạy cả khi geometry skip (không mất update);
    - pid SpringBoard đổi (respring) → tự reset cache và dựng lại overlay;
    - nếu disable không ẩn được window (session chết), địa chỉ HUD/ESP được giữ
      lại và enable sau ẩn bằng session mới (guard pid) → không đè 2 HUD/ESP;

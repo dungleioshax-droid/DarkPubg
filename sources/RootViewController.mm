@@ -50,6 +50,14 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     UILabel *_dsProgressLabel;
 #endif
 
+    BOOL _isStartingHUD;
+    UIStackView *_buttonLoadingStackView;
+    UIActivityIndicatorView *_buttonLoadingSpinner;
+    UILabel *_buttonLoadingLabel;
+    NSTimer *_progressTimer;
+    CGFloat _currentProgress;
+    CGFloat _targetProgress;
+
     UIView *_headerContainer;
     UILabel *_appTitleLabel;
     UILabel *_appSubtitleLabel;
@@ -218,6 +226,36 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     _mainButton.layer.masksToBounds = YES;
     _mainButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backgroundView addSubview:_mainButton];
+
+    // Loading indicator & percent label inside main button
+    if (@available(iOS 13.0, *)) {
+        _buttonLoadingSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    } else {
+        _buttonLoadingSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
+    }
+    _buttonLoadingSpinner.color = [UIColor whiteColor];
+    _buttonLoadingSpinner.hidesWhenStopped = NO;
+    _buttonLoadingSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _buttonLoadingLabel = [[UILabel alloc] init];
+    _buttonLoadingLabel.text = @"Đang bật ESP... 0%";
+    _buttonLoadingLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
+    _buttonLoadingLabel.textColor = [UIColor whiteColor];
+    _buttonLoadingLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _buttonLoadingStackView = [[UIStackView alloc] initWithArrangedSubviews:@[_buttonLoadingSpinner, _buttonLoadingLabel]];
+    _buttonLoadingStackView.axis = UILayoutConstraintAxisHorizontal;
+    _buttonLoadingStackView.alignment = UIStackViewAlignmentCenter;
+    _buttonLoadingStackView.spacing = 10.0;
+    _buttonLoadingStackView.userInteractionEnabled = NO;
+    _buttonLoadingStackView.hidden = YES;
+    _buttonLoadingStackView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_mainButton addSubview:_buttonLoadingStackView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_buttonLoadingStackView.centerXAnchor constraintEqualToAnchor:_mainButton.centerXAnchor],
+        [_buttonLoadingStackView.centerYAnchor constraintEqualToAnchor:_mainButton.centerYAnchor],
+    ]];
 
     // 4. Console Log Card
     _consoleCardView = [[UIView alloc] init];
@@ -767,6 +805,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         if (!strongSelf) return;
 
         if (strongSelf->_isRemoteHUDActive) {
+            [strongSelf stopHUDLoadingUI];
             [strongSelf->_mainButton setTitle:@"TẮT ESP (STOP)" forState:UIControlStateNormal];
             [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"stop.fill"] forState:UIControlStateNormal];
             if (@available(iOS 15.0, *)) {
@@ -788,7 +827,16 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
             strongSelf->_badgeLabel.text = @"HOẠT ĐỘNG";
             strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+        } else if (strongSelf->_isStartingHUD) {
+            // Giữ nguyên giao diện loading trên nút
+            strongSelf->_buttonLoadingStackView.hidden = NO;
+            [strongSelf->_buttonLoadingSpinner startAnimating];
+            [strongSelf->_mainButton bringSubviewToFront:strongSelf->_buttonLoadingStackView];
+            strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
+            strongSelf->_badgeLabel.text = @"ĐANG KHỞI CHẠY";
+            strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
         } else {
+            [strongSelf stopHUDLoadingUI];
             [strongSelf->_mainButton setTitle:@"BẬT ESP (START)" forState:UIControlStateNormal];
             [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
             if (@available(iOS 15.0, *)) {
@@ -834,6 +882,9 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
         if (bridgeError.length > 0) {
             strongSelf->_statusDetailLabel.text = [NSString stringWithFormat:@"Lỗi: %@", bridgeError];
             strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+        } else if (strongSelf->_isStartingHUD) {
+            strongSelf->_statusDetailLabel.text = @"Đang kết nối SpringBoard và khởi tạo HUD...";
+            strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
         } else if (extraText.length > 0) {
             strongSelf->_statusDetailLabel.text = extraText;
             strongSelf->_statusDetailLabel.textColor = [UIColor colorWithRed:142/255.0 green:152/255.0 blue:168/255.0 alpha:1.0];
@@ -938,6 +989,83 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [self reloadModeButtonState];
 }
 
+- (void)startHUDLoadingUI
+{
+    _isStartingHUD = YES;
+    _currentProgress = 0.0f;
+    _targetProgress = 0.05f;
+
+    _buttonLoadingStackView.hidden = NO;
+    [_buttonLoadingSpinner startAnimating];
+    _buttonLoadingLabel.text = @"Đang bật ESP... 0%";
+    [_mainButton bringSubviewToFront:_buttonLoadingStackView];
+
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+        config.baseBackgroundColor = [UIColor colorWithRed:13/255.0 green:148/255.0 blue:136/255.0 alpha:0.95];
+        config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+        config.title = @" ";
+        config.image = nil;
+        [_mainButton setConfiguration:config];
+    } else {
+        [_mainButton setTitle:@"" forState:UIControlStateNormal];
+        [_mainButton setImage:nil forState:UIControlStateNormal];
+        _mainButton.backgroundColor = [UIColor colorWithRed:13/255.0 green:148/255.0 blue:136/255.0 alpha:0.95];
+    }
+
+    _badgeDot.backgroundColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
+    _badgeLabel.text = @"ĐANG KHỞI CHẠY";
+    _badgeLabel.textColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
+
+    _statusDetailLabel.text = @"Đang kết nối SpringBoard và khởi tạo HUD...";
+    _statusDetailLabel.textColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
+
+    [_progressTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    _progressTimer = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:YES block:^(NSTimer * _Nonnull timer) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf->_isStartingHUD) {
+            [timer invalidate];
+            return;
+        }
+        [strongSelf tickProgressAnimation];
+    }];
+}
+
+- (void)tickProgressAnimation
+{
+    if (_currentProgress < _targetProgress) {
+        CGFloat delta = (_targetProgress - _currentProgress) * 0.2f;
+        if (delta < 0.005f) {
+            delta = 0.005f;
+        }
+        _currentProgress += delta;
+        if (_currentProgress > _targetProgress) {
+            _currentProgress = _targetProgress;
+        }
+    } else if (_targetProgress < 0.92f) {
+        // Tự động tăng chậm trong lúc chờ bridge xử lý nền
+        _targetProgress += 0.003f;
+        _currentProgress = _targetProgress;
+    }
+
+    int percent = (int)llround(_currentProgress * 100.0f);
+    if (percent > 99 && !_isRemoteHUDActive) {
+        percent = 99;
+    }
+    _buttonLoadingLabel.text = [NSString stringWithFormat:@"Đang bật ESP... %d%%", percent];
+    [_mainButton bringSubviewToFront:_buttonLoadingStackView];
+}
+
+- (void)stopHUDLoadingUI
+{
+    _isStartingHUD = NO;
+    [_progressTimer invalidate];
+    _progressTimer = nil;
+    [_buttonLoadingSpinner stopAnimating];
+    _buttonLoadingStackView.hidden = YES;
+}
+
 - (void)tapMainButton:(UIButton *)sender
 {
     log_debug(OS_LOG_DEFAULT, "- [RootViewController tapMainButton:%{public}@]", sender);
@@ -955,25 +1083,51 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
     if (isNowEnabled)
     {
+        [self startHUDLoadingUI];
+
         [_impactFeedbackGenerator prepare];
         int anyToken;
         __weak typeof(self) weakSelf = self;
         notify_register_dispatch(NOTIFY_LAUNCHED_HUD, &anyToken, dispatch_get_main_queue(), ^(int token) {
             __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
             notify_cancel(token);
-            [strongSelf->_impactFeedbackGenerator impactOccurred];
-            [strongSelf reloadMainButtonState];
-            [strongSelf->_mainButton setUserInteractionEnabled:YES];
-            [strongSelf.backgroundView setUserInteractionEnabled:YES];
-            [strongSelf appendLog:@"HUD Overlay đã khởi tạo thành công" type:@"SUCCESS"];
+
+            // Cập nhật 100% hiển thị trực quan trước khi chuyển sang nút STOP
+            strongSelf->_targetProgress = 1.0f;
+            strongSelf->_currentProgress = 1.0f;
+            strongSelf->_buttonLoadingLabel.text = @"Đang bật ESP... 100%";
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [strongSelf stopHUDLoadingUI];
+                [strongSelf->_impactFeedbackGenerator impactOccurred];
+                [strongSelf reloadMainButtonState];
+                [strongSelf->_mainButton setUserInteractionEnabled:YES];
+                [strongSelf.backgroundView setUserInteractionEnabled:YES];
+                [strongSelf appendLog:@"HUD Overlay đã khởi tạo thành công" type:@"SUCCESS"];
+            });
         });
 
         [_mainButton setUserInteractionEnabled:NO];
+
+        // Timeout an toàn: Nếu quá 35 giây không có phản hồi từ HUD thì reset trạng thái
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(35.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf && strongSelf->_isStartingHUD && !strongSelf->_isRemoteHUDActive) {
+                [strongSelf stopHUDLoadingUI];
+                [strongSelf appendLog:@"Quá thời gian chờ khởi tạo HUD (Timeout)" type:@"ERROR"];
+                [strongSelf reloadMainButtonState];
+                [strongSelf->_mainButton setUserInteractionEnabled:YES];
+                [strongSelf.backgroundView setUserInteractionEnabled:YES];
+            }
+        });
+
 #if USE_DARKSWORD
         // DarkSword bootstrap runs in background; progress is displayed in terminal log.
 #else
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             dispatch_async(dispatch_get_main_queue(), ^{
+                [self stopHUDLoadingUI];
                 [self reloadMainButtonState];
                 [self->_mainButton setUserInteractionEnabled:YES];
                 [self.backgroundView setUserInteractionEnabled:YES];
@@ -983,6 +1137,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     }
     else
     {
+        [self stopHUDLoadingUI];
         [_mainButton setUserInteractionEnabled:NO];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self reloadMainButtonState];
@@ -1008,6 +1163,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
 - (void)showDSFailure:(NSString *)error
 {
+    [self stopHUDLoadingUI];
     NSString *msg = error.length > 0 ? error : NSLocalizedString(@"Unknown error", nil);
     [self appendLog:[NSString stringWithFormat:@"Khởi tạo DarkSpeed thất bại: %@", msg] type:@"ERROR"];
     [_mainButton setUserInteractionEnabled:YES];
@@ -1026,6 +1182,11 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     NSString *stage = DSBridgeStage();
     if (stage.length == 0) stage = NSLocalizedString(@"Initializing DarkSpeed", nil);
     [self appendLog:[NSString stringWithFormat:@"%@ (%d%%)", stage, (int)llround(p * 100.0)] type:@"LOAD"];
+
+    if (_isStartingHUD) {
+        _targetProgress = MAX(_targetProgress, (CGFloat)p);
+        _statusDetailLabel.text = [NSString stringWithFormat:@"%@ (%d%%)", stage, (int)llround(p * 100.0)];
+    }
 }
 #endif
 
@@ -1078,6 +1239,12 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext>  _Nonnull context) {
         [self reloadModeButtonState];
     } completion:nil];
+}
+
+- (void)dealloc
+{
+    [_progressTimer invalidate];
+    _progressTimer = nil;
 }
 
 @end
