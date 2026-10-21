@@ -231,7 +231,15 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   đi ra theo ±Y (bỏ clavicle khi chuỗi >= 4 xương). Dùng ref pose nên **không
   phụ thuộc pose đang chơi** (nằm/ngồi/leo) và **không cần GNames**; map được
   cache 60s theo USkeleton. Đây là đường chính khi rig lệch 4 bảng hard-code.
-- **Composed path (ưu tiên):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
+- **Live path (kernrw69):** từ bản build này engine đọc **bone space live**
+  (`ESPOff_Mesh_BoneSpace`, `0xC98`/`0xC88`) thay vì compose ref pose:
+  ma trận 4x4 của mỗi joint ở frame hiện tại đã là component space — `S =
+  S_parent × S_joint`, validate qua `|det(S)| ∈ [0.2..2.4]` (bỏ quaternion
+  rác/giả lập) và bảng tự dò `ESPBoneMap.h`. Trên log bạn sẽ thấy thay cho
+  `bones automap: skip (ref pose)` là `bones live: skip (<lý do>)` hoặc
+  `bones: offset=0xc98 LIVE ok …` — ref-pose compose chỉ còn dùng làm fallback
+  khi không đọc được bone space.
+- **Composed path (fallback):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
   (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
   (UE `FTransform::Multiply`) rồi validate bảng tự dò / bảng tên / 4 bảng index.
   BoneTree được thử `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index`.
