@@ -51,12 +51,10 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 #endif
 
     BOOL _isStartingHUD;
-    UIStackView *_buttonLoadingStackView;
-    UIActivityIndicatorView *_buttonLoadingSpinner;
-    UILabel *_buttonLoadingLabel;
     NSTimer *_progressTimer;
     CGFloat _currentProgress;
     CGFloat _targetProgress;
+    int _lastReportedPercent;
 
     UIView *_headerContainer;
     UILabel *_appTitleLabel;
@@ -226,36 +224,6 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     _mainButton.layer.masksToBounds = YES;
     _mainButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self.backgroundView addSubview:_mainButton];
-
-    // Loading indicator & percent label inside main button
-    if (@available(iOS 13.0, *)) {
-        _buttonLoadingSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    } else {
-        _buttonLoadingSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleWhite];
-    }
-    _buttonLoadingSpinner.color = [UIColor whiteColor];
-    _buttonLoadingSpinner.hidesWhenStopped = NO;
-    _buttonLoadingSpinner.translatesAutoresizingMaskIntoConstraints = NO;
-
-    _buttonLoadingLabel = [[UILabel alloc] init];
-    _buttonLoadingLabel.text = @"Đang bật ESP... 0%";
-    _buttonLoadingLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
-    _buttonLoadingLabel.textColor = [UIColor whiteColor];
-    _buttonLoadingLabel.translatesAutoresizingMaskIntoConstraints = NO;
-
-    _buttonLoadingStackView = [[UIStackView alloc] initWithArrangedSubviews:@[_buttonLoadingSpinner, _buttonLoadingLabel]];
-    _buttonLoadingStackView.axis = UILayoutConstraintAxisHorizontal;
-    _buttonLoadingStackView.alignment = UIStackViewAlignmentCenter;
-    _buttonLoadingStackView.spacing = 10.0;
-    _buttonLoadingStackView.userInteractionEnabled = NO;
-    _buttonLoadingStackView.hidden = YES;
-    _buttonLoadingStackView.translatesAutoresizingMaskIntoConstraints = NO;
-    [_mainButton addSubview:_buttonLoadingStackView];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [_buttonLoadingStackView.centerXAnchor constraintEqualToAnchor:_mainButton.centerXAnchor],
-        [_buttonLoadingStackView.centerYAnchor constraintEqualToAnchor:_mainButton.centerYAnchor],
-    ]];
 
     // 4. Console Log Card
     _consoleCardView = [[UIView alloc] init];
@@ -795,6 +763,84 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     [self saveUserDefaults];
 }
 
+- (void)applyMainButtonReadyState
+{
+    [_mainButton setTitle:nil forState:UIControlStateNormal];
+    [_mainButton setImage:nil forState:UIControlStateNormal];
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+        config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+        config.baseForegroundColor = [UIColor whiteColor];
+        config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+        config.image = [UIImage systemImageNamed:@"play.fill"];
+        config.imagePadding = 10.0;
+        config.showsActivityIndicator = NO;
+        config.title = @"BẬT ESP (START)";
+        [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+            NSMutableDictionary *attrs = [textAttributes mutableCopy];
+            attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+            return attrs;
+        }];
+        [_mainButton setConfiguration:config];
+    } else {
+        [_mainButton setTitle:@"BẬT ESP (START)" forState:UIControlStateNormal];
+        [_mainButton setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
+        _mainButton.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+    }
+}
+
+- (void)applyMainButtonLoadingStateWithPercent:(int)percent
+{
+    [_mainButton setTitle:nil forState:UIControlStateNormal];
+    [_mainButton setImage:nil forState:UIControlStateNormal];
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+        config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+        config.baseForegroundColor = [UIColor whiteColor];
+        config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+        config.showsActivityIndicator = YES;
+        config.image = nil;
+        config.imagePadding = 10.0;
+        config.title = [NSString stringWithFormat:@"%d%%", percent];
+        [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+            NSMutableDictionary *attrs = [textAttributes mutableCopy];
+            attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+            return attrs;
+        }];
+        [_mainButton setConfiguration:config];
+    } else {
+        [_mainButton setTitle:[NSString stringWithFormat:@"%d%%", percent] forState:UIControlStateNormal];
+        [_mainButton setImage:nil forState:UIControlStateNormal];
+        _mainButton.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
+    }
+}
+
+- (void)applyMainButtonActiveState
+{
+    [_mainButton setTitle:nil forState:UIControlStateNormal];
+    [_mainButton setImage:nil forState:UIControlStateNormal];
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
+        config.baseBackgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+        config.baseForegroundColor = [UIColor whiteColor];
+        config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
+        config.image = [UIImage systemImageNamed:@"stop.fill"];
+        config.imagePadding = 10.0;
+        config.showsActivityIndicator = NO;
+        config.title = @"TẮT ESP (STOP)";
+        [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
+            NSMutableDictionary *attrs = [textAttributes mutableCopy];
+            attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
+            return attrs;
+        }];
+        [_mainButton setConfiguration:config];
+    } else {
+        [_mainButton setTitle:@"TẮT ESP (STOP)" forState:UIControlStateNormal];
+        [_mainButton setImage:[UIImage systemImageNamed:@"stop.fill"] forState:UIControlStateNormal];
+        _mainButton.backgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
+    }
+}
+
 - (void)reloadMainButtonState
 {
     _isRemoteHUDActive = [self isHUDEnabled];
@@ -806,55 +852,20 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
         if (strongSelf->_isRemoteHUDActive) {
             [strongSelf stopHUDLoadingUI];
-            [strongSelf->_mainButton setTitle:@"TẮT ESP (STOP)" forState:UIControlStateNormal];
-            [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"stop.fill"] forState:UIControlStateNormal];
-            if (@available(iOS 15.0, *)) {
-                UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-                config.baseBackgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
-                config.baseForegroundColor = [UIColor whiteColor];
-                config.image = [UIImage systemImageNamed:@"stop.fill"];
-                config.imagePadding = 10;
-                config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
-                [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
-                    NSMutableDictionary *attrs = [textAttributes mutableCopy];
-                    attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-                    return attrs;
-                }];
-                [strongSelf->_mainButton setConfiguration:config];
-            } else {
-                strongSelf->_mainButton.backgroundColor = [UIColor colorWithRed:239/255.0 green:68/255.0 blue:68/255.0 alpha:1.0];
-            }
+            [strongSelf applyMainButtonActiveState];
             strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
             strongSelf->_badgeLabel.text = @"HOẠT ĐỘNG";
             strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
         } else if (strongSelf->_isStartingHUD) {
-            // Giữ nguyên giao diện loading trên nút
-            strongSelf->_buttonLoadingStackView.hidden = NO;
-            [strongSelf->_buttonLoadingSpinner startAnimating];
-            [strongSelf->_mainButton bringSubviewToFront:strongSelf->_buttonLoadingStackView];
+            int pct = (int)llround(strongSelf->_currentProgress * 100.0f);
+            if (pct > 99 && !strongSelf->_isRemoteHUDActive) pct = 99;
+            [strongSelf applyMainButtonLoadingStateWithPercent:pct];
             strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
             strongSelf->_badgeLabel.text = @"ĐANG KHỞI CHẠY";
             strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
         } else {
             [strongSelf stopHUDLoadingUI];
-            [strongSelf->_mainButton setTitle:@"BẬT ESP (START)" forState:UIControlStateNormal];
-            [strongSelf->_mainButton setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
-            if (@available(iOS 15.0, *)) {
-                UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-                config.baseBackgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
-                config.baseForegroundColor = [UIColor whiteColor];
-                config.image = [UIImage systemImageNamed:@"play.fill"];
-                config.imagePadding = 10;
-                config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
-                [config setTitleTextAttributesTransformer:^NSDictionary<NSAttributedStringKey,id> * _Nonnull(NSDictionary<NSAttributedStringKey,id> * _Nonnull textAttributes) {
-                    NSMutableDictionary *attrs = [textAttributes mutableCopy];
-                    attrs[NSFontAttributeName] = [UIFont systemFontOfSize:18 weight:UIFontWeightBold];
-                    return attrs;
-                }];
-                [strongSelf->_mainButton setConfiguration:config];
-            } else {
-                strongSelf->_mainButton.backgroundColor = [UIColor colorWithRed:16/255.0 green:185/255.0 blue:170/255.0 alpha:1.0];
-            }
+            [strongSelf applyMainButtonReadyState];
             strongSelf->_badgeDot.backgroundColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
             strongSelf->_badgeLabel.text = @"CHƯA BẬT";
             strongSelf->_badgeLabel.textColor = [UIColor colorWithRed:148/255.0 green:163/255.0 blue:184/255.0 alpha:1.0];
@@ -994,24 +1005,10 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     _isStartingHUD = YES;
     _currentProgress = 0.0f;
     _targetProgress = 0.05f;
+    _lastReportedPercent = -1;
 
-    _buttonLoadingStackView.hidden = NO;
-    [_buttonLoadingSpinner startAnimating];
-    _buttonLoadingLabel.text = @"Đang bật ESP... 0%";
-    [_mainButton bringSubviewToFront:_buttonLoadingStackView];
-
-    if (@available(iOS 15.0, *)) {
-        UIButtonConfiguration *config = [UIButtonConfiguration filledButtonConfiguration];
-        config.baseBackgroundColor = [UIColor colorWithRed:13/255.0 green:148/255.0 blue:136/255.0 alpha:0.95];
-        config.cornerStyle = UIButtonConfigurationCornerStyleLarge;
-        config.title = @" ";
-        config.image = nil;
-        [_mainButton setConfiguration:config];
-    } else {
-        [_mainButton setTitle:@"" forState:UIControlStateNormal];
-        [_mainButton setImage:nil forState:UIControlStateNormal];
-        _mainButton.backgroundColor = [UIColor colorWithRed:13/255.0 green:148/255.0 blue:136/255.0 alpha:0.95];
-    }
+    // Chuyển nút sang giao diện xoay xoay + 0% ngay khi bấm
+    [self applyMainButtonLoadingStateWithPercent:0];
 
     _badgeDot.backgroundColor = [UIColor colorWithRed:245/255.0 green:158/255.0 blue:11/255.0 alpha:1.0];
     _badgeLabel.text = @"ĐANG KHỞI CHẠY";
@@ -1053,17 +1050,18 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
     if (percent > 99 && !_isRemoteHUDActive) {
         percent = 99;
     }
-    _buttonLoadingLabel.text = [NSString stringWithFormat:@"Đang bật ESP... %d%%", percent];
-    [_mainButton bringSubviewToFront:_buttonLoadingStackView];
+    if (percent != _lastReportedPercent) {
+        _lastReportedPercent = percent;
+        [self applyMainButtonLoadingStateWithPercent:percent];
+    }
 }
 
 - (void)stopHUDLoadingUI
 {
     _isStartingHUD = NO;
+    _lastReportedPercent = -1;
     [_progressTimer invalidate];
     _progressTimer = nil;
-    [_buttonLoadingSpinner stopAnimating];
-    _buttonLoadingStackView.hidden = YES;
 }
 
 - (void)tapMainButton:(UIButton *)sender
@@ -1096,7 +1094,7 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
             // Cập nhật 100% hiển thị trực quan trước khi chuyển sang nút STOP
             strongSelf->_targetProgress = 1.0f;
             strongSelf->_currentProgress = 1.0f;
-            strongSelf->_buttonLoadingLabel.text = @"Đang bật ESP... 100%";
+            [strongSelf applyMainButtonLoadingStateWithPercent:100];
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [strongSelf stopHUDLoadingUI];
