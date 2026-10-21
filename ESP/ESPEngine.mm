@@ -472,16 +472,32 @@ static int ESPReadPlayerPawns(uint64_t vmMap, uint64_t world, ESPPlayerPawn *out
     if (!vmMap || !world || !out || cap <= 0) return 0;
     BOOL ok = NO;
     uint64_t gs = ESPReadU64(vmMap, world + ESPOff_UWorld_GameState, &ok);
+    // Fallback: mode listen/training có thể để UWorld.GameState null nhưng
+    // AuthorityGameMode->GameState vẫn hợp lệ. Client thuần thì path này null
+    // và ta quay về actor array như cũ.
+    if (!ok || !ESPIsUserPtr(gs)) {
+        BOOL okgm = NO;
+        uint64_t gm = ESPReadU64(vmMap, world + ESPOff_UWorld_AuthorityGameMode, &okgm);
+        if (okgm && ESPIsUserPtr(gm)) {
+            BOOL okgs = NO;
+            uint64_t gs2 = ESPReadU64(vmMap, gm + ESPOff_GameMode_GameState, &okgs);
+            if (okgs && ESPIsUserPtr(gs2)) { gs = gs2; ok = YES; }
+        }
+    }
     if (!ok || !ESPIsUserPtr(gs)) return 0;
     uint64_t data = ESPReadU64(vmMap, gs + ESPOff_GameState_PlayerArray, &ok);
     if (!ok || !ESPIsUserPtr(data)) return 0;
     uint32_t count = ESPReadU32(vmMap, gs + ESPOff_GameState_PlayerArray + 8, &ok);
     if (!ok || count == 0) return 0;
     if (count > 256) count = 256; // sanity: 100 player + spectator, chặn rác
+    // Đọc cả mảng con trỏ 1 lần (vùng liền nhau) thay vì 256 read 8 byte.
+    // Fail (mảng băng qua page chưa map) thì fallback từng pointer như cũ.
+    uint64_t psArr[256];
+    BOOL bulk = ESPMemoryRead(vmMap, data, psArr, (size_t)count * sizeof(uint64_t));
     int n = 0;
     for (uint32_t i = 0; i < count && n < cap; i++) {
-        BOOL okp = NO;
-        uint64_t ps = ESPReadU64(vmMap, data + (uint64_t)i * 8, &okp);
+        BOOL okp = bulk ? YES : NO;
+        uint64_t ps = bulk ? psArr[i] : ESPReadU64(vmMap, data + (uint64_t)i * 8, &okp);
         if (!okp || !ESPIsUserPtr(ps)) continue;
         uint64_t pawn = ESPReadU64(vmMap, ps + ESPOff_PlayerState_PawnPrivate, &okp);
         if (!okp || !ESPIsUserPtr(pawn)) continue;
@@ -500,6 +516,56 @@ static int ESPReadPlayerPawns(uint64_t vmMap, uint64_t world, ESPPlayerPawn *out
         n++;
     }
     return n;
+}
+
+// Chẩn đoán 1 lần/world: vì sao PlayerArray trả 0. Log đủ chuỗi để lần test
+// sau biết chết ở GameState, PlayerArray hay PawnPrivate — không đoán mò.
+static void ESPPlayerArrayProbe(uint64_t vmMap, uint64_t world) {
+    if (!vmMap || !world) return;
+    static uint64_t s_probeWorld = 0;
+    if (world == s_probeWorld) return;
+    s_probeWorld = world;
+    BOOL ok = NO;
+    uint64_t gs = ESPReadU64(vmMap, world + ESPOff_UWorld_GameState, &ok);
+    BOOL gsOk = ok;
+    uint64_t gm = ESPReadU64(vmMap, world + ESPOff_UWorld_AuthorityGameMode, &ok);
+    BOOL gmOk = ok;
+    uint64_t gs2 = 0;
+    BOOL gs2Ok = NO;
+    if (gmOk && ESPIsUserPtr(gm)) {
+        gs2 = ESPReadU64(vmMap, gm + ESPOff_GameMode_GameState, &gs2Ok);
+        if (!gs2Ok) gs2 = 0;
+    }
+    ESPLog("fast diag: world=0x%llx gs=0x%llx(ok=%d) gm=0x%llx(ok=%d) gs2=0x%llx(ok=%d)",
+           (unsigned long long)world, (unsigned long long)gs, gsOk,
+           (unsigned long long)gm, gmOk, (unsigned long long)gs2, gs2Ok);
+    uint64_t gsCand[2] = { gs, gs2 };
+    for (int ci = 0; ci < 2; ci++) {
+        uint64_t g = gsCand[ci];
+        if (!ESPIsUserPtr(g)) continue;
+        BOOL dataOk = NO;
+        uint64_t data = ESPReadU64(vmMap, g + ESPOff_GameState_PlayerArray, &dataOk);
+        uint32_t count = 0, maxc = 0;
+        if (dataOk) {
+            count = ESPReadU32(vmMap, g + ESPOff_GameState_PlayerArray + 8, &ok);
+            maxc = ESPReadU32(vmMap, g + ESPOff_GameState_PlayerArray + 12, &ok);
+        }
+        uint64_t ps0 = 0, pawn0 = 0;
+        BOOL psOk = NO, pawnOk = NO;
+        uint8_t bot = 0;
+        if (dataOk && ESPIsUserPtr(data) && count > 0) {
+            ps0 = ESPReadU64(vmMap, data, &psOk);
+            if (psOk && ESPIsUserPtr(ps0)) {
+                pawn0 = ESPReadU64(vmMap, ps0 + ESPOff_PlayerState_PawnPrivate, &pawnOk);
+                bot = ESPReadU8(vmMap, ps0 + ESPOff_PlayerState_IsABot, &ok);
+            }
+        }
+        ESPLog("fast diag[%d]: gs=0x%llx data=0x%llx(ok=%d) count=%u max=%u "
+               "ps0=0x%llx(ok=%d) pawn0=0x%llx(ok=%d) bot=0x%02x",
+               ci, (unsigned long long)g, (unsigned long long)data, dataOk,
+               (unsigned)count, (unsigned)maxc, (unsigned long long)ps0, psOk,
+               (unsigned long long)pawn0, pawnOk, (unsigned)bot);
+    }
 }
 
 // Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
@@ -1043,6 +1109,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     g_espStep = 0;
     g_espWaitingLoad = NO; // có world = game load xong, hết chờ
     r.world = world;
+    ESPPlayerArrayProbe(vmMap, world);
 
     uint64_t level = 0;
     uint64_t actorsData = 0;
@@ -1217,12 +1284,13 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     }
 
     // PlayerArray có dữ liệu => actor array chỉ cần lát 2048 actor/lượt để bắt
-    // hình nhân huấn luyện (kind 3). Không còn phụ thuộc thứ tự/may mắn của
-    // 8000 actor; mỗi lượt quét xong nhanh hơn nhiều lần.
+    // hình nhân huấn luyện (kind 3). Không cắt actor array ở lượt đầu: lát cắt
+    // lạnh vẫn tốn ~50ms/actor và sẽ tạo lag đúng lúc box vừa hiện; để nó chạy
+    // song song lúc HUD/overlay đang dựng (như log 2026-10-21) rồi mới warm.
     uint32_t scanStart = 0;
     uint32_t scanCount = scanN;
-    BOOL sliced = (fastPawnN > 0 && scanN > 2048);
     static uint32_t s_scanSlice = 0; // con trỏ lát actor; resume nếu budget cắt
+    BOOL sliced = (fastPawnN > 0 && scanN > 2048);
     if (sliced) {
         scanCount = 2048;
         scanStart = s_scanSlice % scanN;
@@ -2545,6 +2613,9 @@ static uint32_t g_espBoneOff = 0;      // offset TArray<FTransform> trong mesh
 static int g_espBoneMap[ESPBone_Count] = {0};
 static CFAbsoluteTime g_espBoneTryAt = 0;
 static char g_espBoneStatus[64] = "bones off";
+// qblpack 2026-10-21: 0xCD0/0xCE0 bị game xoá (Num=0). Dùng BoneSpaceTransforms
+// (0xC98) rồi tự nhân theo ParentIndex của USkeleton.BoneTree — không cần GNames.
+static std::atomic_bool g_espBoneComposed{false};
 
 // Thứ tự slot: head, neck, chest, pelvis, LShoulder, LElbow, LHand,
 // RShoulder, RElbow, RHand, LHip, LKnee, LFoot, RHip, RKnee, RFoot, Root.
@@ -2582,6 +2653,7 @@ static void ESPBonesReset(void) {
     g_espBoneTryAt = 0;
     g_espBoneOff = 0;
     memset(g_espBoneMap, 0, sizeof(g_espBoneMap));
+    g_espBoneComposed.store(false);
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus),
              g_espBonesWant.load() ? "bones detect" : "bones off");
 }
@@ -2692,6 +2764,273 @@ static BOOL ESPReadBoneLocals(uint64_t vmMap, uint64_t data, ESPVector *out, int
         out[i] = (ESPVector){ x, y, z };
     }
     return YES;
+}
+
+// --- qblpack 2026-10-21: bone-space -> component-space ---------------------
+// 0xC98 = BoneSpaceTransforms (local so với parent). Game xoá 0xCD0/0xCE0
+// (Cached*) nên phải tự nhân theo ParentIndex trong USkeleton.BoneTree.
+// Không dùng FName => không phụ thuộc GNames đang chết trên build này.
+typedef struct { float x, y, z, w; } ESPQuat;
+
+static ESPQuat ESPQuatMul(ESPQuat a, ESPQuat b) {
+    ESPQuat r;
+    r.w = a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z;
+    r.x = a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y;
+    r.y = a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x;
+    r.z = a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w;
+    return r;
+}
+
+static ESPVector ESPQuatRotate(ESPQuat q, ESPVector v) {
+    float cx = q.y*v.z - q.z*v.y;
+    float cy = q.z*v.x - q.x*v.z;
+    float cz = q.x*v.y - q.y*v.x;
+    float ux = 2.0f * (cx + q.w*v.x);
+    float uy = 2.0f * (cy + q.w*v.y);
+    float uz = 2.0f * (cz + q.w*v.z);
+    return (ESPVector){ v.x + (q.y*uz - q.z*uy),
+                        v.y + (q.z*ux - q.x*uz),
+                        v.z + (q.x*uy - q.y*ux) };
+}
+
+// out = a * b (UE FTransform::Multiply): rotation a*b, translation
+// a.t + rotate(a.q, b.t * a.scale), scale a.scale*b.scale.
+static void ESPTransformMul(const uint8_t *a, const uint8_t *b, uint8_t *out) {
+    ESPQuat qa = {0, 0, 0, 1}, qb = {0, 0, 0, 1};
+    ESPVector ta = {0, 0, 0}, tb = {0, 0, 0};
+    ESPVector sa = {1, 1, 1}, sb = {1, 1, 1};
+    memcpy(&qa, a + 0x00, sizeof(qa));
+    memcpy(&qb, b + 0x00, sizeof(qb));
+    memcpy(&ta, a + ESPOff_Transform_Translation, sizeof(ta));
+    memcpy(&tb, b + ESPOff_Transform_Translation, sizeof(tb));
+    memcpy(&sa, a + 0x20, sizeof(sa));
+    memcpy(&sb, b + 0x20, sizeof(sb));
+    if (!ESPFiniteV(qa.x) || !ESPFiniteV(qa.y) || !ESPFiniteV(qa.z) || !ESPFiniteV(qa.w)) qa = (ESPQuat){0,0,0,1};
+    if (!ESPFiniteV(qb.x) || !ESPFiniteV(qb.y) || !ESPFiniteV(qb.z) || !ESPFiniteV(qb.w)) qb = (ESPQuat){0,0,0,1};
+    if (!ESPFiniteV(sa.x) || sa.x < 0.01f || sa.x > 100.0f) sa.x = 1.0f;
+    if (!ESPFiniteV(sa.y) || sa.y < 0.01f || sa.y > 100.0f) sa.y = 1.0f;
+    if (!ESPFiniteV(sa.z) || sa.z < 0.01f || sa.z > 100.0f) sa.z = 1.0f;
+    if (!ESPFiniteV(sb.x) || sb.x < 0.01f || sb.x > 100.0f) sb.x = 1.0f;
+    if (!ESPFiniteV(sb.y) || sb.y < 0.01f || sb.y > 100.0f) sb.y = 1.0f;
+    if (!ESPFiniteV(sb.z) || sb.z < 0.01f || sb.z > 100.0f) sb.z = 1.0f;
+    ESPQuat q = ESPQuatMul(qa, qb);
+    float qlen = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+    if (qlen > 0.0001f && ESPFiniteV(qlen)) {
+        q.x /= qlen; q.y /= qlen; q.z /= qlen; q.w /= qlen;
+    } else {
+        q = (ESPQuat){0, 0, 0, 1};
+    }
+    ESPVector st = { tb.x * sa.x, tb.y * sa.y, tb.z * sa.z };
+    ESPVector rt = ESPQuatRotate(qa, st);
+    ESPVector t = { ta.x + rt.x, ta.y + rt.y, ta.z + rt.z };
+    ESPVector s = { sa.x * sb.x, sa.y * sb.y, sa.z * sb.z };
+    memcpy(out + 0x00, &q, sizeof(q));
+    memcpy(out + ESPOff_Transform_Translation, &t, sizeof(t));
+    memcpy(out + 0x20, &s, sizeof(s));
+}
+
+// Đọc ParentIndex (int32 @ +8) của từng FBoneNode trong USkeleton.BoneTree.
+// Thử vài offset BoneTree (DUMP 0x30 + ứng viên) và yêu cầu parent index luôn
+// nhỏ hơn index con — đúng thứ tự DFS của FReferenceSkeleton, đồng thời loại
+// offset trỏ vào rác.
+static BOOL ESPBoneReadParents(uint64_t vmMap, uint64_t mesh, int *outParents,
+                               uint32_t *outCount) {
+    if (!vmMap || !ESPIsUserPtr(mesh) || !outParents || !outCount) return NO;
+    uint64_t skelMesh = 0, skel = 0;
+    if (!ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_SkeletalMesh, &skelMesh, 8) ||
+        !ESPIsUserPtr(skelMesh)) {
+        static CFAbsoluteTime s_logAt = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_logAt > 10.0) {
+            s_logAt = now;
+            ESPLog("bones parents: no SkeletalMesh mesh=0x%llx", (unsigned long long)mesh);
+        }
+        return NO;
+    }
+    if (!ESPMemoryRead(vmMap, skelMesh + ESPOff_SkeletalMesh_Skeleton, &skel, 8) ||
+        !ESPIsUserPtr(skel)) {
+        static CFAbsoluteTime s_logAt2 = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_logAt2 > 10.0) {
+            s_logAt2 = now;
+            ESPLog("bones parents: no USkeleton skelMesh=0x%llx", (unsigned long long)skelMesh);
+        }
+        return NO;
+    }
+    static const uint32_t kTreeOffs[] = {
+        ESPOff_Skeleton_BoneTree, 0x68, 0x78, 0x28
+    };
+    static thread_local uint8_t tree[ESPOff_Bone_NumMax * ESPOff_BoneNodeSize];
+    for (size_t t = 0; t < sizeof(kTreeOffs) / sizeof(kTreeOffs[0]); t++) {
+        uint8_t hdr[16];
+        if (!ESPMemoryRead(vmMap, skel + kTreeOffs[t], hdr, sizeof(hdr))) continue;
+        uint64_t data = 0;
+        uint32_t count = 0, maxc = 0;
+        memcpy(&data, hdr, 8);
+        memcpy(&count, hdr + 8, 4);
+        memcpy(&maxc, hdr + 12, 4);
+        if (!ESPIsUserPtr(data) || count < 15 || count > (uint32_t)ESPOff_Bone_NumMax ||
+            maxc < count) continue;
+        if (!ESPMemoryRead(vmMap, data, tree, (size_t)count * ESPOff_BoneNodeSize)) continue;
+        BOOL good = YES;
+        for (uint32_t i = 0; i < count; i++) {
+            int32_t p = -1;
+            memcpy(&p, tree + (size_t)i * ESPOff_BoneNodeSize + 8, 4);
+            // parent phải đứng trước con (hoặc -1 cho root); ngược lại là rác.
+            if (p < -1 || p >= (int32_t)i) { good = NO; break; }
+        }
+        if (!good) continue;
+        for (uint32_t i = 0; i < count; i++) {
+            int32_t p = -1;
+            memcpy(&p, tree + (size_t)i * ESPOff_BoneNodeSize + 8, 4);
+            outParents[i] = (int)p;
+        }
+        *outCount = count;
+        return YES;
+    }
+    return NO;
+}
+
+// Đọc BoneSpaceTransforms @0xC98 và nhân dồn theo parent để ra component space.
+static BOOL ESPBoneComposeAt(uint64_t vmMap, uint64_t mesh, ESPVector *outPts,
+                             int *outCount, const char **whyOut) {
+    if (whyOut) *whyOut = "args";
+    if (!outPts || !outCount) return NO;
+    uint64_t data = 0;
+    uint32_t count = 0;
+    if (!ESPBoneArrayAt(vmMap, mesh, ESPOff_Mesh_BoneSpaceTransforms, &data, &count)) {
+        if (whyOut) *whyOut = "0xc98 header";
+        return NO;
+    }
+    int parents[ESPOff_Bone_NumMax];
+    uint32_t treeCount = 0;
+    if (!ESPBoneReadParents(vmMap, mesh, parents, &treeCount)) {
+        if (whyOut) *whyOut = "BoneTree/parents";
+        return NO;
+    }
+    uint32_t n = (count < treeCount) ? count : treeCount;
+    if (n < 15 || n > (uint32_t)ESPOff_Bone_NumMax) {
+        if (whyOut) *whyOut = "bone count";
+        return NO;
+    }
+    static thread_local uint8_t local[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
+    static thread_local uint8_t comp[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
+    if (!ESPMemoryRead(vmMap, data, local, (size_t)n * ESPOff_BoneTransformSize)) {
+        if (whyOut) *whyOut = "read 0xc98 data";
+        return NO;
+    }
+    uint8_t done[ESPOff_Bone_NumMax] = {0};
+    // BoneTree thường đã theo thứ tự parent trước con, nhưng lặp nhiều pass để
+    // chịu được rig có thứ tự lạ; không tiến bộ => cycle/layout sai.
+    uint32_t remaining = n;
+    for (uint32_t pass = 0; pass < n && remaining > 0; pass++) {
+        BOOL progressed = NO;
+        for (uint32_t i = 0; i < n; i++) {
+            if (done[i]) continue;
+            int p = parents[i];
+            if (p >= (int)n) {
+                if (whyOut) *whyOut = "parent index";
+                return NO;
+            }
+            if (p >= 0 && !done[p]) continue;
+            uint8_t *dst = comp + (size_t)i * ESPOff_BoneTransformSize;
+            const uint8_t *src = local + (size_t)i * ESPOff_BoneTransformSize;
+            if (p < 0) {
+                memcpy(dst, src, ESPOff_BoneTransformSize);
+            } else {
+                ESPTransformMul(comp + (size_t)p * ESPOff_BoneTransformSize, src, dst);
+            }
+            done[i] = 1;
+            remaining--;
+            progressed = YES;
+        }
+        if (!progressed) {
+            if (whyOut) *whyOut = "parent cycle";
+            return NO;
+        }
+    }
+    if (remaining != 0) {
+        if (whyOut) *whyOut = "parent order";
+        return NO;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        float x = 0, y = 0, z = 0;
+        const uint8_t *t = comp + (size_t)i * ESPOff_BoneTransformSize + ESPOff_Transform_Translation;
+        memcpy(&x, t + 0, 4);
+        memcpy(&y, t + 4, 4);
+        memcpy(&z, t + 8, 4);
+        // Một xương phụ (vũ khí/IK) xa hoặc NaN không được làm rơi cả skeleton:
+        // đánh dấu NaN, validator chỉ xét 17 khớp đã map nên vẫn nhận được.
+        if (!ESPFiniteV(x) || !ESPFiniteV(y) || !ESPFiniteV(z) ||
+            fabsf(x) > 400.0f || fabsf(y) > 400.0f || fabsf(z) > 400.0f) {
+            outPts[i] = (ESPVector){ NAN, NAN, NAN };
+            continue;
+        }
+        outPts[i] = (ESPVector){ x, y, z };
+    }
+    *outCount = (int)n;
+    if (whyOut) *whyOut = "ok";
+    return YES;
+}
+
+// Thử nhận 0xC98 (đã compose) với bảng tên hoặc 3 bảng index. Chỉ nhận khi
+// hình học qua validator — sai offset/layout thì fail, không vẽ rác.
+static BOOL ESPBoneTryComposedLocked(uint64_t vmMap, uint64_t mesh,
+                                     const int *nameMap, ESPVector *pts) {
+    if (!vmMap || !ESPIsUserPtr(mesh) || !pts) return NO;
+    int n = 0;
+    const char *why = NULL;
+    if (!ESPBoneComposeAt(vmMap, mesh, pts, &n, &why)) {
+        static CFAbsoluteTime s_logAt = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_logAt > 10.0) {
+            s_logAt = now;
+            ESPLog("bones compose: 0xc98 fail (%s) mesh=0x%llx",
+                   why ? why : "-", (unsigned long long)mesh);
+        }
+        return NO;
+    }
+    if (nameMap) {
+        int need = 0;
+        for (int i = 0; i < ESPBone_Count; i++) {
+            if (nameMap[i] + 1 > need) need = nameMap[i] + 1;
+        }
+        const char *whyMap = NULL;
+        if (need > 0 && need <= n && ESPBoneMapValidateEx(pts, n, nameMap, &whyMap)) {
+            g_espBoneOff = ESPOff_Mesh_BoneSpaceTransforms;
+            g_espBoneComposed.store(true);
+            memcpy(g_espBoneMap, nameMap, sizeof(g_espBoneMap));
+            g_espBoneBadTicks.store(0);
+            g_espBonesReady.store(true);
+            snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones 0xc98 name ok");
+            ESPLog("bones: offset=0xc98 COMPOSED NAME-MAP ok bones=%d", n);
+            return YES;
+        }
+    }
+    for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
+        const char *whyMap = NULL;
+        if (!ESPBoneMapValidateEx(pts, n, kESPBoneMaps[m], &whyMap)) {
+            if (m == ESP_BONE_MAP_COUNT - 1) {
+                static CFAbsoluteTime s_valLogAt = 0;
+                CFAbsoluteTime nowV = CFAbsoluteTimeGetCurrent();
+                if (nowV - s_valLogAt > 10.0) {
+                    s_valLogAt = nowV;
+                    ESPLog("bones compose: 0xc98 validate fail (%s) n=%d",
+                           whyMap ? whyMap : "-", n);
+                }
+            }
+            continue;
+        }
+        g_espBoneOff = ESPOff_Mesh_BoneSpaceTransforms;
+        g_espBoneComposed.store(true);
+        memcpy(g_espBoneMap, kESPBoneMaps[m], sizeof(g_espBoneMap));
+        g_espBoneBadTicks.store(0);
+        g_espBonesReady.store(true);
+        snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones 0xc98 map%d ok", m);
+        ESPLog("bones: offset=0xc98 COMPOSED map=%d bones=%d (auto-detect)", m, n);
+        return YES;
+    }
+    return NO;
 }
 
 // ---------------------------------------------------------------------------
@@ -2954,6 +3293,7 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
             ESPReadBoneLocals(vmMap, data, pts, need) &&
             ESPBoneMapValidateEx(pts, need, nameMap, &nameWhy)) {
             g_espBoneOff = off;
+            g_espBoneComposed.store(false);
             memcpy(g_espBoneMap, nameMap, sizeof(g_espBoneMap));
             g_espBoneBadTicks.store(0);
             g_espBonesReady.store(true);
@@ -2966,6 +3306,7 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
     for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
         if (!ESPBoneMapValidate(pts, n, kESPBoneMaps[m])) continue;
         g_espBoneOff = off;
+        g_espBoneComposed.store(false);
         memcpy(g_espBoneMap, kESPBoneMaps[m], sizeof(g_espBoneMap));
         g_espBoneBadTicks.store(0);
         g_espBonesReady.store(true); // store cuối: reader chỉ dùng cfg khi đã ready
@@ -3042,6 +3383,13 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     }
 
     static ESPVector pts[ESPOff_Bone_NumMax];
+    // 0) qblpack 2026-10-21: 0xCD0/0xCE0 bị game xoá (Num=0, Max=67). Thử
+    //    BoneSpaceTransforms 0xC98 + tự nhân ParentIndex trước — không cần
+    //    GNames. Validator hình học vẫn là chốt cuối, sai layout thì fail.
+    if (ESPBoneTryComposedLocked(vmMap, mesh, haveNames ? nameMap : NULL, pts)) {
+        s_failTries = 0;
+        return YES;
+    }
     // 1) Offset đã xác nhận từ DUMP: component space (0xCE0) trước, bone space
     //    (0xCD0) sau — validator sẽ loại cái sau nếu toạ độ không phải người.
     static const uint32_t kDumpOffsets[] = {
@@ -3164,29 +3512,49 @@ static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basi
     // Snapshot cấu hình (off/map) — nếu đổi world đúng lúc này thì frame này có
     // thể lệch; bounds check bên dưới chặn đọc sai, box vẫn vẽ bình thường.
     const uint32_t boneOff = g_espBoneOff;
+    BOOL composed = g_espBoneComposed.load();
     int boneMap[ESPBone_Count];
     memcpy(boneMap, g_espBoneMap, sizeof(boneMap));
-    uint64_t data = 0;
-    uint32_t count = 0;
-    if (!ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
-    int need = 0;
-    for (int i = 0; i < ESPBone_Count; i++) {
-        if (boneMap[i] + 1 > need) need = boneMap[i] + 1;
+    ESPVector locals[ESPBone_Count];
+    BOOL have[ESPBone_Count];
+    memset(have, 0, sizeof(have));
+    if (composed) {
+        // 0xC98 là bone space: đọc cả mảng + nhân dồn parent mỗi frame.
+        ESPVector pts[ESPOff_Bone_NumMax];
+        int n = 0;
+        if (!ESPBoneComposeAt(vmMap, mesh, pts, &n, NULL)) return 0;
+        for (int i = 0; i < ESPBone_Count; i++) {
+            int bi = boneMap[i];
+            if (bi < 0 || bi >= n) continue;
+            locals[i] = pts[bi];
+            have[i] = YES;
+        }
+    } else {
+        uint64_t data = 0;
+        uint32_t count = 0;
+        if (!ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
+        int need = 0;
+        for (int i = 0; i < ESPBone_Count; i++) {
+            if (boneMap[i] + 1 > need) need = boneMap[i] + 1;
+        }
+        if (need <= 0 || (uint32_t)need > count || need > (int)ESPOff_Bone_NumMax) return 0;
+        uint8_t buf[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
+        if (!ESPMemoryRead(vmMap, data, buf, (size_t)need * ESPOff_BoneTransformSize)) return 0;
+        for (int i = 0; i < ESPBone_Count; i++) {
+            int bi = boneMap[i];
+            if (bi < 0 || bi >= need) continue;
+            memcpy(&locals[i], buf + (size_t)bi * ESPOff_BoneTransformSize + ESPOff_Transform_Translation, sizeof(ESPVector));
+            if (!ESPFiniteV(locals[i].x) || !ESPFiniteV(locals[i].y) || !ESPFiniteV(locals[i].z)) continue;
+            have[i] = YES;
+        }
     }
-    if (need <= 0 || (uint32_t)need > count || need > (int)ESPOff_Bone_NumMax) return 0;
-    uint8_t buf[ESPOff_Bone_NumMax * ESPOff_BoneTransformSize];
-    if (!ESPMemoryRead(vmMap, data, buf, (size_t)need * ESPOff_BoneTransformSize)) return 0;
     uint8_t c2w[0x30];
     if (!ESPMemoryRead(vmMap, mesh + ESPOff_Comp_ComponentToWorld, c2w, sizeof(c2w))) return 0;
     int ok = 0;
     for (int i = 0; i < ESPBone_Count; i++) {
-        int bi = boneMap[i];
-        if (bi < 0 || bi >= need) continue;
-        ESPVector local;
-        memcpy(&local, buf + (size_t)bi * ESPOff_BoneTransformSize + ESPOff_Transform_Translation, sizeof(local));
-        if (!ESPFiniteV(local.x) || !ESPFiniteV(local.y) || !ESPFiniteV(local.z)) continue;
+        if (!have[i]) continue;
         ESPVector w;
-        ESPBoneWorldFromLocal(c2w, &local, &w);
+        ESPBoneWorldFromLocal(c2w, &locals[i], &w);
         float sx = 0, sy = 0;
         if (!ESPCamBasisProject(basis, w, &sx, &sy, NULL)) continue;
         box->bones[i].x = sx;

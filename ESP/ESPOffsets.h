@@ -47,6 +47,8 @@ static const uint32_t ESPOff_UWorld_Levels             = 0x440; // TArray<ULevel
 // ~100 phần tử nên có box trong <1s. Actor array vẫn được quét lát để bắt
 // hình nhân huấn luyện (kind 3) và làm fallback khi PlayerArray hỏng.
 static const uint32_t ESPOff_UWorld_GameState        = 0x428;
+static const uint32_t ESPOff_UWorld_AuthorityGameMode = 0x420; // fallback: GameMode->GameState
+static const uint32_t ESPOff_GameMode_GameState       = 0x508; // AGameModeBase::GameState
 static const uint32_t ESPOff_GameState_PlayerArray   = 0x4C8;
 static const uint32_t ESPOff_PlayerState_PawnPrivate = 0x528;
 static const uint32_t ESPOff_PlayerState_IsABot      = 0x4DC;
@@ -150,6 +152,15 @@ static const uint32_t ESPOff_PC_LocalPawn = 0x28D8; // ASTExtraPlayerController-
 // Dải quét cũ vẫn giữ làm fallback nếu bản game sau dời field.
 static const uint32_t ESPOff_Mesh_BoneCompSpace = 0xCE0; // DUMP: CachedComponentSpaceTransforms
 static const uint32_t ESPOff_Mesh_BoneBoneSpace = 0xCD0; // DUMP: CachedBoneSpaceTransforms
+// qblpack (log 2026-10-21): trên build đang chạy, 0xCD0/0xCE0 có Num=0
+// (Max=67) — game xoá sau khi skin. Hai mảng transient nằm trong khoảng trống
+// DUMP không liệt kê (0xC98..0xCD0), đúng thứ tự UE4:
+//   0xC98 = BoneSpaceTransforms      (Num=67, local/parent space)
+//   0xCA8 = ComponentSpaceTransforms (Num=44, required-bone subset)
+// Vì 0xCA8 bị compact theo RequiredBones nên index không khớp skeleton; dùng
+// 0xC98 rồi tự nhân ma trận theo ParentIndex trong USkeleton.BoneTree.
+static const uint32_t ESPOff_Mesh_BoneSpaceTransforms = 0xC98;
+static const uint32_t ESPOff_Mesh_ComponentSpaceTransforms = 0xCA8;
 static const uint32_t ESPOff_Mesh_BoneScanStart = 0x400; // fallback: đầu vùng nghi TArray<FTransform>
 static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xF00; // qblpack: phủ cả 0xCD0/0xCE0 và field dời sau đó
 static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale

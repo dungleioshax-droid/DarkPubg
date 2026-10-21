@@ -41,6 +41,8 @@ Quét 8000 actor để tìm player rất chậm khi page cache lạnh (mỗi act
 
 - `UWorld::GameState` `0x428` → `AGameStateBase::PlayerArray` `0x4C8`
   (`TArray<APlayerState*>`, Num ở `+8`) → `APlayerState::PawnPrivate` `0x528`.
+  Fallback khi `GameState` null: `UWorld::AuthorityGameMode` `0x420` →
+  `AGameModeBase::GameState` `0x508` (mode listen/training).
 - `APlayerState::bIsABot` là **bit 2** của byte `0x4DC` (cùng byte với
   `bIsSpectator` bit 0, `bOnlySpectator` bit 1) — dùng cho AIMark.
 - Scan phân loại player từ PlayerArray **trước**, rồi chỉ quét lát 2048 actor/lượt
@@ -50,6 +52,9 @@ Quét 8000 actor để tìm player rất chậm khi page cache lạnh (mỗi act
   tracked nhanh, không phụ thuộc vị trí trong actor array.
 - Log xác nhận: `fast players: N via PlayerArray` (mỗi world) và
   `scan stat: ms=.. actors=.. scanned=.. enemies=.. tracked=.. fast=N` (5s/lần).
+- Nếu `fast=0` mãi: log `fast diag:` + `fast diag[0/1]:` (1 lần/world) in raw
+  `world/gs/gm/gs2/data/count/ps0/pawn0/bot` để biết chết ở GameState hay
+  PlayerArray/PawnPrivate. Không đoán offset.
 
 ## Log chẩn đoán
 `Documents/ESP.log` (lấy qua Files app / Filza). Các dòng chính:
@@ -177,8 +182,16 @@ DUMP/SDK (`USkeletalMeshComponent`) xác nhận 2 mảng transform:
 
 | Offset | Field | Hệ quy chiếu |
 |---|---|---|
-| `0xCE0` | `CachedComponentSpaceTransforms` | component space (dùng cho ESP) |
-| `0xCD0` | `CachedBoneSpaceTransforms` | bone/parent space |
+| `0xCE0` | `CachedComponentSpaceTransforms` | component space (DUMP) |
+| `0xCD0` | `CachedBoneSpaceTransforms` | bone/parent space (DUMP) |
+| `0xC98` | `BoneSpaceTransforms` (transient, DUMP không liệt kê) | bone/parent space, Num=67 |
+| `0xCA8` | `ComponentSpaceTransforms` (transient) | component space, compact theo RequiredBones |
+
+Log thực tế 2026-10-21: `0xCE0/0xCD0` có `count=0 max=67` — game xoá `Cached*`
+sau khi skin. Hai mảng transient `0xC98/0xCA8` nằm trong khoảng trống
+`0xC98..0xCD0` mà DUMP không in ra. `0xCA8` bị compact (Num=44) nên index
+không khớp skeleton; engine đọc `0xC98` rồi **tự nhân dồn theo ParentIndex**
+trong `USkeleton.BoneTree` để ra component space — không cần GNames.
 
 `ComponentToWorld` = `0x208` (ngay sau `RelativeScale3D` `0x1FC`; SDK không liệt kê
 field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống tới `ComponentVelocity`
@@ -191,7 +204,11 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   Hỗ trợ cả tên kiểu `Bip01 L UpperArm`. Chỉ nhận khi **đủ 17 khớp** và validate
   hình học; fail mới fallback 3 bảng index cũ. **Lưu ý:** build hiện tại GNames
   không resolve được nên nhánh tên tự bỏ qua; skeleton đi bằng offset + bảng index.
-- Thử lần lượt `0xCE0` → `0xCD0`; nếu header không phải TArray thì quét
+- **Composed path (ưu tiên):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
+  (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
+  (UE `FTransform::Multiply`) rồi validate 3 bảng index. BoneTree được thử
+  `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index` cho mọi xương.
+- Fallback: thử lần lượt `0xCE0` → `0xCD0`; nếu header không phải TArray thì quét
   `mesh+[0x400..0xF00)` bước 8 (`ESPOff_Mesh_BoneScanStart/End`) — dải này đã
   phủ cả vùng `0xCD0/0xCE0` và các field có thể dời sau đó. Stride `0x30`.
 - **Backoff**: 3 lượt đầu thử mỗi 2s; sau đó 30s/lượt. Tránh đọc 352 offset
@@ -202,15 +219,16 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   20..80cm. `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
 - Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
   (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
-- Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0x<off> ok` /
+- Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0xc98 map0 ok` /
   `bones no-match` / `bones auto-off`.
 - Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
 - Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
-**Lưu ý:** log `bones: offset=0xce0 ... NAME-MAP ok` là kỳ vọng đúng với DUMP hiện
-tại. Nếu `bones no-match`, xem các dòng chẩn đoán (10s/lần):
+**Lưu ý:** nếu `bones no-match`, xem các dòng chẩn đoán (10s/lần):
+- `bones compose: 0xc98 fail` — không đọc được BoneSpaceTransforms/BoneTree,
+  hoặc parent index không hợp lệ.
 - `bones probe: 0xce0 data=... count=... max=...` — nếu `data=0/count=0` thì mảng
-  rỗng (mesh chưa pose / không phải master); nếu `count` vô lý thì offset sai.
+  rỗng (game đã xoá sau skin); `0xC98/0xCA8` là ứng viên thay thế.
 - `bones probe: 0xce0 p0=(...)...` — toạ độ thật để đối chiếu hệ quy chiếu.
 - `bones cand: off=... data=... count=...` — TArray 20..400 tìm thấy trong
   `0xC00..0xF00` (ứng viên offset mới).
