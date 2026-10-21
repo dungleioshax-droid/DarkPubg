@@ -3030,10 +3030,11 @@ static BOOL ESPBoneReadRefPose(uint64_t vmMap, uint64_t mesh, const int *parents
 // Dựng bảng index 17 khớp từ ref pose — KHÔNG cần GNames, không phụ thuộc
 // thứ tự xương hard-code. Đây là đường chính khi rig khác 4 bảng có sẵn.
 static BOOL ESPBoneAutoMapForMesh(uint64_t vmMap, uint64_t mesh,
-                                  int outMap[ESPBone_Count],
+                                  int outMap[ESPBone_Count], int *outCount,
                                   char *why, size_t whyCap) {
     if (why && whyCap) why[0] = '\0';
     if (!outMap) return NO;
+    if (outCount) *outCount = 0;
     int parents[ESPOff_Bone_NumMax];
     uint32_t treeCount = 0;
     if (!ESPBoneReadParents(vmMap, mesh, parents, &treeCount)) {
@@ -3047,6 +3048,7 @@ static BOOL ESPBoneAutoMapForMesh(uint64_t vmMap, uint64_t mesh,
         return NO;
     }
     if (!ESPBoneMapBuild(refPts, n, parents, outMap, why, (int)whyCap)) return NO;
+    if (outCount) *outCount = n; // số xương của skeleton: chỉ áp map cho mảng cùng cỡ
     return YES;
 }
 
@@ -3134,7 +3136,7 @@ static BOOL ESPBoneMapPlausible(const ESPVector *p, int n, const int *map,
 // khi hình học qua validator — sai offset/layout thì fail, không vẽ rác.
 static BOOL ESPBoneTryComposedLocked(uint64_t vmMap, uint64_t mesh,
                                      const int *nameMap, const int *autoMap,
-                                     ESPVector *pts) {
+                                     int autoCount, ESPVector *pts) {
     if (!vmMap || !ESPIsUserPtr(mesh) || !pts) return NO;
     int n = 0;
     const char *why = NULL;
@@ -3167,7 +3169,9 @@ static BOOL ESPBoneTryComposedLocked(uint64_t vmMap, uint64_t mesh,
     }
     // qblpack: bảng tự dò từ ref pose — không cần GNames, không phụ thuộc thứ
     // tự xương hard-code. Đây là đường cứu rig PUBG đổi clavicle/spine.
-    if (autoMap) {
+    // Chỉ áp bảng tự dò khi số xương khớp ĐÚNG skeleton đã dò: mảng compact
+    // (RequiredBones) có thứ tự khác, áp index full-skeleton vào sẽ lệch khớp.
+    if (autoMap && autoCount > 0 && n == autoCount) {
         const char *whyAuto = NULL;
         if (ESPBoneMapPlausible(pts, n, autoMap, &whyAuto)) {
             g_espBoneOff = ESPOff_Mesh_BoneSpaceTransforms;
@@ -3469,7 +3473,7 @@ static std::mutex g_espBoneCfgMutex;
 // xương (nếu có), nhận nếu khớp. Caller đã giữ g_espBoneCfgMutex.
 static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
                                    const int *nameMap, const int *autoMap,
-                                   ESPVector *pts) {
+                                   int autoCount, ESPVector *pts) {
     uint64_t data = 0;
     uint32_t count = 0;
     if (!ESPBoneArrayAt(vmMap, mesh, off, &data, &count)) return NO;
@@ -3506,7 +3510,7 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
 
     // qblpack: bảng tự dò từ ref pose (mảng component-space đầy đủ, cùng thứ tự
     // skeleton). Dùng validator lỏng vì pose hiện tại có thể khác ref pose.
-    if (autoMap) {
+    if (autoMap && autoCount > 0 && (int)count == autoCount) {
         int need = 0;
         for (int i = 0; i < ESPBone_Count; i++) {
             if (autoMap[i] + 1 > need) need = autoMap[i] + 1;
@@ -3611,12 +3615,14 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     // dò 1 lần/rig, các lượt configure sau gần như free. Đây là đường chính
     // khi rig không khớp 4 bảng hard-code (clavicle/spine khác thứ tự).
     int autoMap[ESPBone_Count];
+    int autoCount = 0;
     BOOL haveAuto = NO;
     {
         static uint64_t s_autoSkel = 0;
         static CFAbsoluteTime s_autoAt = 0;
         static BOOL s_autoOK = NO;
         static int s_autoMap[ESPBone_Count];
+        static int s_autoCount = 0;
         uint64_t skelMesh = 0, skel = 0;
         if (ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_SkeletalMesh, &skelMesh, 8) &&
             ESPIsUserPtr(skelMesh) &&
@@ -3624,10 +3630,11 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
             ESPIsUserPtr(skel)) {
             if (skel == s_autoSkel && s_autoAt > 0 && now - s_autoAt < 60.0) {
                 haveAuto = s_autoOK;
+                autoCount = s_autoCount;
                 if (haveAuto) memcpy(autoMap, s_autoMap, sizeof(autoMap));
             } else {
                 char whyAuto[48] = {0};
-                haveAuto = ESPBoneAutoMapForMesh(vmMap, mesh, autoMap,
+                haveAuto = ESPBoneAutoMapForMesh(vmMap, mesh, autoMap, &autoCount,
                                                  whyAuto, sizeof(whyAuto));
                 if (haveAuto) {
                     ESPLog("bones automap: ok skel=0x%llx head=%d neck=%d "
@@ -3649,6 +3656,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
                 s_autoSkel = skel;
                 s_autoAt = now;
                 s_autoOK = haveAuto;
+                s_autoCount = autoCount;
                 if (haveAuto) memcpy(s_autoMap, autoMap, sizeof(s_autoMap));
             }
         }
@@ -3659,7 +3667,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     //    BoneSpaceTransforms 0xC98 + tự nhân ParentIndex trước — không cần
     //    GNames. Validator hình học vẫn là chốt cuối, sai layout thì fail.
     if (ESPBoneTryComposedLocked(vmMap, mesh, haveNames ? nameMap : NULL,
-                                 haveAuto ? autoMap : NULL, pts)) {
+                                 haveAuto ? autoMap : NULL, autoCount, pts)) {
         s_failTries = 0;
         return YES;
     }
@@ -3675,7 +3683,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
         if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i],
                                    haveNames ? nameMap : NULL,
-                                   haveAuto ? autoMap : NULL, pts)) {
+                                   haveAuto ? autoMap : NULL, autoCount, pts)) {
             s_failTries = 0;
             return YES;
         }
@@ -3739,7 +3747,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
         // mảng rác gần như không thể qua. Nhờ vậy mảng xương dời offset vẫn dò ra.
         if (ESPBoneTryOffsetLocked(vmMap, mesh, off,
                                    haveNames ? nameMap : NULL,
-                                   haveAuto ? autoMap : NULL, pts)) {
+                                   haveAuto ? autoMap : NULL, autoCount, pts)) {
             s_failTries = 0;
             return YES;
         }
