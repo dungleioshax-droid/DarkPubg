@@ -74,6 +74,19 @@ static int ESPBoneMapChildOnPath(int anc, int target, int n, const int *parents)
     return -1;
 }
 
+// Số cạnh từ node lên root (root = 0). Dùng để loại xương IK gắn thẳng vào
+// root: ik_foot_l/ik_foot_r nằm ngang bàn chân nhưng chỉ sâu 2-3 cấp, còn
+// chân thật (thigh->calf->foot->ball) sâu >= 4.
+static int ESPBoneMapDepth(int node, int n, const int *parents) {
+    int d = 0;
+    int guard = 0;
+    while (node >= 0 && node < n && guard++ <= n) {
+        node = parents[node];
+        if (node >= 0) d++;
+    }
+    return d;
+}
+
 static int ESPBoneMapLCA(int a, int b, int n, const int *parents) {
     int guard = 0;
     int cur = a;
@@ -121,12 +134,13 @@ static int ESPBoneMapBuild(const ESPVector *p, int n, const int *parents,
     int a = -1, b = -1;
     for (int i = 0; i < n; i++) {
         if (ESPBoneMapChildCount(i, n, parents) != 0) continue;
-        if (p[i].z < -1e8f) continue;
+        if (ESPBoneMapDepth(i, n, parents) < 4) continue; // bỏ IK/cape gắn root
         if (a < 0 || p[i].z < p[a].z) a = i;
     }
     for (int i = 0; i < n; i++) {
         if (i == a) continue;
         if (ESPBoneMapChildCount(i, n, parents) != 0) continue;
+        if (ESPBoneMapDepth(i, n, parents) < 4) continue;
         if (fabsf(p[i].y - p[a].y) < 10.0f) continue;
         if (b < 0 || p[i].z < p[b].z) b = i;
     }
@@ -137,6 +151,18 @@ static int ESPBoneMapBuild(const ESPVector *p, int n, const int *parents,
     // 2) pelvis = tổ tiên chung của 2 chân; hông/gối = con trên đường xuống.
     int pelvis = ESPBoneMapLCA(a, b, n, parents);
     if (pelvis < 0 || pelvis == a || pelvis == b) ESP_BM_FAIL("pelvis");
+    // Chốt chống nhận nhầm chân: xương cao nhất (đầu/tóc) phải nằm trong cây
+    // con của pelvis. Nếu không (vd LCA của 2 xương IK gắn root) -> loại.
+    {
+        int top = -1;
+        float tz = -1e30f;
+        for (int i = 0; i < n; i++) {
+            if (p[i].z > tz) { tz = p[i].z; top = i; }
+        }
+        if (top < 0 || !ESPBoneMapIsAncestor(pelvis, top, n, parents)) {
+            ESP_BM_FAIL("pelvis subtree");
+        }
+    }
     int hipA = ESPBoneMapChildOnPath(pelvis, a, n, parents);
     int hipB = ESPBoneMapChildOnPath(pelvis, b, n, parents);
     if (hipA < 0 || hipB < 0 || hipA == hipB) ESP_BM_FAIL("hips");
