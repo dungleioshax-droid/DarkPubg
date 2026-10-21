@@ -3079,6 +3079,13 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
                                    g_qblWhiteColor, YES);
     uint64_t f = (slot % 2 == 0) ? g_qblFontMain : g_qblFontSmall;
     if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
+    // Vô hiệu hoá implicit animation trên CALayer của UILabel để triệt tiêu độ trễ
+    // và rung giật (jitter/vibration 250ms của UIKit) khi di chuyển hay quay camera.
+    uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
+    if (lbLayer) {
+        ds_remote_set_float_on_main(process, lbLayer, "setSpeed:", 1000.0f);
+    }
+    ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
     // QBL AddOutlinedText: UILabel không có stroke -> shadow đen, offset 0.
     // Dùng shadow của UILabel (2 call) thay shadow của layer (1 getter + 4
     // setter) để giảm mạnh thời gian tạo label; label nền clear + container
@@ -3394,7 +3401,7 @@ static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
 }
 
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
-                               CGPoint anchor) {
+                               CGPoint anchor, CFAbsoluteTime nowP) {
     if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
     // qblpack: anchor NaN/cực lớn (W2S lỗi) -> ẩn, không tạo label mới và
     // không setFrame với toạ độ điên (SpringBoard có thể respring vì path/rect).
@@ -3404,6 +3411,9 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         if (hidden && g_qblLabelShown[slot]) {
             ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
             g_qblLabelShown[slot] = NO;
+            g_qblLabelRectValid[slot] = NO;
+            g_qblLabelText[slot][0] = '\0';
+            g_qblLabelAt[slot] = 0;
         }
         return;
     }
@@ -3412,6 +3422,9 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         if (hidden && g_qblLabelShown[slot]) {
             ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
             g_qblLabelShown[slot] = NO;
+            g_qblLabelRectValid[slot] = NO;
+            g_qblLabelText[slot][0] = '\0';
+            g_qblLabelAt[slot] = 0;
         }
         return;
     }
@@ -3422,11 +3435,16 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         ds_remote_set_u64_on_main(process, lb, "setHidden:", 0);
         g_qblLabelShown[slot] = YES;
     }
-    if (strncmp(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1) != 0) {
+    BOOL textChanged = (strncmp(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1) != 0);
+    // Rate-limit setText tối đa 5Hz (0.2s) để tránh bão IPC mach làm nghẽn SpringBoard main thread (gây watchdog respring).
+    // Nếu text mới tạo (chưa có text) -> cập nhật ngay tức thì không delay.
+    BOOL textDue = textChanged && (g_qblLabelText[slot][0] == '\0' || nowP - g_qblLabelAt[slot] >= 0.2);
+    if (textDue) {
         NSString *s = [NSString stringWithUTF8String:c->text];
         if (s && ds_remote_set_text_on_main(process, lb, s)) {
             strncpy(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1);
             g_qblLabelText[slot][sizeof(g_qblLabelText[slot]) - 1] = '\0';
+            g_qblLabelAt[slot] = nowP;
         }
     }
     if (g_qblLabelColor[slot] != c->color) {
@@ -3440,10 +3458,12 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
+    // Ngưỡng >= 0.1pt: bám sát chuyển động liên tục của địch/camera 60 FPS,
+    // loại bỏ hiện tượng nhảy bước 0.5-1.0pt gây rung lắc chữ.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) > 0.5 ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) > 0.5 ||
-        fabs(g_qblLabelRect[slot].size.width - r.size.width) > 0.5) {
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.1 ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.1 ||
+        fabs(g_qblLabelRect[slot].size.width - r.size.width) >= 0.1) {
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
@@ -3455,8 +3475,8 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
-    // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
+    // ---- label pass (60Hz, chạy CẢ khi geometry không đổi) ----
+    // Geometry hash chỉ đổi khi rect/point đổi; label còn phụ thuộc
     // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
     // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
     static CFAbsoluteTime s_lastLabelPass = 0;
@@ -3479,14 +3499,20 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
             continue;
         }
         if (!g_qblLabelShown[t]) { labelWork = YES; break; }
-        if (strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0 ||
-            g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
+        if (c->text[0] &&
+            (g_qblLabelText[t][0] == '\0' || nowP - g_qblLabelAt[t] >= 0.2) &&
+            strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0) {
+            labelWork = YES;
+            break;
+        }
+        if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) > 0.5 ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) > 0.5 ||
-            fabs(g_qblLabelRect[t].size.width - lr.size.width) > 0.5) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.1 ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.1 ||
+            fabs(g_qblLabelRect[t].size.width - lr.size.width) >= 0.1) {
             labelWork = YES;
+            break;
         }
     }
     if (!labelWork) return;
@@ -3494,12 +3520,15 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     ds_remote_pool_begin(process);
     @try {
         for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
-            ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t]);
+            ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t], nowP);
         }
         for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
             if (g_qblLabelShown[t] && g_qblLabel[t]) {
                 ds_remote_set_u64_on_main(process, g_qblLabel[t], "setHidden:", 1);
                 g_qblLabelShown[t] = NO;
+                g_qblLabelRectValid[t] = NO;
+                g_qblLabelText[t][0] = '\0';
+                g_qblLabelAt[t] = 0;
             }
         }
     } @finally {
@@ -3620,11 +3649,12 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
                 anchor.x = MAX(-landW, MIN(anchor.x, landW * 2.0));
                 anchor.y = MAX(-landH, MIN(anchor.y, landH * 2.0));
             }
-            s_qblTextAnchor[slot] = ds_qbl_qpoint(anchor);
+            s_qblTextAnchor[slot] = anchor;
             uint64_t th = 1469598103934665603ULL;
             ds_qbl_hash_bytes(&th, c->text, sizeof(c->text));
             ds_qbl_hash_bytes(&th, &c->color, sizeof(c->color));
-            ds_qbl_hash_bytes(&th, &s_qblTextAnchor[slot], sizeof(CGPoint));
+            CGPoint qAnchor = ds_qbl_qpoint(anchor);
+            ds_qbl_hash_bytes(&th, &qAnchor, sizeof(CGPoint));
             s_qblTextHash[slot] = th;
             if (c->text[0] && !g_qblLabel[slot] && g_qblLabelFail[slot] < 3) missing = YES;
             s_qblTextCount++;
@@ -3699,9 +3729,8 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         ds_qbl_hash_bytes(&hash, &bucketHash[b], sizeof(uint64_t));
         if (used && !g_qblShape[b] && g_qblShapeFail[b] < 3) missing = YES;
     }
-    for (int t = 0; t < s_qblTextCount; t++) {
-        ds_qbl_hash_bytes(&hash, &s_qblTextHash[t], sizeof(uint64_t));
-    }
+    // s_qblTextHash không đưa vào hash geometry để text mét/khoảng cách thay đổi
+    // không ép dựng lại vector path; label pass riêng bên dưới tự xử lý text/anchor.
 
     // qblpack: geometry tối đa 60Hz (không hạ 30Hz nữa — log cho thấy present
     // chỉ 0.3..5ms sau khi ổn định; hạ tần số làm box/text giật). Cull/clamp
