@@ -2311,7 +2311,7 @@ static void *ds_remote_system_symbol(const char *name) {
 static void ds_esp_path_clear(RemoteCall *process) {
     g_espPathObj = 0;
     if (g_espPathLayer && process && process.trojanMem) {
-        ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
+        ds_remote_set_u64_on_main(process, g_espPathLayer, "setHidden:", 1);
     }
 }
 
@@ -2324,7 +2324,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
     static BOOL s_pathEmpty = NO;
     if (!pts || count <= 0) {
         if (!s_pathEmpty) {
-            ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
+            ds_remote_set_u64_on_main(process, g_espPathLayer, "setHidden:", 1);
             s_pathEmpty = YES;
             g_espPathObj = 0;
         }
@@ -2367,6 +2367,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
     if (releaseSym) {
         DSRemoteArbCallWithTimeout(1, process, releaseSym, path);
     }
+    ds_remote_set_u64_on_main(process, g_espPathLayer, "setHidden:", 0);
     g_espPathObj = 1;
     g_espPathCalls += 5;
     g_espPathBoxes += (unsigned long)count;
@@ -2817,7 +2818,7 @@ static uint64_t g_qblAIColor = 0;      // +yellowColor
 static uint64_t g_qblBlackColor = 0;   // +blackColor (shadow + HP nền)
 static uint64_t g_qblRedColor = 0;     // +redColor
 static uint64_t g_qblGreenColor = 0;   // +greenColor
-static uint64_t g_qblShadowCG = 0;
+static uint64_t g_qblNoAnimActions = 0; // actions dict [NSNull null] để triệt tiêu mọi CABasicAnimation
 static uint64_t g_qblFontMain = 0;     // font riêng 13pt (retained)
 static uint64_t g_qblFontSmall = 0;
 static BOOL g_qblStyleOK = NO;
@@ -2874,7 +2875,7 @@ static void ds_qbl_reset_remote(void) {
     g_qblBlackColor = 0;
     g_qblRedColor = 0;
     g_qblGreenColor = 0;
-    g_qblShadowCG = 0;
+    g_qblNoAnimActions = 0;
     g_qblFontMain = 0;
     g_qblFontSmall = 0;
     g_qblStyleOK = NO;
@@ -2928,13 +2929,22 @@ static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
 // setPath: + release creation reference ngay lập tức (layer tự giữ reference).
 static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
+    uint64_t layer = g_qblShape[bucket];
+    if (path == 0) {
+        // Nếu bucket không dùng: chỉ ẩn layer, KHÔNG gọi setPath: 0 để CoreAnimation
+        // không bao giờ phải interpolate hoặc giải phóng path NULL gây crash server render.
+        ds_remote_set_u64_on_main(process, layer, "setHidden:", 1);
+        g_qblShapePath[bucket] = 0;
+        return YES;
+    }
     void *rel = ds_remote_system_symbol("CGPathRelease");
-    BOOL setOk = ds_remote_set_u64_on_main(process, g_qblShape[bucket], "setPath:", path);
-    if (path && rel) {
+    BOOL setOk = ds_remote_set_u64_on_main(process, layer, "setPath:", path);
+    if (rel) {
         DSRemoteArbCallWithTimeout(1, process, rel, path);
     }
     if (!setOk) return NO;
-    g_qblShapePath[bucket] = path ? 1 : 0;
+    ds_remote_set_u64_on_main(process, layer, "setHidden:", 0);
+    g_qblShapePath[bucket] = 1;
     return YES;
 }
 
@@ -2978,18 +2988,31 @@ static BOOL ds_qbl_style_ready(RemoteCall *process) {
     }
     if (!g_qblFontSmall) g_qblFontSmall = g_qblFontMain;
 
-    // Shadow text: CGColor của blackColor (getter, retain CF object).
-    if (!g_qblShadowCG && g_qblBlackColor) {
-        g_qblShadowCG = ds_remote_get_object_on_main(process, g_qblBlackColor, "CGColor");
-        if (g_qblShadowCG) {
-            void *cgRetain = ds_remote_system_symbol("CFRetain");
-            if (cgRetain) DSRemoteArbCallWithTimeout(1, process, cgRetain, g_qblShadowCG);
+    // Tạo dictionary actions chứa [NSNull null] để tắt sạch mọi CABasicAnimation
+    // của CoreAnimation trên CAShapeLayer và UILabel, triệt tiêu nguy cơ crash render server.
+    if (!g_qblNoAnimActions) {
+        uint64_t nullClass = ds_remote_class(process, "NSNull");
+        uint64_t nullObj = ds_remote_get_retained_object_noarg_on_main(process, nullClass, "null");
+        uint64_t dictClass = ds_remote_class(process, "NSMutableDictionary");
+        uint64_t dict = remote_msg(process, dictClass, ds_remote_sel(process, "dictionary"), 0, 0, 0, 0);
+        if (dict && nullObj) {
+            remote_msg(process, dict, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
+            const char *keys[] = { "path", "bounds", "position", "frame", "contents", "hidden", "fillColor", "strokeColor", "lineWidth" };
+            uint64_t setObjSel = ds_remote_sel(process, "setObject:forKey:");
+            for (int i = 0; i < 9; i++) {
+                uint64_t keyStr = ds_remote_create_string(process, [NSString stringWithUTF8String:keys[i]]);
+                if (keyStr) {
+                    remote_msg(process, dict, setObjSel, nullObj, keyStr, 0, 0);
+                    remote_msg(process, keyStr, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+                }
+            }
+            g_qblNoAnimActions = dict;
         }
     }
     g_qblStyleOK = YES;
     g_qblStyleFails = 0;
-    ESPLog("qbl style ok shadow=%d font=%d small=%d ai=%d green=%d red=%d",
-           g_qblShadowCG ? 1 : 0, g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0,
+    ESPLog("qbl style ok noAnim=%d font=%d small=%d ai=%d green=%d red=%d",
+           g_qblNoAnimActions ? 1 : 0, g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0,
            g_qblAIColor ? 1 : 0, g_qblGreenColor ? 1 : 0, g_qblRedColor ? 1 : 0);
     return YES;
 }
@@ -3018,20 +3041,25 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
         if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
         return 0;
     }
+    if (g_qblNoAnimActions) {
+        ds_remote_set_u64_on_main(process, layer, "setActions:", g_qblNoAnimActions);
+    }
     ds_remote_set_rect_on_main(process, layer, "setFrame:", g_qblRootFrame);
-    ds_remote_set_float_on_main(process, layer, "setSpeed:", 1000.0f);
+    ds_remote_set_u64_on_main(process, layer, "setHidden:", 1);
     ds_remote_set_double_on_main(process, layer, "setLineWidth:", (double)ds_qbl_bucket_width(bucket));
     // CAShapeLayer nhận CGColorRef -> lấy từ UIColor singleton (getter, không
     // retain CF; cùng pattern setBorderColor:/setStrokeColor: của renderer cũ).
     uint64_t color = ds_qbl_color_for_bucket(bucket);
     uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
-    if (cg) {
-        if (ds_qbl_bucket_stroked(bucket)) {
-            ds_remote_set_u64_on_main(process, layer, "setStrokeColor:", cg);
-        }
-        if (ds_qbl_bucket_filled(bucket)) {
-            ds_remote_set_u64_on_main(process, layer, "setFillColor:", cg);
-        }
+    if (ds_qbl_bucket_stroked(bucket)) {
+        if (cg) ds_remote_set_u64_on_main(process, layer, "setStrokeColor:", cg);
+    } else {
+        ds_remote_set_u64_on_main(process, layer, "setStrokeColor:", 0);
+    }
+    if (ds_qbl_bucket_filled(bucket)) {
+        if (cg) ds_remote_set_u64_on_main(process, layer, "setFillColor:", cg);
+    } else {
+        ds_remote_set_u64_on_main(process, layer, "setFillColor:", 0);
     }
     if (!ds_perform_on_springboard_main(process, g_qblRootLayer, addSublayer, layer, YES)) {
         if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
@@ -3085,8 +3113,8 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
     // Vô hiệu hoá implicit animation trên CALayer của UILabel để triệt tiêu độ trễ
     // và rung giật (jitter/vibration 250ms của UIKit) khi di chuyển hay quay camera.
     uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
-    if (lbLayer) {
-        ds_remote_set_float_on_main(process, lbLayer, "setSpeed:", 1000.0f);
+    if (lbLayer && g_qblNoAnimActions) {
+        ds_remote_set_u64_on_main(process, lbLayer, "setActions:", g_qblNoAnimActions);
     }
     ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
     // QBL AddOutlinedText: UILabel không có stroke -> shadow đen, offset 0.
@@ -3281,11 +3309,11 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
         }
 
         // Thanh máu trái box, fill mọc từ đáy (giống bản per-box cũ).
+        // Bỏ hoàn toàn nền đen theo yêu cầu người dùng ("bỏ cái nền đen đi luôn").
         if (f->health && b->health >= 0 && b->health <= 100 && bh >= 8.0f) {
-            CGFloat barW = 5.0f, pad = 4.0f;
+            CGFloat barW = 4.0f, pad = 4.0f;
             CGFloat barX = bx - barW - pad;
             CGFloat fillH = bh * ((float)b->health) / 100.0f;
-            ESPDrawAddRect(CGRectMake(barX, by, barW, bh), kQBLColorHpBg, 1.0f, kQBLBucketHpBg, YES);
             if (fillH > 0.5f) {
                 int bk = (b->health < 30) ? kQBLBucketHpRed
                        : (b->health < 60) ? kQBLBucketHpYellow : kQBLBucketHpGreen;
