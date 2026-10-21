@@ -231,15 +231,19 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   đi ra theo ±Y (bỏ clavicle khi chuỗi >= 4 xương). Dùng ref pose nên **không
   phụ thuộc pose đang chơi** (nằm/ngồi/leo) và **không cần GNames**; map được
   cache 60s theo USkeleton. Đây là đường chính khi rig lệch 4 bảng hard-code.
-- **Live path (kernrw69):** từ bản build này engine đọc **bone space live**
-  (`ESPOff_Mesh_BoneSpace`, `0xC98`/`0xC88`) thay vì compose ref pose:
-  ma trận 4x4 của mỗi joint ở frame hiện tại đã là component space — `S =
-  S_parent × S_joint`, validate qua `|det(S)| ∈ [0.2..2.4]` (bỏ quaternion
-  rác/giả lập) và bảng tự dò `ESPBoneMap.h`. Trên log bạn sẽ thấy thay cho
-  `bones automap: skip (ref pose)` là `bones live: skip (<lý do>)` hoặc
-  `bones: offset=0xc98 LIVE ok …` — ref-pose compose chỉ còn dùng làm fallback
-  khi không đọc được bone space.
-- **Composed path (fallback):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
+- **Ref pose đa-offset + fallback LIVE-POSE (kernrw69):** `ESPBoneReadRefPose`
+  không còn dừng ở 1 offset `0x40`: thử `USkeleton.RefLocalPoses` (nới lỏng
+  count), quét `kSkelScan[]` quanh nó — ứng viên chỉ accept khi **đúng số
+  xương của BoneTree** (lệch là TArray khác như notifies/sockets) — rồi quét
+  tiếp trên **USkeletalMesh asset** (`FReferenceSkeleton.RefPose` nằm ở asset,
+  không ở component). Nếu ref pose vẫn không đọc được (build bị xoá/dời như
+  `0xCD0/0xCE0`) thì `ESPBoneAutoMapFromLive` dựng bảng index từ **pose hiện
+  tại**: 0xC98 compose xong (đường engine vẫn dùng để vẽ) + `ESPBoneMapBuild`
+  + validator tỉ lệ `ESPBoneMapPlausible` (chỉ độ dài xương, bỏ thứ tự Z nên
+  đứng/đi/chạy đều pass; nằm/ngồi xộm trả NO — không vẽ bảng sai). Log:
+  `bones automap: LIVE-POSE ok skel=0x… n=… head=…` hoặc
+  `bones automap: skip (<refpose> | live <lý do>)`.
+- **Composed path (ưu tiên):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
   (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
   (UE `FTransform::Multiply`) rồi validate bảng tự dò / bảng tên / 4 bảng index.
   BoneTree được thử `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index`.
