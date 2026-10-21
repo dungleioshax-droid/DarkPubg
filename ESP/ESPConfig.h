@@ -51,7 +51,7 @@
 #define ESP_PROVIDER_DEGRADED_BUDGET 4
 
 // Nhịp cập nhật VỊ TRÍ label mét (Hz)
-#define ESP_OVERLAY_LABEL_HZ 15
+#define ESP_OVERLAY_LABEL_HZ 60
 
 // Nhịp PRESENT lên SpringBoard: 60Hz đồng bộ 60 FPS mượt mà không khựng giật
 #define ESP_PRESENT_HZ 60

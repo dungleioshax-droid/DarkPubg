@@ -253,8 +253,8 @@ static dispatch_group_t g_networkWarmupGroup = nil;
 static const NSTimeInterval kDSNetworkWarmupTimeout = 180.0;
 static const NSTimeInterval kDSNetworkRetryDelay = 3.0;
 
-static const uint64_t kDSRemoteTextScratchOffset = 0x1000;
-static const size_t kDSRemoteTextScratchCapacity = 0x800;
+static const uint64_t kDSRemoteTextScratchOffset = 0x200;
+static const size_t kDSRemoteTextScratchCapacity = 0x580;
 
 // --- Breadcrumb chẩn đoán respring -----------------------------------------
 // Triệu chứng: bấm OPEN HUD, progress đạt 100% rồi máy respring NGAY, HUD chưa
@@ -2305,7 +2305,7 @@ static void ds_esp_path_clear(RemoteCall *process) {
         g_espPathObj = 0;
     }
     if (g_espPathLayer && process && process.trojanMem) {
-        ds_perform_on_springboard_main(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), 0, YES);
+        ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
     }
 }
 
@@ -2318,8 +2318,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
     static BOOL s_pathEmpty = NO;
     if (!pts || count <= 0) {
         if (!s_pathEmpty) {
-            ds_perform_on_springboard_main(process, g_espPathLayer,
-                                           ds_remote_sel(process, "setPath:"), 0, YES);
+            ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
             s_pathEmpty = YES;
             if (g_espPathObj) {
                 void *relSym = ds_remote_system_symbol("CGPathRelease");
@@ -2360,7 +2359,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
         return NO;
     }
     DSRemoteArbCallWithTimeout(1, process, addSym, path, 0, g_espRectsAddr, (uint64_t)count);
-    ds_perform_on_springboard_main(process, g_espPathLayer, ds_remote_sel(process, "setPath:"), path, YES);
+    ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", path);
     if (g_espPathObj && releaseSym) {
         DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
     }
@@ -2544,7 +2543,7 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         ds_remote_set_double_on_main(process, layer, "setBorderWidth:", kDSESPBorder);
         // kernrw49: viền box màu TRẮNG (giống Kernel Box4Line ai ImColor(255,255,255))
         uint64_t cgColor = ds_remote_get_u64_on_main(process, white, "CGColor");
-        if (cgColor) ds_perform_on_springboard_main(process, layer, ds_remote_sel(process, "setBorderColor:"), cgColor, YES);
+        if (cgColor) ds_remote_set_u64_on_main(process, layer, "setBorderColor:", cgColor);
         // Tắt implicit animation bằng cách đặt speed rất cao (999.0) để animation kết thúc tức thì
         ds_remote_set_double_on_main(process, layer, "setSpeed:", 999.0);
         
@@ -2622,8 +2621,8 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
         if (pl && ds_remote_invoke_noarg_on_main(process, pl, "init")) {
             uint64_t clearLayer = ds_remote_get_u64_on_main(process, clear, "CGColor");
             uint64_t redLayer = ds_remote_get_u64_on_main(process, red, "CGColor");
-            if (redLayer) ds_perform_on_springboard_main(process, pl, ds_remote_sel(process, "setStrokeColor:"), redLayer, YES);
-            if (clearLayer) ds_perform_on_springboard_main(process, pl, ds_remote_sel(process, "setFillColor:"), clearLayer, YES);
+            if (redLayer) ds_remote_set_u64_on_main(process, pl, "setStrokeColor:", redLayer);
+            if (clearLayer) ds_remote_set_u64_on_main(process, pl, "setFillColor:", clearLayer);
             ds_remote_set_double_on_main(process, pl, "setLineWidth:", kDSESPBorder);
             ds_remote_set_double_on_main(process, pl, "setSpeed:", 999.0);
             ds_remote_set_rect_on_main(process, pl, "setFrame:", portraitBounds);
@@ -2925,8 +2924,7 @@ static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
 // setPath: + release path cũ (path mới do layer giữ).
 static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
-    if (!ds_perform_on_springboard_main(process, g_qblShape[bucket],
-                                        ds_remote_sel(process, "setPath:"), path, YES)) {
+    if (!ds_remote_set_u64_on_main(process, g_qblShape[bucket], "setPath:", path)) {
         if (path) {
             void *rel = ds_remote_system_symbol("CGPathRelease");
             if (rel) DSRemoteArbCallWithTimeout(1, process, rel, path);
@@ -3026,12 +3024,10 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
     uint64_t cg = color ? ds_remote_get_object_on_main(process, color, "CGColor") : 0;
     if (cg) {
         if (ds_qbl_bucket_stroked(bucket)) {
-            ds_perform_on_springboard_main(process, layer, ds_remote_sel(process,
-                "setStrokeColor:"), cg, YES);
+            ds_remote_set_u64_on_main(process, layer, "setStrokeColor:", cg);
         }
         if (ds_qbl_bucket_filled(bucket)) {
-            ds_perform_on_springboard_main(process, layer, ds_remote_sel(process,
-                "setFillColor:"), cg, YES);
+            ds_remote_set_u64_on_main(process, layer, "setFillColor:", cg);
         }
     }
     if (!ds_perform_on_springboard_main(process, g_qblRootLayer, addSublayer, layer, YES)) {
@@ -3464,9 +3460,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
     // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
     static CFAbsoluteTime s_lastLabelPass = 0;
-    // qblpack: 30Hz (không phải 15Hz). 15Hz làm chữ trượt rõ khi player di
-    // chuyển; log present ổn định 0.3..5ms nên 30Hz vẫn an toàn.
-    if (nowP - s_lastLabelPass < (1.0 / 30.0)) return;
+    // qblpack: 60Hz đồng bộ với geometry — log present ổn định 0.3..5ms nên 60Hz mượt mà an toàn.
+    if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3713,7 +3708,7 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     // bên dưới mới là thứ chống path khổng lồ. Vẫn giữ mốc thời gian để có
     // thể hạ tải nếu sau này cần.
     static CFAbsoluteTime s_lastGeomPass = 0;
-    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0));
+    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0 - 0.004));
     BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
     BOOL deferGeometry = (!skipGeometry && !geomDue);
     if (skipGeometry || deferGeometry) {
@@ -4244,7 +4239,7 @@ ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
     // frame khi box di chuyển (>2pt) → CGPath alloc/release + malloc/write
     // mỗi tick → SpringBoard nghẽn -> lag. 10Hz đủ mượt cho đường kẻ.
     if (g_espPathLayer && (s_pathDirty || s_lastLineCount != s_linePtsCount) &&
-        nowP - s_lastPathUpdate >= (1.0 / 10.0)) {
+        nowP - s_lastPathUpdate >= (1.0 / 60.0 - 0.004)) {
         s_lastPathUpdate = nowP;
         s_lastLineCount = s_linePtsCount;
         if (!ds_esp_path_update(process, s_linePts, s_linePtsCount) && s_linePtsCount > 0) {
@@ -5152,8 +5147,11 @@ static void ds_register_hud_notifications(void) {
         // Keep the SpringBoard-hosted HUD above CoverSheet while locked.
         // Reapply the level during the transition because SpringBoard may
         // reorder its own windows as the lock scene becomes active.
-        ds_remote_set_double_on_main(g_springBoard, g_remoteWindow,
-                                     "setWindowLevel:", kDSHUDWindowLevel);
+        {
+            std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
+            ds_remote_set_double_on_main(g_springBoard, g_remoteWindow,
+                                         "setWindowLevel:", kDSHUDWindowLevel);
+        }
         if (!locked) {
             g_previousInput = 0;
             g_previousOutput = 0;
