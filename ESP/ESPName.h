@@ -20,6 +20,12 @@ uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase);
 // quét __DATA vài trăm ms, chỉ nên chạy trên queue scan nền.
 BOOL ESPUNameReady(uint64_t gameBase);
 
+// qblpack: bật/tắt bước quét __DATA tìm TNameEntryArray. Mặc định TẮT vì
+// trên build hiện tại bước này luôn fail, tốn ~5s và làm provider reset task
+// port (log: "UName scan: khong thay ..." + "PROVIDER degraded"). Chỉ bật khi
+// có offset GNames mới cần dò.
+void ESPNameSetScanEnabled(BOOL enabled);
+
 // Đọc tên instance của actor vào outName (tối đa 63 ký tự + null).
 // NO nếu fail. Dùng cache theo ID nên lần sau rẻ.
 BOOL ESPActorName(uint64_t vmMap, uint64_t uname, uint64_t actor, char outName[64]);

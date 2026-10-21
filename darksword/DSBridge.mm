@@ -3526,12 +3526,12 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         ds_qbl_hash_bytes(&hash, &s_qblTextHash[t], sizeof(uint64_t));
     }
 
-    // qblpack: geometry tối đa 30Hz. Trước đây hash đổi gần như mỗi frame khi
-    // player di chuyển -> mỗi frame tạo 5-10 CGPath + release path cũ +
-    // setPath: trong SpringBoard (60Hz). Đây là tải chính gây respring.
-    // KHÔNG cập nhật g_qblFrameHash khi bị throttle (nếu không sẽ mất update).
+    // qblpack: geometry tối đa 60Hz (không hạ 30Hz nữa — log cho thấy present
+    // chỉ 0.3..5ms sau khi ổn định; hạ tần số làm box/text giật). Cull/clamp
+    // bên dưới mới là thứ chống path khổng lồ. Vẫn giữ mốc thời gian để có
+    // thể hạ tải nếu sau này cần.
     static CFAbsoluteTime s_lastGeomPass = 0;
-    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 30.0));
+    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0));
     BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
     BOOL deferGeometry = (!skipGeometry && !geomDue);
     if (skipGeometry || deferGeometry) {
@@ -3542,15 +3542,14 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         g_qblFrames++;
     }
 
-    // ---- label pass (15Hz, chạy CẢ khi geometry không đổi) ----
+    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
     // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
     // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
     // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
     static CFAbsoluteTime s_lastLabelPass = 0;
-    // qblpack: 15Hz thay vì 30Hz. Label di chuyển theo box nên mỗi lần chạy
-    // có thể setFrame 16 UILabel; 30Hz x 16 = 480 RemoteCall/s làm main thread
-    // SpringBoard nghẽn. 15Hz vẫn mượt với text, giảm một nửa tải.
-    if (nowP - s_lastLabelPass >= (1.0 / 15.0)) {
+    // qblpack: 30Hz (không phải 15Hz). 15Hz làm chữ trượt rõ khi player di
+    // chuyển; log present ổn định 0.3..5ms nên 30Hz vẫn an toàn.
+    if (nowP - s_lastLabelPass >= (1.0 / 30.0)) {
         BOOL labelWork = NO;
         for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
             if (t >= s_qblTextCount) {
@@ -3603,11 +3602,12 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     }
 
     static CFAbsoluteTime s_lastStatLog = 0;
+    static double s_lastWorkMs = 0;
     if (nowP - s_lastStatLog > 5.0) {
         s_lastStatLog = nowP;
-        ESPLog("qbl present: frames=%lu skips=%lu cmds=%d texts=%d pts=%d missing=%d bones=%s",
+        ESPLog("qbl present: frames=%lu skips=%lu cmds=%d texts=%d pts=%d missing=%d work=%.1fms bones=%s",
                g_qblFrames, g_qblSkips, ncmds, s_qblTextCount, s_qblPtCount,
-               missing ? 1 : 0, ESPEngineBonesStatus());
+               missing ? 1 : 0, s_lastWorkMs, ESPEngineBonesStatus());
     }
 
     // ---- gom rect + point vào 1 buffer remote (1 write/frame) ----
@@ -3693,6 +3693,7 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     } @finally {
         ds_remote_pool_end(process);
     }
+    s_lastWorkMs = (CFAbsoluteTimeGetCurrent() - nowP) * 1000.0;
     if (!process.trojanMem) {
         static CFAbsoluteTime s_lastDeadLog = 0;
         if (nowP - s_lastDeadLog > 1.0) {

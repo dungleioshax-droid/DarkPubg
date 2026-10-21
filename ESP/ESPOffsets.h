@@ -136,8 +136,8 @@ static const uint32_t ESPOff_PC_LocalPawn = 0x28D8; // ASTExtraPlayerController-
 // Dải quét cũ vẫn giữ làm fallback nếu bản game sau dời field.
 static const uint32_t ESPOff_Mesh_BoneCompSpace = 0xCE0; // DUMP: CachedComponentSpaceTransforms
 static const uint32_t ESPOff_Mesh_BoneBoneSpace = 0xCD0; // DUMP: CachedBoneSpaceTransforms
-static const uint32_t ESPOff_Mesh_BoneScanStart = 0x480; // fallback: đầu vùng nghi TArray<FTransform>
-static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xC00; // fallback: cuối vùng (kết thúc trước 0xC00)
+static const uint32_t ESPOff_Mesh_BoneScanStart = 0x400; // fallback: đầu vùng nghi TArray<FTransform>
+static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xF00; // qblpack: phủ cả 0xCD0/0xCE0 và field dời sau đó
 static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale
 static const uint32_t ESPOff_Bone_NumMax        = 256;   // skeleton thật có thể >40 khớp (tên xương)
 

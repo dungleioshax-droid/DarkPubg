@@ -136,15 +136,21 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
 - **Chữ to**: QBL từng mượn font HUD (24pt, custom 14..40) cho rect 180×32/84×15 →
   tràn + nhoè. Giờ style tạo font riêng 13pt/11pt (retained, không factory color);
   HUD font chỉ còn là fallback. Log `qbl style ok ... font=... small=...`.
-- **Respring**: nghi do tải dồn lên main thread SpringBoard khi path/label đổi liên
-  tục. Giảm tải:
-  - geometry tối đa **30Hz** (trước 60Hz), label pass **15Hz** (trước 30Hz);
-  - object mới **1 shape + 1 label/tick**, root tạo ở tick riêng trước khi style;
-  - cull rect/text/polyline theo viewport (margin 64pt), clamp toạ độ ±3× viewport,
-    bỏ NaN, rect < 0.5pt hoặc > 3× màn hình;
-  - label anchor NaN/|x|>20000 → ẩn, không setFrame;
-  - log từng phase (`qbl phase: root create/style/shape N/label N`) + stat 5s
-    (`qbl present: frames=... bones=...`) để khoanh vùng nếu còn respring.
+- **Khởi động chậm ~10s**: log cho thấy `ESPResolveUName` quét `__DATA` tìm GNames
+  tốn ~5s, làm provider reset task port (`PROVIDER degraded fails=32`) → mọi read
+  đứng hình, label/style không chạy. Build này GNames vốn không resolve được nên
+  quét là vô ích:
+  - **Tắt mặc định** bước quét `__DATA` (`ESPNameSetScanEnabled`, mặc định NO);
+  - fail UName được **nghi 60s** (không quét/đọc lại mỗi 2s);
+  - đường dò xương **không còn gọi `ESPResolveUName`** (trước đây chính nó kích
+    hoạt quét 5s dù đã có địch).
+- **Giật**: geometry/label từng bị hạ 30/15Hz nên box/chữ trượt rõ. Log sau khi
+  ổn định cho thấy present chỉ 0.3..5ms, nên trả lại **geometry 60Hz, label 30Hz**;
+  cull/clamp/NaN vẫn giữ để chống path khổng lồ.
+- **Object mới**: vẫn **1 shape + 1 label/tick**, root tạo tick riêng trước style.
+- **Đo tải**: stat 5s thêm `work=...ms` (thời gian batch present trước) để biết
+  khi nào thật sự cần hạ tần số.
+- **Log phase**: `qbl phase: root create/style/shape N/label N`.
 
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
@@ -163,15 +169,18 @@ DUMP/SDK (`USkeletalMeshComponent`) xác nhận 2 mảng transform:
 field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống tới `ComponentVelocity`
 `0x2C0`). Engine vẫn **validate runtime** trước khi dùng:
 
-- **Bảng theo TÊN xương trước** (qblpack): đọc `mesh+0xA20` → `SkeletalMesh`,
+- **Bảng theo TÊN xương** (qblpack): đọc `mesh+0xA20` → `SkeletalMesh`,
   `+0x48` → `USkeleton`, `+0x30` → `BoneTree` (`TArray<FBoneNode>`, stride `0x10`),
   resolve FName qua GNames và khớp 17 khớp (`head`, `neck`, `spine_03`, `pelvis`,
   `upperarm_l/r`, `lowerarm_l/r`, `hand_l/r`, `thigh_l/r`, `calf_l/r`, `foot_l/r`).
   Hỗ trợ cả tên kiểu `Bip01 L UpperArm`. Chỉ nhận khi **đủ 17 khớp** và validate
-  hình học; fail mới fallback 3 bảng index cũ.
-- Thử lần lượt `0xCE0` → `0xCD0`; nếu không khớp mới quét dải cũ
-  `mesh+[0x480..0xC00)` bước 8 làm fallback (`ESPOff_Mesh_BoneScanStart/End`).
-  Stride `0x30` (`ESPOff_BoneTransformSize`).
+  hình học; fail mới fallback 3 bảng index cũ. **Lưu ý:** build hiện tại GNames
+  không resolve được nên nhánh tên tự bỏ qua; skeleton đi bằng offset + bảng index.
+- Thử lần lượt `0xCE0` → `0xCD0`; nếu header không phải TArray thì quét
+  `mesh+[0x400..0xF00)` bước 8 (`ESPOff_Mesh_BoneScanStart/End`) — dải này đã
+  phủ cả vùng `0xCD0/0xCE0` và các field có thể dời sau đó. Stride `0x30`.
+- **Backoff**: 3 lượt đầu thử mỗi 2s; sau đó 30s/lượt. Tránh đọc 352 offset
+  liên tục trên queue nền khi offset chưa đúng (nguồn giật).
 - Với mỗi ứng viên thử bảng tên + 3 bảng index khớp phổ biến (UE4 mannequin + 2
   biến thể rig) và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay
   15..45cm, chân 25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau
@@ -184,10 +193,13 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
 - Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
 **Lưu ý:** log `bones: offset=0xce0 ... NAME-MAP ok` là kỳ vọng đúng với DUMP hiện
-tại. Nếu toàn `bones no-match` thì gửi log; các dòng chẩn đoán cần xem:
-`bones names: no SkeletalMesh` / `no USkeleton` / `GNames chua san sang` /
-`tree=... resolved=...` (khớp tên), `bones names: off=... count=... need=... why=...`
-(vì sao bảng tên fail), `bones probe: 0xce0 ...` (TArray + toạ độ đầu).
+tại. Nếu `bones no-match`, xem các dòng chẩn đoán (10s/lần):
+- `bones probe: 0xce0 data=... count=... max=...` — nếu `data=0/count=0` thì mảng
+  rỗng (mesh chưa pose / không phải master); nếu `count` vô lý thì offset sai.
+- `bones probe: 0xce0 p0=(...)...` — toạ độ thật để đối chiếu hệ quy chiếu.
+- `bones cand: off=... data=... count=...` — TArray 20..400 tìm thấy trong
+  `0xC00..0xF00` (ứng viên offset mới).
+- `bones names: ...` — chỉ có khi GNames resolve được (build này đang tắt scan).
 `bones auto-off` thì offset/map sai (engine tự tắt, các tính năng khác không ảnh hưởng).
 
 ### Chiều cao box

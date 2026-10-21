@@ -25,9 +25,18 @@ static const uint32_t kFNameMaxID = 2000000;
 static uint64_t s_uname = 0;
 static uint64_t s_unameBase = 0;
 static std::map<uint32_t, std::string> s_nameCache;
+// qblpack: quét __DATA tìm GNames rất tốn (5s+, làm provider reset) và trên
+// build hiện tại luôn fail -> tắt mặc định. Xem ESPNameSetScanEnabled.
+static BOOL s_scanEnabled = NO;
+static CFAbsoluteTime s_failAt = 0;
+static uint64_t s_failBase = 0;
 // Offset của chuỗi tên trong FNameEntry — bản game này có thể khác 0xC.
 // 0 = chưa dò được (dò khi validate UName).
 static uint32_t s_nameStrOffset = 0;
+
+void ESPNameSetScanEnabled(BOOL enabled) {
+    s_scanEnabled = enabled;
+}
 
 void ESPNameReset(uint64_t gameBase) {
     if (s_unameBase != gameBase) {
@@ -365,19 +374,25 @@ uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase) {
     for (int i = 0; i < 12; i++) {
         if (cands[i] && ESPIsValidUName(vmMap, cands[i], "direct")) {
             s_uname = cands[i];
+            s_failAt = 0;
             return s_uname;
         }
     }
+    // qblpack: fail gần đây thì trả 0 luôn, không quét __DATA lại (mỗi lần
+    // resolve được gọi từ scan/bone; quét lặp làm provider reset -> ESP treo).
+    CFAbsoluteTime nowFail = CFAbsoluteTimeGetCurrent();
+    if (s_failBase == gameBase && s_failAt > 0 && nowFail - s_failAt < 60.0) return 0;
     // 3) Offset dump lệch bản: quét __DATA/__DATA_CONST tìm chữ ký TNameEntryArray.
-    //    Chỉ chạy 1 lần cho mỗi game base (scan tốn ~vài chục ms).
+    //    Chỉ chạy 1 lần cho mỗi game base và chỉ khi được bật rõ ràng.
     {
         static uint64_t s_scannedBase = 0;
-        if (s_scannedBase != gameBase) {
+        if (s_scanEnabled && s_scannedBase != gameBase) {
             s_scannedBase = gameBase;
             uint64_t found = ESPFindGNamesByScan(vmMap, gameBase);
             if (found) {
                 if (ESPIsValidUName(vmMap, found, "scan")) {
                     s_uname = found;
+                    s_failAt = 0;
                     ESPLog("UName via scan: 0x%llx", (unsigned long long)found);
                     return s_uname;
                 }
@@ -389,12 +404,15 @@ uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase) {
     }
     {
         static uint64_t s_diagBase = 0;
-        if (s_diagBase != gameBase) {
+        if (s_scanEnabled && s_diagBase != gameBase) {
             s_diagBase = gameBase;
             ESPNameDiag(vmMap, gnamesStatic, dec);
         }
     }
-    ESPLog("UName resolve FAIL base=0x%llx dec=0x%llx", (unsigned long long)gameBase, (unsigned long long)dec);
+    s_failBase = gameBase;
+    s_failAt = nowFail;
+    ESPLog("UName resolve FAIL base=0x%llx dec=0x%llx (nghi 60s, scan=%d)",
+           (unsigned long long)gameBase, (unsigned long long)dec, s_scanEnabled ? 1 : 0);
     return 0;
 }
 

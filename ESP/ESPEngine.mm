@@ -2812,12 +2812,9 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
     if (!vmMap || !ESPIsUserPtr(mesh)) return NO;
 
-    // qblpack: resolve GNames TRƯỚC khi khoá bone-config. Lần resolve đầu có
-    // thể quét __DATA vài trăm ms; giữ mutex lúc đó sẽ làm tick box 4Hz đứng.
-    // Chỉ queue scan nền (allowNameScan=YES) mới được resolve.
-    if (allowNameScan && gameBase && !ESPUNameReady(gameBase)) {
-        (void)ESPResolveUName(vmMap, gameBase);
-    }
+    // qblpack: KHÔNG gọi ESPResolveUName ở đây. Trên build hiện tại GNames
+    // không resolve được; quét __DATA tốn ~5s + provider reset -> ESP treo.
+    // Chỉ dùng bảng tên nếu GNames đã sẵn sàng từ đường scan tên actor.
 
     // Bridge tick (allowNameScan=NO) dùng try_lock: scan đang dò xương thì bỏ
     // qua tick này, tuyệt đối không chặn HUD/SpringBoard.
@@ -2827,7 +2824,11 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
 
     if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (g_espBoneTryAt > 0 && now - g_espBoneTryAt < 2.0) return NO;
+    // qblpack: backoff khi fail. 3 lần đầu thử mỗi 2s; sau đó 30s/lần để
+    // không đọc/scan 352 offset liên tục khi offset chưa đúng.
+    static int s_failTries = 0;
+    double interval = (s_failTries >= 3) ? 30.0 : 2.0;
+    if (g_espBoneTryAt > 0 && now - g_espBoneTryAt < interval) return NO;
     g_espBoneTryAt = now;
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones detect");
 
@@ -2870,40 +2871,73 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     };
     for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
         if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i],
-                                   haveNames ? nameMap : NULL, pts)) return YES;
+                                   haveNames ? nameMap : NULL, pts)) {
+            s_failTries = 0;
+            return YES;
+        }
     }
-    // Chẩn đoán mảng 0xCE0: có TArray không, count bao nhiêu, vài toạ độ đầu.
+    // Chẩn đoán mảng xương: in RAW header 0xCE0/0xCD0 + quét 0xC00..0xF00 tìm
+    // TArray<FTransform> (dải fallback cũ dừng ở 0xC00 nên bỏ sót vùng này).
     {
         static CFAbsoluteTime s_probeAt = 0;
         if (now - s_probeAt > 10.0) {
             s_probeAt = now;
-            uint64_t d = 0;
-            uint32_t c = 0;
-            if (ESPBoneArrayAt(vmMap, mesh, ESPOff_Mesh_BoneCompSpace, &d, &c)) {
-                ESPVector probe[24];
-                int pn = (int)(c < 24 ? c : 24);
-                if (ESPReadBoneLocals(vmMap, d, probe, pn)) {
-                    ESPLog("bones probe: 0xce0 data=0x%llx count=%u p0=(%.1f,%.1f,%.1f) "
-                           "p1=(%.1f,%.1f,%.1f) p6=(%.1f,%.1f,%.1f)",
-                           (unsigned long long)d, (unsigned)c,
-                           probe[0].x, probe[0].y, probe[0].z,
-                           probe[1].x, probe[1].y, probe[1].z,
-                           probe[6].x, probe[6].y, probe[6].z);
-                } else {
-                    ESPLog("bones probe: 0xce0 data=0x%llx count=%u read-fail",
-                           (unsigned long long)d, (unsigned)c);
+            uint32_t probes[2] = { ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace };
+            for (int pi = 0; pi < 2; pi++) {
+                uint8_t hdr[16];
+                if (!ESPMemoryRead(vmMap, mesh + probes[pi], hdr, sizeof(hdr))) {
+                    ESPLog("bones probe: 0x%x read-fail mesh=0x%llx",
+                           (unsigned)probes[pi], (unsigned long long)mesh);
+                    continue;
                 }
-            } else {
-                ESPLog("bones probe: 0xce0 khong phai TArray<FTransform>");
+                uint64_t d = 0; uint32_t c = 0, m = 0;
+                memcpy(&d, hdr, 8);
+                memcpy(&c, hdr + 8, 4);
+                memcpy(&m, hdr + 12, 4);
+                ESPLog("bones probe: 0x%x data=0x%llx count=%u max=%u",
+                       (unsigned)probes[pi], (unsigned long long)d,
+                       (unsigned)c, (unsigned)m);
+                if (ESPIsUserPtr(d) && c >= 15 && c <= 800) {
+                    ESPVector pr[24];
+                    int pn = (int)(c < 24 ? c : 24);
+                    if (ESPReadBoneLocals(vmMap, d, pr, pn)) {
+                        ESPLog("bones probe: 0x%x p0=(%.1f,%.1f,%.1f) p1=(%.1f,%.1f,%.1f) p6=(%.1f,%.1f,%.1f)",
+                               (unsigned)probes[pi],
+                               pr[0].x, pr[0].y, pr[0].z,
+                               pr[1].x, pr[1].y, pr[1].z,
+                               pr[6].x, pr[6].y, pr[6].z);
+                    } else {
+                        ESPLog("bones probe: 0x%x read transforms fail", (unsigned)probes[pi]);
+                    }
+                }
             }
+            // Ứng viên TArray trong vùng USkeletalMeshComponent sau 0xC00.
+            int shown = 0;
+            for (uint32_t off = 0xC00; off + 16 <= 0xF00 && shown < 4; off += 8) {
+                uint8_t hdr[16];
+                if (!ESPMemoryRead(vmMap, mesh + off, hdr, sizeof(hdr))) continue;
+                uint64_t d = 0; uint32_t c = 0, m = 0;
+                memcpy(&d, hdr, 8);
+                memcpy(&c, hdr + 8, 4);
+                memcpy(&m, hdr + 12, 4);
+                if (!ESPIsUserPtr(d) || c < 20 || c > 400 || m < c) continue;
+                ESPLog("bones cand: off=0x%x data=0x%llx count=%u max=%u",
+                       (unsigned)off, (unsigned long long)d, (unsigned)c, (unsigned)m);
+                shown++;
+            }
+            if (!shown) ESPLog("bones cand: khong co TArray 20..400 trong 0xC00..0xF00");
         }
     }
     // 2) Fallback: quét dải cũ phòng bản game sau dời field.
     for (uint32_t off = ESPOff_Mesh_BoneScanStart; off + 16 <= ESPOff_Mesh_BoneScanEnd; off += 8) {
         if (ESPBoneTryOffsetLocked(vmMap, mesh, off,
-                                   haveNames ? nameMap : NULL, pts)) return YES;
+                                   haveNames ? nameMap : NULL, pts)) {
+            s_failTries = 0;
+            return YES;
+        }
     }
     // Không ứng viên nào qua validate: giữ tắt, thử lại sau (world khác có thể khác rig).
+    if (s_failTries < 1000) s_failTries++;
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones no-match");
     return NO;
 }
@@ -3094,12 +3128,9 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         // Chiều cao box: extent mesh đọc 1 lần/actor/scan, dùng cho cả tracked.
         uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
         float actorH = ESPActorBoxHeight(vmMap, meshComp);
-        // qblpack: dò bảng xương trên player thật đầu tiên có mesh (throttle 2s
-        // bên trong; chỉ chạy khi toggle bật và chưa dò được).
-        if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
-            team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
-            ESPBonesConfigure(vmMap, meshComp, gameBase, NO);
-        }
+        // qblpack: KHÔNG dò xương ở đây. Đây là tick box trên main thread; dò
+        // 352 offset (khi offset sai) sẽ làm giật HUD/ESP. Queue scan nền
+        // (ESPBonesConfigure allowNameScan=YES) lo việc này.
         uint64_t rootComp = ESPIsUserPtr(dg.root) ? dg.root : 0;
         if (foundTracked.size() < 64) {
             ESPTrackedActor tr;
