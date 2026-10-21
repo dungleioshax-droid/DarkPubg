@@ -1622,7 +1622,8 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
                                             const DSRemoteArgument *arguments,
                                             NSUInteger argumentCount,
                                             void *result,
-                                            NSUInteger resultSize) {
+                                            NSUInteger resultSize,
+                                            BOOL retainResultObject = NO) {
     if (!process || !target || !selector || !process.trojanMem) return NO;
 
     // Fast path kernrw18: invocation đã dựng + retain từ frame trước (chỉ cho
@@ -1720,6 +1721,16 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
                    resultScratch, 0, 0, 0);
         if (!process.trojanMem) return NO;
         if (![process remoteRead:resultScratch to:result size:resultSize]) return NO;
+
+        // Retain TRƯỚC KHI drain autoreleasePool: các factory object (UIColor, UIFont, UIView)
+        // thuộc autorelease pool của invocation. Nếu không retain trước drain, pool sẽ giải phóng
+        // làm dealloc object ngay lập tức -> dẫn đến use-after-free/EXC_BAD_ACCESS gây respring!
+        if (retainResultObject && resultSize == sizeof(uint64_t)) {
+            uint64_t obj = *(uint64_t *)result;
+            if (obj && process.trojanMem) {
+                remote_msg(process, obj, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
+            }
+        }
     }
     return YES;
     } @finally {
@@ -1734,7 +1745,7 @@ static BOOL ds_remote_invoke_on_main(RemoteCall *process, uint64_t target,
                                      const DSRemoteArgument *arguments,
                                      NSUInteger argumentCount) {
     return ds_remote_invoke_on_main_result(process, target, selector,
-                                           arguments, argumentCount, NULL, 0);
+                                           arguments, argumentCount, NULL, 0, NO);
 }
 
 static BOOL ds_remote_invoke_noarg_on_main(RemoteCall *process, uint64_t target,
@@ -1748,7 +1759,7 @@ static uint64_t ds_remote_get_object_on_main(RemoteCall *process, uint64_t targe
     uint64_t result = 0;
     BOOL invoked = ds_remote_invoke_on_main_result(
         process, target, ds_remote_sel(process, selectorName), NULL, 0,
-        &result, sizeof(result));
+        &result, sizeof(result), NO);
     return invoked ? result : 0;
 }
 
@@ -1758,14 +1769,15 @@ static uint64_t ds_remote_get_retained_object_on_main(
     uint64_t result = 0;
     BOOL invoked = ds_remote_invoke_on_main_result(
         process, target, ds_remote_sel(process, selectorName),
-        arguments, argumentCount, &result, sizeof(result));
+        arguments, argumentCount, &result, sizeof(result), YES);
     if (!invoked || !result || !process.trojanMem) return 0;
+    return result;
+}
 
-    // Retain immediately after the synchronous main-thread return. This keeps
-    // factory results alive across later performSelector turns and prevents the
-    // dangling-object crash seen with the former UIColor factory result.
-    remote_msg(process, result, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
-    return process.trojanMem ? result : 0;
+static uint64_t ds_remote_get_retained_object_noarg_on_main(RemoteCall *process,
+                                                             uint64_t target,
+                                                             const char *selectorName) {
+    return ds_remote_get_retained_object_on_main(process, target, selectorName, NULL, 0);
 }
 
 static BOOL ds_remote_set_u64_on_main(RemoteCall *process, uint64_t target,
@@ -2163,17 +2175,17 @@ static uint64_t ds_create_springboard_hud(RemoteCall *process) {
     ds_remote_set_rect_on_main(process, label, "setFrame:", presentation.labelFrame);
     ds_remote_set_rect_on_main(process, secureField, "setFrame:", presentation.blurFrame);
 
-    uint64_t clear = ds_remote_get_object_on_main(process, colorClass, "clearColor");
-    uint64_t white = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
-    uint64_t black = ds_remote_get_object_on_main(process, colorClass, "blackColor");
+    uint64_t clear = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor");
+    uint64_t white = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "whiteColor");
+    uint64_t black = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "blackColor");
     // Do not pass autoreleased factory results across separate main-thread
     // performSelector turns. The prior colorWithWhite:alpha: result was already
     // dead by setBackgroundColor:, producing SIGBUS in object_getClass.
-    uint64_t safeBackground = ds_remote_get_object_on_main(
+    uint64_t safeBackground = ds_remote_get_retained_object_noarg_on_main(
         process, colorClass, "darkGrayColor");
     if (!clear || !white || !black || !safeBackground) return 0;
 
-    uint64_t red = ds_remote_get_object_on_main(process, colorClass, "systemRedColor");
+    uint64_t red = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "systemRedColor");
 
     ds_perform_on_springboard_main(process, window,
                                    ds_remote_sel(process, "setBackgroundColor:"), clear, YES);
@@ -2297,13 +2309,7 @@ static void *ds_remote_system_symbol(const char *name) {
 }
 
 static void ds_esp_path_clear(RemoteCall *process) {
-    if (g_espPathObj) {
-        void *releaseSym = ds_remote_system_symbol("CGPathRelease");
-        if (process && process.trojanMem && releaseSym) {
-            DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
-        }
-        g_espPathObj = 0;
-    }
+    g_espPathObj = 0;
     if (g_espPathLayer && process && process.trojanMem) {
         ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
     }
@@ -2320,11 +2326,7 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
         if (!s_pathEmpty) {
             ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", 0);
             s_pathEmpty = YES;
-            if (g_espPathObj) {
-                void *relSym = ds_remote_system_symbol("CGPathRelease");
-                if (relSym) DSRemoteArbCallWithTimeout(1, process, relSym, g_espPathObj);
-                g_espPathObj = 0;
-            }
+            g_espPathObj = 0;
         }
         return YES;
     }
@@ -2360,10 +2362,12 @@ static BOOL ds_esp_path_update(RemoteCall *process, CGPoint *pts, int count) {
     }
     DSRemoteArbCallWithTimeout(1, process, addSym, path, 0, g_espRectsAddr, (uint64_t)count);
     ds_remote_set_u64_on_main(process, g_espPathLayer, "setPath:", path);
-    if (g_espPathObj && releaseSym) {
-        DSRemoteArbCallWithTimeout(1, process, releaseSym, g_espPathObj);
+    // Release creation reference ngay lập tức, CAShapeLayer tự quản lý path trên main thread.
+    // Không giữ và release ở frame sau để tránh race condition / double free với CATransaction.
+    if (releaseSym) {
+        DSRemoteArbCallWithTimeout(1, process, releaseSym, path);
     }
-    g_espPathObj = path;
+    g_espPathObj = 1;
     g_espPathCalls += 5;
     g_espPathBoxes += (unsigned long)count;
     return YES;
@@ -2505,14 +2509,14 @@ static BOOL ds_esp_overlay_ensure_impl(RemoteCall *process, CGRect portraitBound
     ds_remote_set_double_on_main(process, window, "setWindowLevel:", kDSESPWindowLevel);
     ds_remote_set_u64_on_main(process, window, "setUserInteractionEnabled:", 0);
     ds_remote_set_u64_on_main(process, window, "setOpaque:", 0);
-    uint64_t clear = ds_remote_get_object_on_main(process, colorClass, "clearColor");
-    uint64_t red = ds_remote_get_object_on_main(process, colorClass, "redColor");
-    uint64_t white = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
+    uint64_t clear = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor");
+    uint64_t red = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "redColor");
+    uint64_t white = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "whiteColor");
     // kernrw49: mau health bar theo band (Kernel: <30%% do, <60%% vang, con lai xanh la)
     // + den cho nen bar. Fail mau -> bo per-box health bar (ESP van chay, label chi con dist).
-    uint64_t black = ds_remote_get_object_on_main(process, colorClass, "blackColor");
-    uint64_t green = ds_remote_get_object_on_main(process, colorClass, "greenColor");
-    uint64_t yellow = ds_remote_get_object_on_main(process, colorClass, "yellowColor");
+    uint64_t black = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "blackColor");
+    uint64_t green = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "greenColor");
+    uint64_t yellow = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "yellowColor");
     g_dsRedColor = red;
     g_dsYellowColor = yellow;
     g_dsGreenColor = green;
@@ -2921,35 +2925,30 @@ static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
     return YES;
 }
 
-// setPath: + release path cũ (path mới do layer giữ).
+// setPath: + release creation reference ngay lập tức (layer tự giữ reference).
 static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
-    if (!ds_remote_set_u64_on_main(process, g_qblShape[bucket], "setPath:", path)) {
-        if (path) {
-            void *rel = ds_remote_system_symbol("CGPathRelease");
-            if (rel) DSRemoteArbCallWithTimeout(1, process, rel, path);
-        }
-        return NO;
+    void *rel = ds_remote_system_symbol("CGPathRelease");
+    BOOL setOk = ds_remote_set_u64_on_main(process, g_qblShape[bucket], "setPath:", path);
+    if (path && rel) {
+        DSRemoteArbCallWithTimeout(1, process, rel, path);
     }
-    if (g_qblShapePath[bucket]) {
-        void *rel = ds_remote_system_symbol("CGPathRelease");
-        if (rel) DSRemoteArbCallWithTimeout(1, process, rel, g_qblShapePath[bucket]);
-    }
-    g_qblShapePath[bucket] = path;
+    if (!setOk) return NO;
+    g_qblShapePath[bucket] = path ? 1 : 0;
     return YES;
 }
 
 // --- style dùng chung: tạo 1 lần/session ---
-// Chỉ dùng màu SINGLETON (proven path của renderer cũ) — không tạo object
-// autoreleased qua RemoteCall. Font mượn từ label HUD để khỏi factory/retain.
+// Dùng màu retain trong SpringBoard để không bị autorelease pool drain giải phóng
+// dẫn đến crash use-after-free khi render shape hoặc setTextColor.
 static BOOL ds_qbl_style_ready(RemoteCall *process) {
     if (g_qblStyleOK) return YES;
     if (!process || !process.trojanMem) return NO;
     uint64_t colorClass = ds_remote_class(process, "UIColor");
     if (!colorClass) return NO;
 
-    if (!g_qblClearColor) g_qblClearColor = ds_remote_get_object_on_main(process, colorClass, "clearColor");
-    if (!g_qblWhiteColor) g_qblWhiteColor = ds_remote_get_object_on_main(process, colorClass, "whiteColor");
+    if (!g_qblClearColor) g_qblClearColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor");
+    if (!g_qblWhiteColor) g_qblWhiteColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "whiteColor");
     if (!g_qblClearColor || !g_qblWhiteColor) {
         const char *err = process.lastError.UTF8String;
         ESPLog("qbl style fail clear=0x%llx white=0x%llx err=%s",
@@ -2958,10 +2957,10 @@ static BOOL ds_qbl_style_ready(RemoteCall *process) {
         if (g_qblStyleFails < 255) g_qblStyleFails++;
         return NO;
     }
-    if (!g_qblAIColor)    g_qblAIColor    = ds_remote_get_object_on_main(process, colorClass, "yellowColor");
-    if (!g_qblBlackColor) g_qblBlackColor = ds_remote_get_object_on_main(process, colorClass, "blackColor");
-    if (!g_qblRedColor)   g_qblRedColor   = ds_remote_get_object_on_main(process, colorClass, "redColor");
-    if (!g_qblGreenColor) g_qblGreenColor = ds_remote_get_object_on_main(process, colorClass, "greenColor");
+    if (!g_qblAIColor)    g_qblAIColor    = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "yellowColor");
+    if (!g_qblBlackColor) g_qblBlackColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "blackColor");
+    if (!g_qblRedColor)   g_qblRedColor   = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "redColor");
+    if (!g_qblGreenColor) g_qblGreenColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "greenColor");
     if (!g_qblAIColor)    g_qblAIColor    = g_qblWhiteColor;
     if (!g_qblBlackColor) g_qblBlackColor = g_qblWhiteColor;
     if (!g_qblRedColor)   g_qblRedColor   = g_qblWhiteColor;
@@ -2975,13 +2974,17 @@ static BOOL ds_qbl_style_ready(RemoteCall *process) {
     if (!g_qblFontSmall) g_qblFontSmall = ds_remote_font(process, 11.0, NO);
     if (!g_qblFontMain && g_remoteLabel && g_remoteWindowPid == (pid_t)process.pid) {
         // Fallback duy nhất: font HUD (chữ vẫn hiện, chỉ to hơn thiết kế).
-        g_qblFontMain = ds_remote_get_object_on_main(process, g_remoteLabel, "font");
+        g_qblFontMain = ds_remote_get_retained_object_noarg_on_main(process, g_remoteLabel, "font");
     }
     if (!g_qblFontSmall) g_qblFontSmall = g_qblFontMain;
 
-    // Shadow text: CGColor của blackColor (getter, không retain CF object).
-    if (!g_qblShadowCG) {
+    // Shadow text: CGColor của blackColor (getter, retain CF object).
+    if (!g_qblShadowCG && g_qblBlackColor) {
         g_qblShadowCG = ds_remote_get_object_on_main(process, g_qblBlackColor, "CGColor");
+        if (g_qblShadowCG) {
+            void *cgRetain = ds_remote_system_symbol("CFRetain");
+            if (cgRetain) DSRemoteArbCallWithTimeout(1, process, cgRetain, g_qblShadowCG);
+        }
     }
     g_qblStyleOK = YES;
     g_qblStyleFails = 0;
@@ -3458,12 +3461,12 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 0.1pt: bám sát chuyển động liên tục của địch/camera 60 FPS,
-    // loại bỏ hiện tượng nhảy bước 0.5-1.0pt gây rung lắc chữ.
+    // Ngưỡng >= 0.35pt (~1 physical pixel Retina): bám sát chuyển động liên tục 60 FPS,
+    // loại bỏ hoàn toàn bão IPC sub-pixel làm nghẽn SpringBoard main thread gây watchdog respring.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.1 ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.1 ||
-        fabs(g_qblLabelRect[slot].size.width - r.size.width) >= 0.1) {
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.35 ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.35 ||
+        fabs(g_qblLabelRect[slot].size.width - r.size.width) >= 0.35) {
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
@@ -3508,9 +3511,9 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.1 ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.1 ||
-            fabs(g_qblLabelRect[t].size.width - lr.size.width) >= 0.1) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.35 ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.35 ||
+            fabs(g_qblLabelRect[t].size.width - lr.size.width) >= 0.35) {
             labelWork = YES;
             break;
         }
@@ -4376,9 +4379,9 @@ static BOOL ds_apply_remote_presentation(RemoteCall *process,
 
         uint64_t colorClass = ds_remote_class(process, "UIColor");
         uint64_t red = colorClass
-            ? ds_remote_get_object_on_main(process, colorClass, "systemRedColor") : 0;
+            ? ds_remote_get_retained_object_noarg_on_main(process, colorClass, "systemRedColor") : 0;
         uint64_t clear = colorClass
-            ? ds_remote_get_object_on_main(process, colorClass, "clearColor") : 0;
+            ? ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor") : 0;
         if (red && clear) {
             ds_perform_on_springboard_main(process, g_remoteLabel,
                                            ds_remote_sel(process, "setTextColor:"), red, YES);
