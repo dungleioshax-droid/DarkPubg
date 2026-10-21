@@ -3317,14 +3317,14 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             headX = (b->bones[ESPBone_Head].x - bcx) * scale + bcx;
             headY = (b->bones[ESPBone_Head].y - bcy) * scale + bcy;
         }
-        if (f->headDot && b->kind == 1) {
+        if (f->headDot) {
             ESPDrawAddCircle(CGPointMake(headX, headY), 3.0f,
                              ai ? kQBLColorAI : kQBLColorDot, 1.0f,
                              ai ? kQBLBucketAIMark : kQBLBucketDot, YES);
         }
 
-        // Skeleton (chỉ player; không vẽ hình nhân).
-        if (f->bones && b->kind == 1 && b->boneCount >= 2) {
+        // Skeleton
+        if (f->bones && b->boneCount >= 2) {
             ds_qbl_emit_bones(b, scale, scale, bcx, bcy);
         }
 
@@ -3340,8 +3340,8 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             ESPDrawAddPolyline(tri, 3, kQBLColorAI, 1.5f, kQBLBucketAIMark, YES);
         }
 
-        // Snapline chỉ player (dummy không có line như Kernel/QBL).
-        if (f->line && b->kind == 1 && lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
+        // Snapline
+        if (f->line && lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
             linePts[lineN++] = lineStart;
             linePts[lineN++] = CGPointMake(bx + bw * 0.5f, by);
         }
@@ -3352,8 +3352,10 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
         ESPDrawAddText(txt, CGPointMake(bcx, by + bh), 13.0f, mainColor, YES, 1);
         char teamTxt[40];
         teamTxt[0] = '\0';
-        if (f->teamID && b->kind == 1 && b->team >= 0 && b->team <= 200000000) {
+        if (f->teamID && b->team >= 0 && b->team <= 200000000) {
             snprintf(teamTxt, sizeof(teamTxt), "T%d%s", b->team, ai ? " AI" : "");
+        } else if (f->teamID && b->kind == 3) {
+            snprintf(teamTxt, sizeof(teamTxt), "Target");
         }
         ESPDrawAddText(teamTxt, CGPointMake(bcx, by), 11.0f, mainColor, YES, 1);
     }
@@ -4260,9 +4262,8 @@ ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
                                                        winCenter, mapOrient, pt);
         }
         g_espLastHp[i] = b.health;
-        // kernrw51: snapline chỉ với toggle Line ON (Kernel chỉ vẽ line cho
-        // player kind 1 — dummy không có line).
-        if (s_featLine && b.kind == 1 && g_espPathLayer && fullBox.size.width > 1.0f &&
+        // kernrw68: snapline với toggle Line ON (vẽ cả player và dummy target).
+        if (s_featLine && g_espPathLayer && fullBox.size.width > 1.0f &&
             fullBox.size.height > 1.0f && s_linePtsCount + 2 <= kESPLinePointsMax) {
             CGPoint start = CGPointMake(landW * 0.5f, 25.0f);
             CGPoint startM = ds_esp_map_point(start, landW, landH, winCenter, mapOrient);
@@ -4511,7 +4512,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw67-bonesfix"
+#define DS_ESP_BUILD_TAG "kernrw68-targetfix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

@@ -107,18 +107,18 @@ typedef struct {
     uint32_t nameID;
 } ESPClassifyDiag;
 
-// Mesh để đọc chiều cao box: theo kind, fallback đọc 0x510 (cache-hit verdict
-// không có diag.mesh -> 1 read/actor/scan là chấp nhận được).
+// Mesh để đọc chiều cao box và mảng xương: ưu tiên SkeletalMesh (0x510)
+// để đọc xương người/hình nhân; fallback StaticMesh (0x4E8) cho bia tập.
 static uint64_t ESPBoxMesh(uint64_t vmMap, uint64_t actor, const ESPClassifyDiag *dg, int team) {
     if (dg) {
-        uint64_t m = (team == ESPTeam_Dummy) ? dg->tMesh : dg->mesh;
-        if (ESPIsUserPtr(m)) return m;
-        uint64_t alt = (team == ESPTeam_Dummy) ? dg->mesh : dg->tMesh;
-        if (ESPIsUserPtr(alt)) return alt;
+        if (ESPIsUserPtr(dg->mesh)) return dg->mesh;
+        if (ESPIsUserPtr(dg->tMesh)) return dg->tMesh;
     }
     BOOL okm = NO;
     uint64_t m = ESPReadU64(vmMap, actor + ESPOff_Char_Mesh, &okm);
-    return (okm && ESPIsUserPtr(m)) ? m : 0;
+    if (okm && ESPIsUserPtr(m)) return m;
+    if (dg && ESPIsUserPtr(dg->tMesh)) return dg->tMesh;
+    return 0;
 }
 
 // Chiều cao box: Mesh.Bounds.BoxExtent.Z * 2 (nguồn Kernel, 30..200cm),
@@ -174,20 +174,29 @@ void ESPEngineHPSample(float *cur, float *max, int *pct, int *fails) {
 static int ESPHPPercent(uint64_t vmMap, uint64_t actor, int kind) {
     if (!vmMap || !actor) return -1;
     float cur = 0, max = 0;
+    BOOL got = NO;
     if (kind == 3) {
-        if (!ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &cur)) { s_hpDbgFails++; return -1; }
-        if (!ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &max)) { s_hpDbgFails++; return -1; }
-    } else {
-        uint8_t hb[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-        if (!ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hb, sizeof(hb))) { s_hpDbgFails++; return -1; }
-        memcpy(&cur, hb, 4);
-        memcpy(&max, hb + 4, 4);
+        if (ESPReadF32(vmMap, actor + ESPOff_Target_CurHealth, &cur) &&
+            ESPReadF32(vmMap, actor + ESPOff_Target_MaxHealth, &max) &&
+            max >= 50.0f && max <= 2000.0f && cur >= 0.0f && cur <= max + 50.0f) {
+            got = YES;
+        }
     }
-    s_hpDbgCur = cur; s_hpDbgMax = max;
-    if (!(max >= 50.0f && max <= 2000.0f) || !(cur >= 0.0f) || !(cur <= max + 50.0f)) {
+    if (!got) {
+        uint8_t hb[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (ESPMemoryRead(vmMap, actor + ESPOff_Char_Health, hb, sizeof(hb))) {
+            memcpy(&cur, hb, 4);
+            memcpy(&max, hb + 4, 4);
+            if (max >= 50.0f && max <= 2000.0f && cur >= 0.0f && cur <= max + 50.0f) {
+                got = YES;
+            }
+        }
+    }
+    if (!got) {
         s_hpDbgPct = -1; s_hpDbgFails++;
         return -1;
     }
+    s_hpDbgCur = cur; s_hpDbgMax = max;
     int pct = (int)(cur * 100.0f / max + 0.5f);
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
@@ -1247,7 +1256,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         tr.isAI = (dg.ai || aiHint) ? 1 : 0;
         // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
         if (g_espBonesWant.load() && !g_espBonesReady.load() &&
-            team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
+            meshComp && ESPIsUserPtr(meshComp)) {
             ESPBonesConfigure(vmMap, meshComp, gameBase, YES);
         }
         if (team == ESPTeam_Dummy) {
@@ -4036,12 +4045,15 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         box.team = (box.kind == 3 || team < 0 || team > 200000000) ? INT_MIN : team;
         box.isAI = (uint8_t)(dg.ai ? 1 : 0);
         if (box.kind == 3) {
-            strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
+            strncpy(box.nick, "Model Target", sizeof(box.nick) - 1);
         } else if (ESPPlayerNickName(vmMap, actor, box.nick)) {
         } else {
             strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
         }
         box.nick[sizeof(box.nick) - 1] = '\0';
+        if (g_espBonesWant.load() && g_espBonesReady.load() && meshComp && ESPIsUserPtr(meshComp)) {
+            (void)ESPBonesSample(vmMap, meshComp, &basis, &box, box.y, box.h);
+        }
         outBoxes[n++] = box;
     }
                   (unsigned)scanN, (unsigned)cEne, (unsigned)cPos,
@@ -4554,14 +4566,14 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
         box.team = (tr->kind == 3) ? INT_MIN : tr->team;
         box.isAI = tr->isAI;
         if (box.kind == 3) {
-            strncpy(box.nick, "DUMMY", sizeof(box.nick) - 1);
+            strncpy(box.nick, "Model Target", sizeof(box.nick) - 1);
         } else if (ESPPlayerNickName(vmMap, tr->actor, box.nick)) {
             // giữ nguyên nick
         } else {
             strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
         }
         box.nick[sizeof(box.nick) - 1] = '\0';
-        if (box.kind == 1 && g_espBonesWant.load()) {
+        if (g_espBonesWant.load()) {
             if (!g_espBonesReady.load() && tr->mesh && ESPIsUserPtr(tr->mesh)) {
                 static CFAbsoluteTime s_lastFastCfg = 0;
                 CFAbsoluteTime nowFast = CFAbsoluteTimeGetCurrent();
