@@ -46,6 +46,13 @@ static int s_okLoggedRoute = 0;
 // cả session (khỏi proc_listallpids mỗi 5s vô ích). Reset khi Reset() (world
 // đổi/disable) để máy TrollStore resign entitlement vẫn có cơ hội.
 static int s_giveUpFails = 0;
+// qblpack: probe (proc_listallpids + task_for_pid/host-priv) có thể treo vài
+// giây lúc game load. Trước đây nó chạy trong s_taskMutex -> ESPGameTaskPort /
+// ESPTaskRead của tick 60Hz phải chờ khóa suốt thời gian đó (tick max 5.7s).
+// Giờ probe chạy NGOÀI khóa, chỉ publish kết quả dưới khóa; single-flight để
+// không có 2 probe song song.
+static BOOL s_probeRunning = NO;
+static uint32_t s_gen = 0; // tăng ở Reset: probe cũ không được publish port cũ
 
 static pid_t ESPTaskFindGamePid(void) {
     int count = proc_listallpids(NULL, 0);
@@ -128,19 +135,18 @@ BOOL ESPGameTaskEnsure(void) {
         s_gameTask = MACH_PORT_NULL;
         s_gamePid = 0;
     }
-    // Throttle attempt full (Ensure chạy mỗi tick 40Hz).
+    // Throttle + single-flight. KHÔNG giữ khóa trong lúc probe: reader
+    // (ESPTaskRead/ESPGameTaskPort) chỉ chờ khóa vài lệnh, không chờ syscall.
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - s_lastTryAt < 5.0) {
-        pthread_mutex_unlock(&s_taskMutex);
-        return NO;
-    }
-    if (s_giveUpFails >= 100) {
-        // kernrw52e: bỏ give-up — keep trying vm_read (task port) mỗi 2s.
-        // Esign mobile thường fail, nhưng region-map fallback vẫn chạy song song.
+    if (s_probeRunning || now - s_lastTryAt < 5.0 || s_giveUpFails >= 100) {
         pthread_mutex_unlock(&s_taskMutex);
         return NO;
     }
     s_lastTryAt = now;
+    s_probeRunning = YES;
+    uint32_t gen = s_gen;
+    pthread_mutex_unlock(&s_taskMutex);
+
     pid_t pid = ESPTaskFindGamePid();
     task_t t = MACH_PORT_NULL;
     int route = 0;
@@ -153,7 +159,17 @@ BOOL ESPGameTaskEnsure(void) {
             if (t != MACH_PORT_NULL) route = 2;
         }
     }
+
+    pthread_mutex_lock(&s_taskMutex);
+    s_probeRunning = NO;
+    if (gen != s_gen) {
+        // Reset trong lúc probe (world đổi/disable): bỏ port vừa lấy.
+        if (t != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), t);
+        pthread_mutex_unlock(&s_taskMutex);
+        return NO;
+    }
     if (t != MACH_PORT_NULL) {
+        if (s_gameTask != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), s_gameTask);
         s_gameTask = t;
         s_gamePid = pid;
         if (s_okLoggedPid != pid || s_okLoggedRoute != route) {
@@ -178,6 +194,7 @@ BOOL ESPGameTaskEnsure(void) {
 
 void ESPGameTaskReset(void) {
     pthread_mutex_lock(&s_taskMutex);
+    s_gen++;
     if (s_gameTask != MACH_PORT_NULL) {
         mach_port_deallocate(mach_task_self(), s_gameTask);
         s_gameTask = MACH_PORT_NULL;

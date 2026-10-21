@@ -266,6 +266,7 @@ static BOOL g_espWaitingLoad = NO;
 static std::atomic_int g_espPasses{0}; // số lượt quét xong từ khi đổi world (đủ 3 lượt mới full)
 static std::atomic_int g_espProgress{-1}; // index đang lọc (để hiện %)
 static std::atomic_int g_espProgressTotal{0};
+static int g_espLastFastPawns = 0; // số pawn đọc được từ PlayerArray (fast path)
 // Mutex cho verdict maps + VTable + frame + tracked list: ESPEngineScan chạy
 // trên queue nền trong khi ESPEngineBoxes/RefreshBoxes chạy trên timer bridge
 // (1Hz). Trước đây 2 luồng đọc/ghi unordered_map + vector cùng lúc (UB):
@@ -456,6 +457,49 @@ static void ESPVerdictSetLocked(uint64_t actor, char v, int team) {
     g_espVerdict[actor] = v;
     g_espVerdictFrame[actor] = g_espFrame;
     if (v == 1 || v == 3) g_espTeamCache[actor] = team;
+}
+
+// --- Fast player list (PlayerArray) ---------------------------------------
+// Đọc thẳng danh sách người chơi/bot mà game đang giữ, thay vì duyệt 8000
+// actor. Mọi bước đều check BOOL; offset sai -> trả 0 -> caller quay về quét
+// actor array như cũ (không bao giờ làm mất box vì fast path hỏng).
+typedef struct {
+    uint64_t pawn;
+    uint8_t isBot;
+} ESPPlayerPawn;
+
+static int ESPReadPlayerPawns(uint64_t vmMap, uint64_t world, ESPPlayerPawn *out, int cap) {
+    if (!vmMap || !world || !out || cap <= 0) return 0;
+    BOOL ok = NO;
+    uint64_t gs = ESPReadU64(vmMap, world + ESPOff_UWorld_GameState, &ok);
+    if (!ok || !ESPIsUserPtr(gs)) return 0;
+    uint64_t data = ESPReadU64(vmMap, gs + ESPOff_GameState_PlayerArray, &ok);
+    if (!ok || !ESPIsUserPtr(data)) return 0;
+    uint32_t count = ESPReadU32(vmMap, gs + ESPOff_GameState_PlayerArray + 8, &ok);
+    if (!ok || count == 0) return 0;
+    if (count > 256) count = 256; // sanity: 100 player + spectator, chặn rác
+    int n = 0;
+    for (uint32_t i = 0; i < count && n < cap; i++) {
+        BOOL okp = NO;
+        uint64_t ps = ESPReadU64(vmMap, data + (uint64_t)i * 8, &okp);
+        if (!okp || !ESPIsUserPtr(ps)) continue;
+        uint64_t pawn = ESPReadU64(vmMap, ps + ESPOff_PlayerState_PawnPrivate, &okp);
+        if (!okp || !ESPIsUserPtr(pawn)) continue;
+        BOOL dup = NO;
+        for (int k = 0; k < n; k++) {
+            if (out[k].pawn == pawn) { dup = YES; break; }
+        }
+        if (dup) continue;
+        out[n].pawn = pawn;
+        out[n].isBot = 0;
+        BOOL okb = NO;
+        uint8_t bot = ESPReadU8(vmMap, ps + ESPOff_PlayerState_IsABot, &okb);
+        // 0x4DC là byte bitfield: bit0 bIsSpectator, bit1 bOnlySpectator,
+        // bit2 bIsABot (SDK xếp cùng offset). Check đúng bit 2.
+        if (okb && (bot & 0x4)) out[n].isBot = 1;
+        n++;
+    }
+    return n;
 }
 
 // Lọc enemy thật theo source Kernel: Mesh + Health/Max + TeamID, rồi bHidden/bDead/team.
@@ -926,6 +970,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     // (trước đây diag probe camera -> scan mới -> diag mới… đệ quy vô hạn).
     if (t_espInScan) return r;
     t_espInScan = true;
+    g_espLastFastPawns = 0;
     ESPScanReentryGuard reentryGuard; (void)reentryGuard;
     g_espStep = 1;
     if (!gameBase || !ds_is_ready()) return r;
@@ -1010,7 +1055,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     r.actorCluster = 0;
     r.actorCount = actorsCount;
     // kernrw52g: bỏ log scan start (I/O mỗi scan)
-    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
 
     // GNames/UName không còn ở đây. Đo được: scan đầu mất 13.0s thì ~11s là
     // ESPResolveUName quét GNames (region cache còn lạnh), mà ra vẫn 0x0 —
@@ -1071,6 +1115,19 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             ESPLog("diag pawn FAIL (NetDriver chain)");
         }
     }
+    // qblpack: fast path — lấy thẳng player/bot từ GameState.PlayerArray.
+    // fastPawnN > 0 => actor array chỉ quét lát để bắt hình nhân; = 0 => giữ
+    // nguyên full scan cũ làm fallback.
+    static ESPPlayerPawn s_fastPawns[128];
+    int fastPawnN = ESPReadPlayerPawns(vmMap, world, s_fastPawns, 128);
+    g_espLastFastPawns = fastPawnN;
+    {
+        static uint64_t s_fastLoggedWorld = 0;
+        if (fastPawnN > 0 && world != s_fastLoggedWorld) {
+            s_fastLoggedWorld = world;
+            ESPLog("fast players: %d via PlayerArray", fastPawnN);
+        }
+    }
     if (verbose) {
         int inList = -1;
         for (uint32_t i = 0; i < scanN; i++) {
@@ -1100,15 +1157,89 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                    ESPCameraResolveDiag());
         }
     }
-    g_espProgressTotal.store((int)scanN);
-    g_espProgress.store(0);
     uint32_t enemies = 0;
     uint32_t dummies = 0;
     // Build tracked trên vector LOCAL rồi swap 1 lần dưới lock ở cuối scan:
     // box path (bridge queue) copy dưới lock nên không bao giờ thấy vector
     // đang clear/push dở (trước đây là race -> tracked rỗng/rác -> box 0).
     std::vector<ESPTrackedActor> localTracked;
-    localTracked.reserve(64);
+    localTracked.reserve(80);
+    std::unordered_set<uint64_t> localSeen;
+
+    auto addLocalTracked = [&](uint64_t actor, int team, const ESPClassifyDiag &dg, int aiHint) {
+        if (localTracked.size() >= 64 || localSeen.count(actor)) return;
+        ESPTrackedActor tr;
+        tr.actor = actor;
+        tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
+        tr.fallback = 0;
+        tr.parent = 0;
+        uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
+        tr.mesh = meshComp;
+        tr.height = ESPActorBoxHeight(vmMap, meshComp);
+        tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
+        tr.isAI = (dg.ai || aiHint) ? 1 : 0;
+        // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
+        if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
+            team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
+            ESPBonesConfigure(vmMap, meshComp, gameBase, YES);
+        }
+        if (team == ESPTeam_Dummy) {
+            tr.kind = 3;
+            if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
+            if (!tr.root && tr.fallback) tr.root = tr.fallback;
+        } else {
+            tr.kind = 1;
+        }
+        // Nhớ AttachedParent ngay lúc track: root character thường không có
+        // parent -> refresh sau này bỏ hẳn parent read (tiết kiệm 1-2 reads).
+        if (tr.root) {
+            BOOL okp = NO;
+            uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
+            if (okp && ESPIsUserPtr(par)) tr.parent = par;
+        }
+        localTracked.push_back(tr);
+        localSeen.insert(actor);
+    };
+
+    // Fast path: PlayerArray (player + bot). Phân loại TRƯỚC actor array để
+    // box có ngay cả khi vòng actor bị budget cắt hoặc player nằm cuối mảng.
+    for (int p = 0; p < fastPawnN; p++) {
+        uint64_t actor = s_fastPawns[p].pawn;
+        if (!ESPIsUserPtr(actor) || actor == myPawn) continue;
+        int team = 0;
+        float hp = 0;
+        ESPClassifyDiag dg;
+        if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+            enemies++;
+            if (team == ESPTeam_Dummy) dummies++;
+            addLocalTracked(actor, team, dg, s_fastPawns[p].isBot ? 1 : 0);
+        }
+    }
+
+    // PlayerArray có dữ liệu => actor array chỉ cần lát 2048 actor/lượt để bắt
+    // hình nhân huấn luyện (kind 3). Không còn phụ thuộc thứ tự/may mắn của
+    // 8000 actor; mỗi lượt quét xong nhanh hơn nhiều lần.
+    uint32_t scanStart = 0;
+    uint32_t scanCount = scanN;
+    BOOL sliced = (fastPawnN > 0 && scanN > 2048);
+    static uint32_t s_scanSlice = 0; // con trỏ lát actor; resume nếu budget cắt
+    if (sliced) {
+        scanCount = 2048;
+        scanStart = s_scanSlice % scanN;
+    }
+    if (sliced) {
+        // Giữ hình nhân đã track (có thể nằm ngoài lát hiện tại) để box không
+        // chớp tắt; player thì luôn được dựng lại từ PlayerArray mỗi lượt.
+        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+        for (const auto &t : g_espTracked) {
+            if (t.kind == 3 && localTracked.size() < 64 && !localSeen.count(t.actor)) {
+                localTracked.push_back(t);
+                localSeen.insert(t.actor);
+            }
+        }
+    }
+    g_espProgressTotal.store((int)scanCount);
+    g_espProgress.store(0);
     uint32_t nVt = 0, nName = 0, nDummyName = 0, nChar = 0, nDummySig = 0;
     uint32_t nNo = 0, nFiltered = 0, nCached = 0;
     uint32_t nearChar = 0, nearDummy = 0, winOK = 0, winFail = 0;
@@ -1122,22 +1253,30 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
     // budget 48) — log thực tế có lượt scan 23.3s. Quá 0.5s thì dừng, phần còn
     // lại để lượt quét sau (TTL 0.8s) + discover (0.12s) phân loại nốt. Lượt
     // thường chỉ 0.0-0.2s nên ngưỡng này không bao giờ chạm khi vào trận.
+    // Budget 0.5s chỉ tính cho vòng actor: fast path PlayerArray có thể đã tốn
+    // ~1s map page, không để nó ăn hết budget của lát actor.
+    CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
+    uint32_t scanProcessed = 0;
     bool scanCompleted = true;
-    for (uint32_t i = 0; i < scanN; i++) {
-        if ((i & 15) == 0) g_espProgress.store((int)i);
-        if ((i & 63) == 0 && i > 0 && CFAbsoluteTimeGetCurrent() - t0 > 0.5) {
+    for (uint32_t step = 0; step < scanCount; step++) {
+        uint32_t i = scanStart + step;
+        if (i >= scanN) i -= scanN;
+        if ((step & 15) == 0) g_espProgress.store((int)step);
+        if ((step & 63) == 0 && step > 0 && CFAbsoluteTimeGetCurrent() - t0 > 0.5) {
             // kernrw52g: bỏ log scan budget cut (I/O mỗi scan)
             scanCompleted = false;
             break;
         }
         // Nhường mutex read cho box refresh chen vào: scan giữ từng read hàng
         // chục ms, không nhường thì refresh đói tới vài giây (max 4.8s đo thực
-        // tế). Nhịp 15Hz/1ms thay vì 64/3ms: cửa sổ actor giờ đi qua page cache
-        // nên vòng lặp vào/ra mutex rất nhanh -> nhường thưa thì refresh bị
-        // starve (mutex không fair) và tick vẽ bị treo cả giây.
-        if ((i & 15) == 0) usleep(1000);
+        // tế). qblpack: 250us thay vì 1ms — vẫn đủ để tick 60Hz chen vào giữa
+        // 2 actor, nhưng bớt 750ms sleep/8000 actor (scan xong sớm hơn = ít
+        // thời gian tranh provider với box refresh).
+        if ((step & 15) == 0) usleep(250);
+        scanProcessed = step + 1;
         uint64_t actor = s_actors[i];
         if (!ESPIsUserPtr(actor)) continue;
+        if (localSeen.count(actor)) continue; // fast path/giữ hình nhân đã xử lý
         r.scanned++;
         int team = 0; float hp = 0;
         ESPClassifyDiag dg;
@@ -1162,9 +1301,6 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         if (dg.vt) vtHist[dg.vt]++;
         if (verbose && logged < 24) {
             // kernrw52g: bỏ log a[i] (I/O blocking mỗi scan)
-                   i, (unsigned long long)actor, dg.rule, dg.win, (unsigned long long)dg.vt,
-                   dg.nameID, (unsigned long long)dg.mesh, dg.hp, dg.hpMax, dg.team,
-                   (unsigned long long)dg.tMesh, dg.tMax, dg.tCur, dg.tIsUp,
             logged++;
         }
         if (!isEnemy) continue;
@@ -1173,38 +1309,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         // Lưu lại để refresh vị trí nhanh giữa các lượt quét (ESPTrackedActor).
         // Dùng diag (field đọc trong ESPIsEnemy) — biến f ở nhánh phân loại
         // không còn scope ở đây.
-        if (localTracked.size() < 64) {
-            ESPTrackedActor tr;
-            tr.actor = actor;
-            tr.root = (ESPIsUserPtr(dg.root)) ? dg.root : 0;
-            tr.fallback = 0;
-            tr.parent = 0;
-            uint64_t meshComp = ESPBoxMesh(vmMap, actor, &dg, team);
-            tr.mesh = meshComp;
-            tr.height = ESPActorBoxHeight(vmMap, meshComp);
-            tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
-            tr.isAI = dg.ai ? 1 : 0;
-            // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
-            if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
-                team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
-                ESPBonesConfigure(vmMap, meshComp, gameBase, YES);
-            }
-            if (team == ESPTeam_Dummy) {
-                tr.kind = 3;
-                if (ESPIsUserPtr(dg.tMesh)) tr.fallback = dg.tMesh;
-                if (!tr.root && tr.fallback) tr.root = tr.fallback;
-            } else {
-                tr.kind = 1;
-            }
-            // Nhớ AttachedParent ngay lúc track: root character thường không có
-            // parent -> refresh sau này bỏ hẳn parent read (tiết kiệm 1-2 reads).
-            if (tr.root) {
-                BOOL okp = NO;
-                uint64_t par = ESPReadU64(vmMap, tr.root + ESPOff_Scene_AttachedParent, &okp);
-                if (okp && ESPIsUserPtr(par)) tr.parent = par;
-            }
-            localTracked.push_back(tr);
-        }
+        addLocalTracked(actor, team, dg, 0);
         if (!sample) {
             sample = actor;
             BOOL okRoot = NO;
@@ -1218,18 +1323,25 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             }
         }
     }
-    g_espProgress.store((int)scanN);
+    if (sliced) {
+        // Resume đúng chỗ budget cắt, không nhảy cóc 2048 actor.
+        uint32_t next = scanStart + scanProcessed;
+        s_scanSlice = (scanN > 0) ? (next % scanN) : 0;
+    }
+    g_espProgress.store((int)scanCount);
     {
         // Publish tracked cho box path (swap dưới lock, giữ lock cực ngắn).
         // Lượt quét ra 0 actor KHÔNG xoá tracked: hụt 1 lượt (world vừa đổi,
         // read fail, actor chưa spawn) mà xoá là refresh 60Hz trả 0 box cho tới
         // lượt quét sau (TTL 2s) — nhìn như box tắt/bật giật. Xoá tracked là
         // việc của ESPVerdictResetIfWorldChanged khi ĐỔI world.
-        // Budget-cut (dừng giữa chừng vì quá 0.5s): MERGE thay vì swap để
-        // không rơi mất địch đã track (discover + lượt sau bù phần còn lại).
+        // Budget-cut: fast path (fastPawnN>0) vẫn SWAP vì localTracked đã có
+        // đủ player sống từ PlayerArray + hình nhân giữ lại + lát actor vừa
+        // xử lý — swap để player chết rơi khỏi tracked. Full-scan fallback
+        // (fastPawnN=0) mới MERGE để không rơi địch ngoài phần đã quét.
         std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
         if (!localTracked.empty()) {
-            if (scanCompleted) {
+            if (scanCompleted || fastPawnN > 0) {
                 g_espTracked.swap(localTracked);
                 g_espTrackGen++;
             } else {
@@ -1238,7 +1350,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
                     for (const auto &t : g_espTracked) {
                         if (t.actor == nt.actor) { exists = true; break; }
                     }
-                    if (!exists) g_espTracked.push_back(nt);
+                    if (!exists && g_espTracked.size() < 64) g_espTracked.push_back(nt);
                 }
                 g_espTrackGen++;
             }
@@ -1395,6 +1507,19 @@ void ESPEngineRequestScan(uint64_t gameBase) {
             g_espLastScanEnemies = r.world ? (int)r.playerLike : -2; // -2 = fail
             g_espLastScanDummies = r.world ? (int)r.dummyLike : -1;
             g_espTrackedCount = (int)g_espTracked.size();
+            // qblpack: log nhịp quét 5s để biết "scan actors lâu" là do 1 lượt
+            // quét chậm hay do TTL 3s. fast>0 = PlayerArray hoạt động; khi đó
+            // scanned chỉ là lát 2048 actor (không phải budget cut). fast=0 và
+            // scanned < actors nghĩa là lượt quét bị budget 0.5s cắt giữa chừng.
+            static CFAbsoluteTime s_lastScanStat = 0;
+            if (g_espCheckedAt - s_lastScanStat >= 5.0) {
+                s_lastScanStat = g_espCheckedAt;
+                ESPLog("scan stat: ms=%.0f actors=%u scanned=%u enemies=%d dummies=%d tracked=%d fast=%d",
+                       g_espLastScanSeconds * 1000.0,
+                       g_espCache.actorCount, g_espCache.scanned,
+                       g_espLastScanEnemies, g_espLastScanDummies, g_espTrackedCount,
+                       g_espLastFastPawns);
+            }
             // kernrw52g: bỏ log scan finished (I/O) g_espLastScanSeconds,
         }
         g_espScanStart = 0;
@@ -1641,30 +1766,6 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         verdictVt = g_espVerdictVt;
     }
 
-    uint64_t level = 0, actorsData = 0;
-    uint32_t actorsCount = 0;
-    if (!ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount) ||
-        !actorsData || actorsCount == 0 || actorsCount > 20000) {
-        return;
-    }
-    uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
-
-    static thread_local std::vector<uint64_t> discActors;
-    discActors.resize(scanN);
-    uint32_t got = 0;
-    while (got < scanN) {
-        uint32_t chunk = scanN - got;
-        if (chunk > 2048) chunk = 2048;
-        if (!ESPReadWindow(vmMap, actorsData + (uint64_t)got * 8, discActors.data() + got,
-                           (uint64_t)chunk * 8)) {
-            for (uint32_t k = 0; k < chunk; k++) {
-                BOOL okk = NO;
-                discActors[got + k] = ESPReadU64(vmMap, actorsData + (uint64_t)(got + k) * 8, &okk);
-            }
-        }
-        got += chunk;
-    }
-
     int myTeam = INT_MIN;
     uint64_t myPawn = 0;
     {
@@ -1715,20 +1816,28 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
         added++;
     };
 
-    // Pass 1: verdict địch 1/3 chưa tracked (vừa unhide) + peek VTable
-    // verdict-2 (object pool tái dùng địa chỉ -> có thể đã thành địch).
-    // Unknown gom vào pass 2 theo budget.
     // Cooldown Pass 1: địch chết/ẩn giữ verdict 1 — check_live mỗi 120ms trên
     // hàng chục actor là cls=17 spam (window read thừa). 0.4s vẫn bắt unhide
     // đủ nhanh, giảm ~3 lần kernel đọc mỗi discover.
-    // Map này cũng được ESPVerdictResetIfWorldChanged clear dưới cùng mutex
-    // classify — truy cập ngắn dưới lock, không giữ qua ESPIsEnemy.
     const CFAbsoluteTime pass1Cd = 0.4;
-    for (uint32_t i = 0; i < scanN; i++) {
-        uint64_t actor = discActors[i];
+
+    // Pass 0 (fast): PlayerArray. Không phụ thuộc độ dài/thứ tự actor array;
+    // người chơi mới/unhide vào tracked trong 1 nhịp discover (~250ms-1s).
+    static ESPPlayerPawn s_discPawns[128];
+    int pawnN = ESPReadPlayerPawns(vmMap, world, s_discPawns, 128);
+    for (int p = 0; p < pawnN; p++) {
+        uint64_t actor = s_discPawns[p].pawn;
         if (!ESPIsUserPtr(actor) || trackedSet.count(actor)) continue;
         if (!hasVerdict.count(actor)) {
-            unknownIdx.push_back(i);
+            int team = 0;
+            float hp = 0;
+            ESPClassifyDiag dg;
+            cls++;
+            if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                if (s_discPawns[p].isBot) dg.ai = 1;
+                addTracked(actor, team, dg);
+            }
+            hasVerdict.insert(actor);
             continue;
         }
         if (enemyVerdict.count(actor)) {
@@ -1753,47 +1862,116 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
             }
             continue;
         }
-        // Verdict 2: peek 8B VTable từ page cache. Đổi class => phân loại lại
-        // ngay. KHÔNG gọi ESPIsEnemy khi age hết hạn — full scan lo re-validate
-        // (gọi ESPIsEnemy lúc age>kESPverdictExpiryFrames sẽ full-read TOÀN BỘ
-        // verdict-2 mỗi 120ms — hundreds of window reads, giật tick).
-        uint64_t vtOld = 0;
-        auto vti = verdictVt.find(actor);
-        if (vti != verdictVt.end()) vtOld = vti->second;
-        if (!vtOld) continue;
-        uint64_t vtNow = 0;
-        if (!ESPMemoryReadCached(vmMap, actor, &vtNow, sizeof(vtNow)) || vtNow == vtOld) {
-            continue;
-        }
-        int team = 0;
-        float hp = 0;
-        ESPClassifyDiag dg;
-        cls++;
-        if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
-            addTracked(actor, team, dg);
-        }
+        // verdict 2: để full scan re-validate (tránh window read mỗi 120ms).
     }
 
-    // Pass 2: phân loại unknown theo budget + round-robin.
-    // Degraded: budget nhỏ lại để nhẹ kernel (port DarkSwordMemoryProvider).
-    int budget = ESPProviderDiscoverBudget();
-    int unknownTried = 0;
-    if (!unknownIdx.empty()) {
-        uint32_t off = s_discOff % (uint32_t)unknownIdx.size();
-        for (int b = 0; b < budget && !unknownIdx.empty(); b++) {
-            uint32_t i = unknownIdx[(off + (uint32_t)b) % (uint32_t)unknownIdx.size()];
-            uint64_t actor = discActors[i];
-            if (trackedSet.count(actor)) continue;
-            int team = 0;
-            float hp = 0;
-            ESPClassifyDiag dg;
-            cls++;
-            unknownTried++;
-            if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
-                addTracked(actor, team, dg);
+    // Actor array: khi PlayerArray hoạt động chỉ cần 1Hz để tìm hình nhân
+    // huấn luyện; player/bot đã được Pass 0 phủ. PlayerArray hỏng (pawnN=0)
+    // thì chạy full như cũ.
+    static CFAbsoluteTime s_lastActorDisc = 0;
+    BOOL doActorDisc = (pawnN == 0) || (now - s_lastActorDisc >= 1.0);
+    if (doActorDisc) {
+        s_lastActorDisc = now;
+        uint64_t level = 0, actorsData = 0;
+        uint32_t actorsCount = 0;
+        if (ESPLevelAndActors(vmMap, world, &level, &actorsData, &actorsCount) &&
+            actorsData && actorsCount > 0 && actorsCount <= 20000) {
+            uint32_t scanN = actorsCount > ESP_MAX_ACTORS_SCAN ? ESP_MAX_ACTORS_SCAN : actorsCount;
+
+            static thread_local std::vector<uint64_t> discActors;
+            discActors.resize(scanN);
+            uint32_t got = 0;
+            while (got < scanN) {
+                uint32_t chunk = scanN - got;
+                if (chunk > 2048) chunk = 2048;
+                if (!ESPReadWindow(vmMap, actorsData + (uint64_t)got * 8, discActors.data() + got,
+                                   (uint64_t)chunk * 8)) {
+                    for (uint32_t k = 0; k < chunk; k++) {
+                        BOOL okk = NO;
+                        discActors[got + k] = ESPReadU64(vmMap, actorsData + (uint64_t)(got + k) * 8, &okk);
+                    }
+                }
+                got += chunk;
+            }
+
+            // Pass 1: verdict địch 1/3 chưa tracked (vừa unhide) + peek VTable
+            // verdict-2 (object pool tái dùng địa chỉ -> có thể đã thành địch).
+            // Unknown gom vào pass 2 theo budget.
+            // Map g_espPass1At cũng được ESPVerdictResetIfWorldChanged clear
+            // dưới cùng mutex classify — truy cập ngắn dưới lock, không giữ
+            // qua ESPIsEnemy.
+            for (uint32_t i = 0; i < scanN; i++) {
+                uint64_t actor = discActors[i];
+                if (!ESPIsUserPtr(actor) || trackedSet.count(actor)) continue;
+                if (!hasVerdict.count(actor)) {
+                    unknownIdx.push_back(i);
+                    continue;
+                }
+                if (enemyVerdict.count(actor)) {
+                    BOOL pass1Skip = NO;
+                    {
+                        std::lock_guard<std::recursive_mutex> lk(g_espClassifyMutex);
+                        auto p1 = g_espPass1At.find(actor);
+                        if (p1 != g_espPass1At.end() && now - p1->second < pass1Cd) {
+                            pass1Skip = YES;
+                        } else {
+                            g_espPass1At[actor] = now;
+                        }
+                    }
+                    if (pass1Skip) continue;
+                    // Verdict 1/3 nhưng chưa tracked: check_live (ẩn/chết) rồi add.
+                    int team = 0;
+                    float hp = 0;
+                    ESPClassifyDiag dg;
+                    cls++;
+                    if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                        addTracked(actor, team, dg);
+                    }
+                    continue;
+                }
+                // Verdict 2: peek 8B VTable từ page cache. Đổi class => phân loại lại
+                // ngay. KHÔNG gọi ESPIsEnemy khi age hết hạn — full scan lo re-validate
+                // (gọi ESPIsEnemy lúc age>kESPverdictExpiryFrames sẽ full-read TOÀN BỘ
+                // verdict-2 mỗi 120ms — hundreds of window reads, giật tick).
+                uint64_t vtOld = 0;
+                auto vti = verdictVt.find(actor);
+                if (vti != verdictVt.end()) vtOld = vti->second;
+                if (!vtOld) continue;
+                uint64_t vtNow = 0;
+                if (!ESPMemoryReadCached(vmMap, actor, &vtNow, sizeof(vtNow)) || vtNow == vtOld) {
+                    continue;
+                }
+                int team = 0;
+                float hp = 0;
+                ESPClassifyDiag dg;
+                cls++;
+                if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                    addTracked(actor, team, dg);
+                }
+            }
+
+            // Pass 2: phân loại unknown theo budget + round-robin.
+            // Degraded: budget nhỏ lại để nhẹ kernel (port DarkSwordMemoryProvider).
+            int budget = ESPProviderDiscoverBudget();
+            int unknownTried = 0;
+            if (!unknownIdx.empty()) {
+                uint32_t off = s_discOff % (uint32_t)unknownIdx.size();
+                for (int b = 0; b < budget && !unknownIdx.empty(); b++) {
+                    uint32_t i = unknownIdx[(off + (uint32_t)b) % (uint32_t)unknownIdx.size()];
+                    uint64_t actor = discActors[i];
+                    if (trackedSet.count(actor)) continue;
+                    int team = 0;
+                    float hp = 0;
+                    ESPClassifyDiag dg;
+                    cls++;
+                    unknownTried++;
+                    if (ESPIsEnemy(vmMap, actor, myTeam, myPawn, &team, &hp, &dg)) {
+                        addTracked(actor, team, dg);
+                    }
+                }
+                s_discOff = off + (uint32_t)budget;
             }
         }
-        s_discOff = off + (uint32_t)budget;
     }
 
     if (!newTracked.empty()) {
@@ -1803,7 +1981,7 @@ void ESPEngineDiscoverTick(uint64_t gameBase) {
             for (const auto &t : g_espTracked) {
                 if (t.actor == nt.actor) { exists = true; break; }
             }
-            if (!exists) g_espTracked.push_back(nt);
+            if (!exists && g_espTracked.size() < 64) g_espTracked.push_back(nt);
         }
         g_espTrackGen++;
         ESPTrackedSnapPublishLocked();

@@ -4335,7 +4335,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw62-fastbones"
+#define DS_ESP_BUILD_TAG "kernrw63-fastscan"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4346,6 +4346,19 @@ static dispatch_queue_t ds_esp_work_queue(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         q = dispatch_queue_create("com.huami.darkspeed.esp-tick", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
+// qblpack: task_for_pid / processor_set_tasks có thể treo vài giây lúc game
+// đang load (log: tick max=5721ms ngay sau enable). Task port chỉ là đường đọc
+// TẮT (fallback region-map vẫn chạy), nên probe nó trên queue nền riêng thay
+// vì chặn tick 60Hz.
+static dispatch_queue_t ds_task_probe_queue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.huami.darkspeed.game-task", DISPATCH_QUEUE_SERIAL);
     });
     return q;
 }
@@ -4610,11 +4623,17 @@ static void ds_esp_tick(void) {
                 }
             }
             ESPEngineRequestScan(g_gameBase);
-            // Task port game: thử mỗi 10s (trước đây mỗi tick -> Route A/B chậm).
+            // Task port game: thử mỗi 10s, TRÊN QUEUE NỀN. task_for_pid /
+            // processor_set_tasks có thể treo vài giây (log tick max=5721ms);
+            // gọi đồng bộ ở đây sẽ đứng hình ESP/HUD đúng nhịp.
             static CFAbsoluteTime s_lastTaskEnsure = 0;
             if (now2 - s_lastTaskEnsure >= 10.0) {
                 s_lastTaskEnsure = now2;
-                ESPGameTaskEnsure();
+                dispatch_async(ds_task_probe_queue(), ^{
+                    @autoreleasepool {
+                        ESPGameTaskEnsure();
+                    }
+                });
             }
             if (!s_pageCacheShed && ESPGameTaskPort() != MACH_PORT_NULL) {
                 // Non-blocking: scan nền đang đọc kernel thì để lần refresh sau.

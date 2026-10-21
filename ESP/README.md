@@ -35,14 +35,29 @@ Folder riêng cho ESP, không loạn dự án chính. Phase 1 đọc memory + đ
   - Không có `SkeletalMesh` (0x510).
   - `MaxHealth` (0x4AC) trong khoảng 50..2000, `CurHealth` (0x4D0) trong khoảng 0..MaxHealth.
 
-## Log chẩn đoán
-`Documents/ESP.log` (lấy qua Files app / Filza). Mỗi world mới ghi 2 lượt chi tiết:
+### Fast path PlayerArray (kernrw63-fastscan)
+Quét 8000 actor để tìm player rất chậm khi page cache lạnh (mỗi actor 1 cửa sổ
+`0xF00`, map budget 16/100ms). Từ kernrw63 lấy thẳng danh sách player/bot:
 
-- `scan start actors=<số actor PersistentLevel> level=0x.. base=0x..`
-- `diag pawn=0x.. inList=.. vTable=.. mesh=.. hp=..` — field của pawn mình.
-- `a[i] 0x.. r=<rule> w=<window OK> ...` — 24 actor đầu: rule 1=vtable 2=tên player 3=tên hình nhân 4=chữ ký character 5=chữ ký target.
-- `diag vtHist(..) 0x..:n ...` — histogram VTable.
-- `scan done enemies=.. dummy=.. win=../.. vt=.. nm=.. dnm=.. ch=.. dm=.. no=..`
+- `UWorld::GameState` `0x428` → `AGameStateBase::PlayerArray` `0x4C8`
+  (`TArray<APlayerState*>`, Num ở `+8`) → `APlayerState::PawnPrivate` `0x528`.
+- `APlayerState::bIsABot` là **bit 2** của byte `0x4DC` (cùng byte với
+  `bIsSpectator` bit 0, `bOnlySpectator` bit 1) — dùng cho AIMark.
+- Scan phân loại player từ PlayerArray **trước**, rồi chỉ quét lát 2048 actor/lượt
+  của actor array để bắt hình nhân (`kind 3`). PlayerArray rỗng/hỏng → quay lại
+  full scan cũ (không mất box).
+- Discover cũng có Pass 0 trên PlayerArray (~250ms–1s) nên player mới/unhide vào
+  tracked nhanh, không phụ thuộc vị trí trong actor array.
+- Log xác nhận: `fast players: N via PlayerArray` (mỗi world) và
+  `scan stat: ms=.. actors=.. scanned=.. enemies=.. tracked=.. fast=N` (5s/lần).
+
+## Log chẩn đoán
+`Documents/ESP.log` (lấy qua Files app / Filza). Các dòng chính:
+
+- `scan stat: ms=<thời gian quét> actors=<số actor PersistentLevel> scanned=<đã phân loại> enemies=.. dummies=.. tracked=.. fast=<pawn từ PlayerArray>` — 5s/lần.
+- `fast players: <N> via PlayerArray` — fast path hoạt động (N = số pawn đọc được).
+- `qbl present: ... work=..ms` / `box perf ...` — nhịp render.
+- Các log cũ `scan start`, `a[i]`, `diag vtHist`, `scan done` đã bỏ vì I/O mỗi scan (xem `0f50598`).
 
 ## Phase 2 (đã làm)
 `ESPOverlay` tạo `UIWindow` full-screen trong SpringBoard + pool view/label; `WorldToScreen`

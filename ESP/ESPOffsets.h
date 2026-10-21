@@ -37,6 +37,20 @@ static const uint32_t ESPOff_UWorld_PersistentLevel    = 0x30;
 static const uint32_t ESPOff_UWorld_OwningGameInstance = 0x470;
 static const uint32_t ESPOff_UWorld_Levels             = 0x440; // TArray<ULevel*>, fallback
 
+// --- Fast player path: UWorld.GameState -> PlayerArray -> PlayerState.Pawn ---
+// DUMP/SDK.txt (Engine.World, GameStateBase, PlayerState):
+//   World.GameState              @ 0x428  (AGameStateBase*)
+//   GameStateBase.PlayerArray    @ 0x4C8  (TArray<APlayerState*>; Data 0x4C8, Num 0x4D0)
+//   PlayerState.PawnPrivate      @ 0x528  (APawn*)
+//   PlayerState.bIsABot          @ 0x4DC  (byte bitfield: bIsABot = bit2)
+// Quét 8000 actor để tìm player rất chậm khi page cache lạnh; PlayerArray chỉ
+// ~100 phần tử nên có box trong <1s. Actor array vẫn được quét lát để bắt
+// hình nhân huấn luyện (kind 3) và làm fallback khi PlayerArray hỏng.
+static const uint32_t ESPOff_UWorld_GameState        = 0x428;
+static const uint32_t ESPOff_GameState_PlayerArray   = 0x4C8;
+static const uint32_t ESPOff_PlayerState_PawnPrivate = 0x528;
+static const uint32_t ESPOff_PlayerState_IsABot      = 0x4DC;
+
 // UEngine / UGameEngine
 static const uint32_t ESPOff_Engine_GameViewport = 0x810; // UEngine->GameViewport
 static const uint32_t ESPOff_GameEngine_GameInstance = 0xE20; // UGameEngine->GameInstance
