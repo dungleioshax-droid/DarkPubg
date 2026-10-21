@@ -84,7 +84,7 @@ Giờ theo đúng luồng QBLDrawList → `DSOverlay::PresentFrame`:
      (pointer + count — tham số an toàn qua RemoteCall); points/rects nằm trong
      **1 buffer remote** (`malloc` 1 lần, giữ giữa các frame) → 2 `remote_write`/frame;
    - text dùng pool 16 `UILabel` (2/box): setText **chỉ khi text đổi**, setFrame tối đa
-     30Hz + ngưỡng 0.5pt; viền chữ kiểu QBL (`AddOutlinedText`) xấp xỉ bằng shadow đen
+     15Hz + ngưỡng 0.5pt; viền chữ kiểu QBL (`AddOutlinedText`) xấp xỉ bằng shadow đen
      radius 1.2 set **1 lần** lúc tạo (0 chi phí mỗi frame).
    - frame trùng hash (không có gì đổi) → bỏ qua toàn bộ remote call.
 3. Tất cả nằm trong 1 `UIView` gốc (`g_qblRoot`) là con của container cũ → hide/show
@@ -103,11 +103,11 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
    1 call timeout là `RemoteCall` tự `destroyRemoteCall` (trojanMem=0) → HUD không
    ẩn/không cập nhật được nữa. Giờ:
    - window ensure chỉ tạo window + container (bỏ 8 bộ view per-box ≈ 150 call);
-   - shape/label **tạo lazy, tối đa 2 shape + 2 label mỗi tick**
+   - shape/label **tạo lazy, tối đa 1 shape + 1 label mỗi tick**
      (`kQBLShapeBudgetPerTick` / `kBQLLabelBudgetPerTick`);
    - geometry có **hash riêng từng bucket** + quantize 0.5pt → bucket không đổi thì
      không `setPath:`; frame đứng yên = 0 remote call;
-   - label pass 30Hz tách riêng, chạy cả khi geometry skip (không mất update);
+   - label pass 15Hz tách riêng, chạy cả khi geometry skip (không mất update);
    - pid SpringBoard đổi (respring) → tự reset cache và dựng lại overlay;
    - nếu disable không ẩn được window (session chết), địa chỉ HUD/ESP được giữ
      lại và enable sau ẩn bằng session mới (guard pid) → không đè 2 HUD/ESP;
@@ -122,12 +122,29 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
    hide được HUD (`session=-1`), present treo 2×10s timeout.
    - Style giờ **chỉ dùng màu singleton** (`+clearColor/+whiteColor/+blackColor/
      +redColor/+yellowColor/+greenColor`) — đúng pattern renderer cũ đã chạy ổn;
-   - font **mượn từ label HUD** (`font` getter, UILabel giữ retain), không factory;
+   - font **tạo riêng** 13pt (tên + mét) / 11pt (TeamID) qua
+     `+[UIFont monospacedDigitSystemFontOfSize:weight:]`; chỉ fallback font HUD khi
+     tạo font lỗi;
    - `g_qblStyleOK` / `g_qblDead`: style fail 3 lần → bỏ QBL trong session đó để
      **giữ session cho HUD**, không retry vô hạn;
    - `ds_remove_springboard_hud`: nếu session đã chết, **mở session mới chỉ để
      hide** HUD/ESP rồi destroy → tắt HUD luôn có tác dụng, không cần respring;
    - log thêm `process.lastError` (tên call bị fault) vào `ESP.log`.
+
+#### Ổn định lần 3 (respring khi ESP chạy + chữ to)
+
+- **Chữ to**: QBL từng mượn font HUD (24pt, custom 14..40) cho rect 180×32/84×15 →
+  tràn + nhoè. Giờ style tạo font riêng 13pt/11pt (retained, không factory color);
+  HUD font chỉ còn là fallback. Log `qbl style ok ... font=... small=...`.
+- **Respring**: nghi do tải dồn lên main thread SpringBoard khi path/label đổi liên
+  tục. Giảm tải:
+  - geometry tối đa **30Hz** (trước 60Hz), label pass **15Hz** (trước 30Hz);
+  - object mới **1 shape + 1 label/tick**, root tạo ở tick riêng trước khi style;
+  - cull rect/text/polyline theo viewport (margin 64pt), clamp toạ độ ±3× viewport,
+    bỏ NaN, rect < 0.5pt hoặc > 3× màn hình;
+  - label anchor NaN/|x|>20000 → ẩn, không setFrame;
+  - log từng phase (`qbl phase: root create/style/shape N/label N`) + stat 5s
+    (`qbl present: frames=... bones=...`) để khoanh vùng nếu còn respring.
 
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
@@ -146,13 +163,19 @@ DUMP/SDK (`USkeletalMeshComponent`) xác nhận 2 mảng transform:
 field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống tới `ComponentVelocity`
 `0x2C0`). Engine vẫn **validate runtime** trước khi dùng:
 
+- **Bảng theo TÊN xương trước** (qblpack): đọc `mesh+0xA20` → `SkeletalMesh`,
+  `+0x48` → `USkeleton`, `+0x30` → `BoneTree` (`TArray<FBoneNode>`, stride `0x10`),
+  resolve FName qua GNames và khớp 17 khớp (`head`, `neck`, `spine_03`, `pelvis`,
+  `upperarm_l/r`, `lowerarm_l/r`, `hand_l/r`, `thigh_l/r`, `calf_l/r`, `foot_l/r`).
+  Hỗ trợ cả tên kiểu `Bip01 L UpperArm`. Chỉ nhận khi **đủ 17 khớp** và validate
+  hình học; fail mới fallback 3 bảng index cũ.
 - Thử lần lượt `0xCE0` → `0xCD0`; nếu không khớp mới quét dải cũ
   `mesh+[0x480..0xC00)` bước 8 làm fallback (`ESPOff_Mesh_BoneScanStart/End`).
   Stride `0x30` (`ESPOff_BoneTransformSize`).
-- Với mỗi ứng viên thử 3 bảng index khớp phổ biến (UE4 mannequin + 2 biến thể rig)
-  và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay 15..45cm, chân
-  25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau 20..80cm.
-  `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
+- Với mỗi ứng viên thử bảng tên + 3 bảng index khớp phổ biến (UE4 mannequin + 2
+  biến thể rig) và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay
+  15..45cm, chân 25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau
+  20..80cm. `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
 - Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
   (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
 - Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0x<off> ok` /
@@ -160,9 +183,12 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
 - Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
 - Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
-**Lưu ý:** log `bones: offset=0xce0 ...` là kỳ vọng đúng với DUMP hiện tại. Nếu toàn
-`bones no-match` thì rig khác bảng index (gửi log để thêm bảng mới); `bones auto-off`
-thì offset/map sai (engine tự tắt, các tính năng khác không ảnh hưởng).
+**Lưu ý:** log `bones: offset=0xce0 ... NAME-MAP ok` là kỳ vọng đúng với DUMP hiện
+tại. Nếu toàn `bones no-match` thì gửi log; các dòng chẩn đoán cần xem:
+`bones names: no SkeletalMesh` / `no USkeleton` / `GNames chua san sang` /
+`tree=... resolved=...` (khớp tên), `bones names: off=... count=... need=... why=...`
+(vì sao bảng tên fail), `bones probe: 0xce0 ...` (TArray + toạ độ đầu).
+`bones auto-off` thì offset/map sai (engine tự tắt, các tính năng khác không ảnh hưởng).
 
 ### Chiều cao box
 

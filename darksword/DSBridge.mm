@@ -2697,7 +2697,7 @@ static uint64_t g_qblBlackColor = 0;   // +blackColor (shadow + HP nền)
 static uint64_t g_qblRedColor = 0;     // +redColor
 static uint64_t g_qblGreenColor = 0;   // +greenColor
 static uint64_t g_qblShadowCG = 0;
-static uint64_t g_qblFontMain = 0;     // mượn font của label HUD (label giữ retain)
+static uint64_t g_qblFontMain = 0;     // font riêng 13pt (retained)
 static uint64_t g_qblFontSmall = 0;
 static BOOL g_qblStyleOK = NO;
 static uint8_t g_qblStyleFails = 0;    // fail liên tiếp -> tắt QBL, tránh giết session
@@ -2706,8 +2706,10 @@ static BOOL g_qblDead = NO;            // đường vẽ QBL đã bị bỏ tron
 static uint8_t g_qblShapeFail[kQBLBucketCount];
 static uint8_t g_qblLabelFail[kQBLLabelCount];
 // Lazy creation: mỗi tick tối đa N object mới (tránh dồn ~180 remote call).
-#define kQBLShapeBudgetPerTick 2
-#define kQBLLabelBudgetPerTick 2
+// qblpack: hạ 2 -> 1. Mỗi object là 8-10 RemoteCall (alloc/init/set...); tạo
+// 2 shape + 2 label trong 1 tick từng làm present đầu mất 2.8s, dễ watchdog.
+#define kQBLShapeBudgetPerTick 1
+#define kQBLLabelBudgetPerTick 1
 static int s_qblShapeBudget = 0;
 static int s_qblLabelBudget = 0;
 
@@ -2849,12 +2851,17 @@ static BOOL ds_qbl_style_ready(RemoteCall *process) {
     if (!g_qblRedColor)   g_qblRedColor   = g_qblWhiteColor;
     if (!g_qblGreenColor) g_qblGreenColor = g_qblWhiteColor;
 
-    // Font: UILabel HUD giữ retain font của nó -> getter an toàn, không cần
-    // retain. Không lấy được thì để UILabel tự dùng font mặc định (vẫn hiện).
+    // qblpack FONT: KHÔNG mượn font HUD. HUD mặc định 24pt (custom 14..40)
+    // trong khi rect QBL thiết kế cho 13pt (tên+mét, 180x32) và 11pt
+    // (TeamID, 84x15) -> chữ tràn/che box. UIFont là object cache/immortal
+    // nên retain-after-sync an toàn (không dính race như UIColor factory).
+    if (!g_qblFontMain)  g_qblFontMain  = ds_remote_font(process, 13.0, NO);
+    if (!g_qblFontSmall) g_qblFontSmall = ds_remote_font(process, 11.0, NO);
     if (!g_qblFontMain && g_remoteLabel && g_remoteWindowPid == (pid_t)process.pid) {
+        // Fallback duy nhất: font HUD (chữ vẫn hiện, chỉ to hơn thiết kế).
         g_qblFontMain = ds_remote_get_object_on_main(process, g_remoteLabel, "font");
     }
-    g_qblFontSmall = g_qblFontMain;
+    if (!g_qblFontSmall) g_qblFontSmall = g_qblFontMain;
 
     // Shadow text: CGColor của blackColor (getter, không retain CF object).
     if (!g_qblShadowCG) {
@@ -2862,8 +2869,8 @@ static BOOL ds_qbl_style_ready(RemoteCall *process) {
     }
     g_qblStyleOK = YES;
     g_qblStyleFails = 0;
-    ESPLog("qbl style ok shadow=%d font=%d ai=%d green=%d red=%d",
-           g_qblShadowCG ? 1 : 0, g_qblFontMain ? 1 : 0,
+    ESPLog("qbl style ok shadow=%d font=%d small=%d ai=%d green=%d red=%d",
+           g_qblShadowCG ? 1 : 0, g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0,
            g_qblAIColor ? 1 : 0, g_qblGreenColor ? 1 : 0, g_qblRedColor ? 1 : 0);
     return YES;
 }
@@ -2886,6 +2893,7 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
                (unsigned long long)addSublayer);
         return 0;
     }
+    ESPLog("qbl phase: shape %d", bucket);
     uint64_t layer = remote_msg(process, shapeClass, alloc, 0, 0, 0, 0);
     if (!layer || !ds_remote_invoke_noarg_on_main(process, layer, "init")) {
         if (g_qblShapeFail[bucket] < 255) g_qblShapeFail[bucket]++;
@@ -2936,6 +2944,7 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
         return 0;
     }
+    ESPLog("qbl phase: label %d", slot);
     uint64_t lb = remote_msg(process, labelClass, alloc, 0, 0, 0, 0);
     if (!lb || !ds_remote_invoke_noarg_on_main(process, lb, "init")) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
@@ -3010,14 +3019,10 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
                (unsigned long long)addSubview);
         return NO;
     }
-    if (!ds_qbl_style_ready(process)) {
-        if (g_qblStyleFails >= 3) {
-            g_qblDead = YES;
-            ESPLog("qbl: style fail 3x -> bo QBL renderer (giu session cho HUD)");
-        }
-        return NO;
-    }
-
+    // qblpack: KHÔNG dựng style (6 màu + 2 font + shadow) trong cùng tick với
+    // root nữa. Tick đầu chỉ tạo root (3 call), tick sau mới style -> tránh
+    // dồn ~15 RemoteCall liên tiếp làm SpringBoard main thread đứng lâu.
+    ESPLog("qbl phase: root create");
     uint64_t root = remote_msg(process, viewClass, alloc, 0, 0, 0, 0);
     if (!root || !ds_remote_invoke_noarg_on_main(process, root, "init")) {
         const char *err = process.lastError.UTF8String;
@@ -3027,8 +3032,8 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
     }
     ds_remote_set_rect_on_main(process, root, "setFrame:", portraitBounds);
     ds_remote_set_u64_on_main(process, root, "setUserInteractionEnabled:", 0);
-    ds_perform_on_springboard_main(process, root, ds_remote_sel(process, "setBackgroundColor:"),
-                                   g_qblClearColor, YES);
+    // Root UIView mặc định trong suốt (backgroundColor=nil) — không cần gọi
+    // setBackgroundColor: clearColor ở đây; tiết kiệm 1 RemoteCall lúc khởi tạo.
     if (!ds_perform_on_springboard_main(process, g_espContainer, addSubview, root, YES)) {
         ESPLog("qbl ensure fail: addSubview");
         return NO;
@@ -3271,6 +3276,17 @@ static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
                                CGPoint anchor) {
     if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
+    // qblpack: anchor NaN/cực lớn (W2S lỗi) -> ẩn, không tạo label mới và
+    // không setFrame với toạ độ điên (SpringBoard có thể respring vì path/rect).
+    if (!isfinite((double)anchor.x) || !isfinite((double)anchor.y) ||
+        fabs((double)anchor.x) > 20000.0 || fabs((double)anchor.y) > 20000.0) {
+        uint64_t hidden = g_qblLabel[slot];
+        if (hidden && g_qblLabelShown[slot]) {
+            ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
+            g_qblLabelShown[slot] = NO;
+        }
+        return;
+    }
     if (!c->text[0]) {
         uint64_t hidden = g_qblLabel[slot];
         if (hidden && g_qblLabelShown[slot]) {
@@ -3354,14 +3370,30 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         g_espWindowHiddenCache = wantHidden;
     }
     if (wantHidden) return;
+    BOOL hadRoot = (g_qblRoot != 0);
     if (!ds_qbl_ensure(process, portraitBounds)) return;
+    if (!hadRoot && g_qblRoot) {
+        // Tick đầu chỉ dựng root; style/shape/label để tick sau (chia burst).
+        ESPDrawFrameReset();
+        return;
+    }
+    if (!g_qblStyleOK) {
+        ESPLog("qbl phase: style");
+        if (!ds_qbl_style_ready(process)) {
+            if (g_qblStyleFails >= 3) {
+                g_qblDead = YES;
+                ESPLog("qbl: style fail 3x -> bo QBL renderer (giu session cho HUD)");
+            }
+            return;
+        }
+    }
     if (!CGRectEqualToRect(g_qblWindowFrame, portraitBounds)) {
         ds_remote_set_rect_on_main(process, g_espWindow, "setFrame:", portraitBounds);
         ds_remote_set_rect_on_main(process, g_espContainer, "setFrame:", portraitBounds);
         g_qblWindowFrame = portraitBounds;
     }
 
-    // Budget tạo object mới: tối đa 2 shape + 2 label/tick (xem chú thích ở
+    // Budget tạo object mới: tối đa 1 shape + 1 label/tick (xem chú thích ở
     // kQBLShapeBudgetPerTick). Object dư sẽ được tạo ở các tick sau.
     s_qblShapeBudget = kQBLShapeBudgetPerTick;
     s_qblLabelBudget = kQBLLabelBudgetPerTick;
@@ -3390,15 +3422,28 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     const CGPoint *framePts = ESPDrawFramePoints();
     BOOL missing = NO;
 
-    // ---- gather (map + quantize 0.5pt) ----
+    // ---- gather (map + quantize 0.5pt + cull) ----
+    // qblpack: dữ liệu W2S có thể ra NaN/toạ độ cực lớn (actor sau lưng, camera
+    // lỗi, box khổng lồ). CGPathAddRects/AddLines với rect vài triệu pt từng
+    // làm SpringBoard respring. Cull theo viewport (margin 64pt) + clamp điểm.
+    const CGFloat cullX0 = -64.0, cullY0 = -64.0;
+    const CGFloat cullX1 = landW + 64.0, cullY1 = landH + 64.0;
+    const CGFloat maxRectW = landW * 3.0, maxRectH = landH * 3.0;
     for (int i = 0; i < ncmds; i++) {
         const ESPDrawCommand *c = &cmds[i];
         if (c->prim == ESPDrawPrimText) {
             if (s_qblTextCount >= kQBLLabelCount) continue;
             int slot = s_qblTextCount;
             s_qblTexts[slot] = *c; // copy: command buffer reset sau present
-            s_qblTextAnchor[slot] = ds_qbl_qpoint(
-                ds_esp_map_point(CGPointMake(c->tx, c->ty), landW, landH, winCenter, mapOrient));
+            CGPoint anchor = ds_esp_map_point(CGPointMake(c->tx, c->ty),
+                                              landW, landH, winCenter, mapOrient);
+            if (!isfinite((double)anchor.x) || !isfinite((double)anchor.y)) {
+                anchor = CGPointMake(-10000.0, -10000.0); // label pass sẽ ẩn
+            } else {
+                anchor.x = MAX(-landW, MIN(anchor.x, landW * 2.0));
+                anchor.y = MAX(-landH, MIN(anchor.y, landH * 2.0));
+            }
+            s_qblTextAnchor[slot] = ds_qbl_qpoint(anchor);
             uint64_t th = 1469598103934665603ULL;
             ds_qbl_hash_bytes(&th, c->text, sizeof(c->text));
             ds_qbl_hash_bytes(&th, &c->color, sizeof(c->color));
@@ -3412,8 +3457,15 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         if (bk < 0 || bk >= kQBLBucketCount) continue;
         if (c->prim == ESPDrawPrimRect) {
             if (s_qblRectCount[bk] >= DS_QBL_MAX_RECTS) continue;
-            s_qblRects[bk][s_qblRectCount[bk]++] =
-                ds_qbl_qrect(ds_esp_map_rect(c->rect, landW, landH, winCenter, mapOrient));
+            CGRect r = ds_esp_map_rect(c->rect, landW, landH, winCenter, mapOrient);
+            if (!isfinite((double)r.origin.x) || !isfinite((double)r.origin.y) ||
+                !isfinite((double)r.size.width) || !isfinite((double)r.size.height)) continue;
+            r = CGRectStandardize(r);
+            if (r.size.width < 0.5 || r.size.height < 0.5) continue;
+            if (r.size.width > maxRectW || r.size.height > maxRectH) continue;
+            if (CGRectGetMaxX(r) < cullX0 || r.origin.x > cullX1 ||
+                CGRectGetMaxY(r) < cullY0 || r.origin.y > cullY1) continue;
+            s_qblRects[bk][s_qblRectCount[bk]++] = ds_qbl_qrect(r);
         } else if (c->prim == ESPDrawPrimPolyline) {
             if (s_qblPolyCount[bk] >= DS_QBL_MAX_POLYS) continue;
             if (!framePts) continue;
@@ -3421,11 +3473,26 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
             int pc = c->pointCount;
             if (pc < 2 || pc > 128) continue;
             if (s_qblPtCount + pc > ESP_DRAW_MAX_POINTS) continue;
-            int start = s_qblPtCount;
+            CGPoint mapped[128];
+            CGFloat minX = 1e18, maxX = -1e18, minY = 1e18, maxY = -1e18;
+            BOOL bad = NO;
             for (int k = 0; k < pc; k++) {
-                s_qblPts[s_qblPtCount++] =
-                    ds_qbl_qpoint(ds_esp_map_point(src[k], landW, landH, winCenter, mapOrient));
+                CGPoint p = ds_esp_map_point(src[k], landW, landH, winCenter, mapOrient);
+                if (!isfinite((double)p.x) || !isfinite((double)p.y)) { bad = YES; break; }
+                // Clamp vào 3x viewport: path khổng lồ = main thread SB quá tải.
+                p.x = MAX(-landW, MIN(p.x, landW * 2.0));
+                p.y = MAX(-landH, MIN(p.y, landH * 2.0));
+                mapped[k] = ds_qbl_qpoint(p);
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
             }
+            if (bad) continue;
+            // Cả polyline ngoài màn hình (kể cả đường cắt ngang) -> bỏ.
+            if (maxX < cullX0 || minX > cullX1 || maxY < cullY0 || minY > cullY1) continue;
+            int start = s_qblPtCount;
+            for (int k = 0; k < pc; k++) s_qblPts[s_qblPtCount++] = mapped[k];
             s_qblPolys[bk][s_qblPolyCount[bk]].start = start;
             s_qblPolys[bk][s_qblPolyCount[bk]].count = pc;
             s_qblPolyCount[bk]++;
@@ -3459,20 +3526,31 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         ds_qbl_hash_bytes(&hash, &s_qblTextHash[t], sizeof(uint64_t));
     }
 
+    // qblpack: geometry tối đa 30Hz. Trước đây hash đổi gần như mỗi frame khi
+    // player di chuyển -> mỗi frame tạo 5-10 CGPath + release path cũ +
+    // setPath: trong SpringBoard (60Hz). Đây là tải chính gây respring.
+    // KHÔNG cập nhật g_qblFrameHash khi bị throttle (nếu không sẽ mất update).
+    static CFAbsoluteTime s_lastGeomPass = 0;
+    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 30.0));
     BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
-    if (skipGeometry) {
+    BOOL deferGeometry = (!skipGeometry && !geomDue);
+    if (skipGeometry || deferGeometry) {
         g_qblSkips++;
     } else {
+        s_lastGeomPass = nowP;
         g_qblFrameHash = hash;
         g_qblFrames++;
     }
 
-    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
+    // ---- label pass (15Hz, chạy CẢ khi geometry không đổi) ----
     // Geometry hash chỉ đổi khi rect/point đổi > 0.5pt; label còn phụ thuộc
     // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
     // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
     static CFAbsoluteTime s_lastLabelPass = 0;
-    if (nowP - s_lastLabelPass >= (1.0 / 30.0)) {
+    // qblpack: 15Hz thay vì 30Hz. Label di chuyển theo box nên mỗi lần chạy
+    // có thể setFrame 16 UILabel; 30Hz x 16 = 480 RemoteCall/s làm main thread
+    // SpringBoard nghẽn. 15Hz vẫn mượt với text, giảm một nửa tải.
+    if (nowP - s_lastLabelPass >= (1.0 / 15.0)) {
         BOOL labelWork = NO;
         for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
             if (t >= s_qblTextCount) {
@@ -3519,7 +3597,7 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         }
     }
 
-    if (skipGeometry) {
+    if (skipGeometry || deferGeometry) {
         ESPDrawFrameReset();
         return;
     }
@@ -3527,8 +3605,9 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     static CFAbsoluteTime s_lastStatLog = 0;
     if (nowP - s_lastStatLog > 5.0) {
         s_lastStatLog = nowP;
-        ESPLog("qbl present: frames=%lu skips=%lu cmds=%d texts=%d pts=%d missing=%d",
-               g_qblFrames, g_qblSkips, ncmds, s_qblTextCount, s_qblPtCount, missing ? 1 : 0);
+        ESPLog("qbl present: frames=%lu skips=%lu cmds=%d texts=%d pts=%d missing=%d bones=%s",
+               g_qblFrames, g_qblSkips, ncmds, s_qblTextCount, s_qblPtCount,
+               missing ? 1 : 0, ESPEngineBonesStatus());
     }
 
     // ---- gom rect + point vào 1 buffer remote (1 write/frame) ----

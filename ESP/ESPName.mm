@@ -308,6 +308,10 @@ static uint64_t ESPFindGNamesByScan(uint64_t vmMap, uint64_t gameBase) {
     return 0;
 }
 
+BOOL ESPUNameReady(uint64_t gameBase) {
+    return (s_uname != 0 && s_unameBase == gameBase) ? YES : NO;
+}
+
 uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase) {
     if (s_uname && s_unameBase == gameBase) return s_uname;
     ESPNameReset(gameBase);

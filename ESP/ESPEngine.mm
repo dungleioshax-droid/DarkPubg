@@ -24,6 +24,7 @@
 #include <unistd.h> // usleep: scan nhường mutex cho box refresh
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <vector>
 
 extern "C" {
@@ -50,7 +51,8 @@ extern void DSBridgeRefreshGameBase(void);
 static BOOL ESPIsUserPtr(uint64_t p);
 static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok);
 static void ESPBonesReset(void); // qblpack: xoá cấu hình xương khi đổi world
-static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh); // qblpack: dò bảng xương (định nghĩa cuối file)
+static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
+                              BOOL allowNameScan); // qblpack: dò bảng xương (định nghĩa cuối file)
 // qblpack: cờ xương dùng ngay trong vòng quét (dòng ~1181) — khai báo trước vì
 // định nghĩa static ở cuối file (build kernrw58: undeclared identifier).
 static std::atomic_bool g_espBonesWant{false};
@@ -1185,7 +1187,7 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
             // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
             if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
                 team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
-                ESPBonesConfigure(vmMap, meshComp);
+                ESPBonesConfigure(vmMap, meshComp, gameBase, YES);
             }
             if (team == ESPTeam_Dummy) {
                 tr.kind = 3;
@@ -2413,10 +2415,13 @@ static float ESPBoneDist(const ESPVector *p, int a, int b) {
 }
 
 // Validate 1 bảng index trên vị trí component-space của các xương.
-static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
+// whyOut (tuỳ chọn) nhận lý do fail để log chẩn đoán — không spam mỗi frame.
+static BOOL ESPBoneMapValidateEx(const ESPVector *p, int count, const int *map,
+                                 const char **whyOut) {
+    if (whyOut) *whyOut = "args";
     if (!p || !map || count < 8) return NO;
     for (int i = 0; i < ESPBone_Count; i++) {
-        if (map[i] < 0 || map[i] >= count) return NO;
+        if (map[i] < 0 || map[i] >= count) { if (whyOut) *whyOut = "index>=count"; return NO; }
     }
     const ESPVector &head = p[map[ESPBone_Head]];
     const ESPVector &neck = p[map[ESPBone_Neck]];
@@ -2425,10 +2430,14 @@ static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
     // 1) Chuỗi thân thẳng đứng: đầu > cổ > ngực > hông, mỗi đoạn 3..60cm,
     //    đầu-hông 45..130cm (người 1m4..2m + sai số).
     float dHeadPelvis = ESPBoneDist(p, map[ESPBone_Head], map[ESPBone_Pelvis]);
+    if (whyOut) *whyOut = "head-pelvis distance";
     if (dHeadPelvis < 45.0f || dHeadPelvis > 130.0f) return NO;
+    if (whyOut) *whyOut = "spine z order";
     if (!(head.z > neck.z + 3.0f && neck.z > chest.z + 3.0f && chest.z > pelvis.z + 3.0f)) return NO;
+    if (whyOut) *whyOut = "head-neck distance";
     if (ESPBoneDist(p, map[ESPBone_Head], map[ESPBone_Neck]) > 40.0f) return NO;
     // 2) Tay: vai gần ngực, vai-khuỷu và khuỷu-bàn tay 15..45cm.
+    if (whyOut) *whyOut = "arm lengths";
     for (int side = 0; side < 2; side++) {
         int s = side ? ESPBone_RShoulder : ESPBone_LShoulder;
         int e = side ? ESPBone_RElbow : ESPBone_LElbow;
@@ -2439,6 +2448,7 @@ static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
     }
     // 3) Chân: hông sát hông, hông-gối và gối-bàn chân 25..70cm, bàn chân thấp
     //    hơn hông (trục Z hướng lên).
+    if (whyOut) *whyOut = "leg lengths";
     for (int side = 0; side < 2; side++) {
         int hp = side ? ESPBone_RHip : ESPBone_LHip;
         int kn = side ? ESPBone_RKnee : ESPBone_LKnee;
@@ -2449,6 +2459,7 @@ static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
         if (!(p[map[ft]].z < p[map[kn]].z + 3.0f && p[map[kn]].z < p[map[hp]].z + 3.0f)) return NO;
     }
     // 4) 2 vai phải ở 2 phía ngực (tích vô hướng vector ngực->vai không dương).
+    if (whyOut) *whyOut = "shoulder symmetry";
     {
         const ESPVector &c = p[map[ESPBone_Chest]];
         const ESPVector &l = p[map[ESPBone_LShoulder]];
@@ -2464,7 +2475,12 @@ static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
         float sep = sqrtf(dx*dx + dy*dy + dz*dz);
         if (sep < 20.0f || sep > 80.0f) return NO;
     }
+    if (whyOut) *whyOut = "ok";
     return YES;
+}
+
+static BOOL ESPBoneMapValidate(const ESPVector *p, int count, const int *map) {
+    return ESPBoneMapValidateEx(p, count, map, NULL);
 }
 
 // Đọc header TArray<FTransform> tại mesh+off. data/user-ptr + count 15..800.
@@ -2500,19 +2516,275 @@ static BOOL ESPReadBoneLocals(uint64_t vmMap, uint64_t data, ESPVector *out, int
     return YES;
 }
 
+// ---------------------------------------------------------------------------
+// qblpack: dò TÊN xương từ USkeleton thay vì chỉ hard-code index.
+// PUBG đổi rig/season làm index lệch, nhưng tên xương ("head", "pelvis",
+// "upperarm_l"...) ổn định. BoneTree là mảng ref-skeleton, cùng thứ tự với
+// CachedComponentSpaceTransforms của mesh full-body. Validate hình học xong
+// mới nhận; fail thì caller fallback 3 bảng index cũ.
+// ---------------------------------------------------------------------------
+
+static void ESPBoneLowerCopy(char *dst, size_t cap, const char *src) {
+    if (!dst || cap == 0) return;
+    size_t i = 0;
+    for (; src && src[i] && i + 1 < cap; i++) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i] = (char)((c >= 'A' && c <= 'Z') ? (c - 'A' + 'a') : c);
+    }
+    dst[i] = '\0';
+}
+
+// 1 = trái, 2 = phải, 0 = không rõ. Hỗ trợ "_l", ".l", "left", "l_",
+// "bip01 l upperarm" (space token) và hậu tố "... l".
+static int ESPBoneNameSide(const char *n) {
+    if (!n || !n[0]) return 0;
+    if (strstr(n, "_l") || strstr(n, ".l") || strstr(n, "_left") ||
+        strstr(n, "left") || strstr(n, " l") || strncmp(n, "l_", 2) == 0 ||
+        strncmp(n, "l ", 2) == 0) return 1;
+    if (strstr(n, "_r") || strstr(n, ".r") || strstr(n, "_right") ||
+        strstr(n, "right") || strstr(n, " r") || strncmp(n, "r_", 2) == 0 ||
+        strncmp(n, "r ", 2) == 0) return 2;
+    return 0;
+}
+
+// Điểm khớp theo tên (đã lowercase). 0 = không phải khớp này.
+// Điểm càng cao càng khớp: 100 = tên chuẩn UE4, 60 = biến thể, 40 = dự phòng.
+static int ESPBoneNameScore(const char *n, int slot) {
+    if (!n || !n[0]) return 0;
+    // Bone phụ/đồ trang bị — bỏ để không bắt nhầm (twist, finger, weapon...).
+    static const char *const kSkip[] = {
+        "twist", "roll", "ik", "socket", "weapon", "attach", "camera",
+        "spring", "muzzle", "backpack", "vest", "helmet", "hair", "cloth",
+        "skirt", "ball", "toe", "finger", "thumb", "index", "middle",
+        "ring", "pinky", "eye", "jaw", "breast", "ponytail", "beard",
+        "mask", "glass", "hat", "bag", "footstep", "root_motion"
+    };
+    for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++) {
+        if (strstr(n, kSkip[i])) return 0;
+    }
+    int side = ESPBoneNameSide(n);
+    int want = 0;
+    if (slot == ESPBone_LShoulder || slot == ESPBone_LElbow || slot == ESPBone_LHand ||
+        slot == ESPBone_LHip || slot == ESPBone_LKnee || slot == ESPBone_LFoot) want = 1;
+    if (slot == ESPBone_RShoulder || slot == ESPBone_RElbow || slot == ESPBone_RHand ||
+        slot == ESPBone_RHip || slot == ESPBone_RKnee || slot == ESPBone_RFoot) want = 2;
+    if (want) {
+        if (side != want) return 0;
+    } else if (side) {
+        return 0; // head/neck/spine/pelvis không được có hậu tố trái/phải
+    }
+    switch (slot) {
+        case ESPBone_Head:
+            if (!strcmp(n, "head") || !strcmp(n, "head_01") || !strcmp(n, "head1")) return 100;
+            if (!strcmp(n, "bip01 head")) return 90;
+            if (strstr(n, "head")) return 40;
+            break;
+        case ESPBone_Neck:
+            if (!strcmp(n, "neck") || !strcmp(n, "neck_01") || !strcmp(n, "neck1")) return 100;
+            if (strstr(n, "neck")) return 50;
+            break;
+        case ESPBone_Chest:
+            if (!strcmp(n, "spine_03") || !strcmp(n, "spine3") || !strcmp(n, "spine_03_01")) return 100;
+            if (!strcmp(n, "spine_02") || !strcmp(n, "spine2")) return 80;
+            if (!strcmp(n, "spine_01") || !strcmp(n, "spine1") || !strcmp(n, "spine")) return 60;
+            if (strstr(n, "spine")) return 30;
+            break;
+        case ESPBone_Pelvis:
+            if (!strcmp(n, "pelvis") || !strcmp(n, "pelvis_01") ||
+                !strcmp(n, "hips") || !strcmp(n, "hip")) return 100;
+            if (strstr(n, "pelvis")) return 60;
+            break;
+        case ESPBone_LShoulder:
+            if (!strcmp(n, "upperarm_l") || !strcmp(n, "upper_arm_l") ||
+                !strcmp(n, "arm_l") || !strcmp(n, "l_upperarm")) return 100;
+            if (strstr(n, "upperarm") || strstr(n, "upper_arm") || strstr(n, " arm")) return 60;
+            if (strstr(n, "clavicle") || strstr(n, "collar")) return 40;
+            break;
+        case ESPBone_LElbow:
+            if (!strcmp(n, "lowerarm_l") || !strcmp(n, "lower_arm_l") ||
+                !strcmp(n, "forearm_l") || !strcmp(n, "l_forearm")) return 100;
+            if (strstr(n, "lowerarm") || strstr(n, "lower_arm") || strstr(n, "forearm")) return 60;
+            break;
+        case ESPBone_LHand:
+            if (!strcmp(n, "hand_l") || !strcmp(n, "l_hand")) return 100;
+            if (strstr(n, "hand")) return 40;
+            break;
+        case ESPBone_RShoulder:
+            if (!strcmp(n, "upperarm_r") || !strcmp(n, "upper_arm_r") ||
+                !strcmp(n, "arm_r") || !strcmp(n, "r_upperarm")) return 100;
+            if (strstr(n, "upperarm") || strstr(n, "upper_arm") || strstr(n, " arm")) return 60;
+            if (strstr(n, "clavicle") || strstr(n, "collar")) return 40;
+            break;
+        case ESPBone_RElbow:
+            if (!strcmp(n, "lowerarm_r") || !strcmp(n, "lower_arm_r") ||
+                !strcmp(n, "forearm_r") || !strcmp(n, "r_forearm")) return 100;
+            if (strstr(n, "lowerarm") || strstr(n, "lower_arm") || strstr(n, "forearm")) return 60;
+            break;
+        case ESPBone_RHand:
+            if (!strcmp(n, "hand_r") || !strcmp(n, "r_hand")) return 100;
+            if (strstr(n, "hand")) return 40;
+            break;
+        case ESPBone_LHip:
+            if (!strcmp(n, "thigh_l") || !strcmp(n, "upperleg_l") || !strcmp(n, "leg_l")) return 100;
+            if (strstr(n, "thigh") || strstr(n, "upperleg")) return 60;
+            break;
+        case ESPBone_LKnee:
+            if (!strcmp(n, "calf_l") || !strcmp(n, "lowerleg_l") || !strcmp(n, "shin_l")) return 100;
+            if (strstr(n, "calf") || strstr(n, "shin") || strstr(n, "lowerleg")) return 60;
+            break;
+        case ESPBone_LFoot:
+            if (!strcmp(n, "foot_l") || !strcmp(n, "l_foot")) return 100;
+            if (strstr(n, "foot")) return 40;
+            break;
+        case ESPBone_RHip:
+            if (!strcmp(n, "thigh_r") || !strcmp(n, "upperleg_r") || !strcmp(n, "leg_r")) return 100;
+            if (strstr(n, "thigh") || strstr(n, "upperleg")) return 60;
+            break;
+        case ESPBone_RKnee:
+            if (!strcmp(n, "calf_r") || !strcmp(n, "lowerleg_r") || !strcmp(n, "shin_r")) return 100;
+            if (strstr(n, "calf") || strstr(n, "shin") || strstr(n, "lowerleg")) return 60;
+            break;
+        case ESPBone_RFoot:
+            if (!strcmp(n, "foot_r") || !strcmp(n, "r_foot")) return 100;
+            if (strstr(n, "foot")) return 40;
+            break;
+        case ESPBone_Root:
+            if (!strcmp(n, "root") || !strcmp(n, "root_01") || !strcmp(n, "bip01")) return 100;
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+// Đọc BoneTree của USkeleton và trả bảng index theo tên. NO nếu không đủ khớp.
+static BOOL ESPBoneSkeletonMap(uint64_t vmMap, uint64_t gameBase, uint64_t mesh,
+                               int outMap[ESPBone_Count]) {
+    if (!outMap || !vmMap || !ESPIsUserPtr(mesh)) return NO;
+    if (!ESPUNameReady(gameBase) || !gameBase) return NO;
+    uint64_t uname = ESPResolveUName(vmMap, gameBase);
+    if (!uname) return NO;
+    uint64_t skelMesh = 0;
+    if (!ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_SkeletalMesh, &skelMesh, 8) ||
+        !ESPIsUserPtr(skelMesh)) {
+        static CFAbsoluteTime s_logAt = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_logAt > 10.0) { s_logAt = now; ESPLog("bones names: no SkeletalMesh (mesh=0x%llx)", (unsigned long long)mesh); }
+        return NO;
+    }
+    uint64_t skel = 0;
+    if (!ESPMemoryRead(vmMap, skelMesh + ESPOff_SkeletalMesh_Skeleton, &skel, 8) ||
+        !ESPIsUserPtr(skel)) {
+        static CFAbsoluteTime s_logAt2 = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_logAt2 > 10.0) { s_logAt2 = now; ESPLog("bones names: no USkeleton (skelMesh=0x%llx)", (unsigned long long)skelMesh); }
+        return NO;
+    }
+    // Offset BoneTree: DUMP 0x30; thêm vài ứng viên phòng bản game đổi layout.
+    static const uint32_t kTreeOffs[] = {
+        ESPOff_Skeleton_BoneTree, 0x68, 0x78, 0x28
+    };
+    for (size_t t = 0; t < sizeof(kTreeOffs) / sizeof(kTreeOffs[0]); t++) {
+        uint32_t off = kTreeOffs[t];
+        uint8_t hdr[16];
+        if (!ESPMemoryRead(vmMap, skel + off, hdr, sizeof(hdr))) continue;
+        uint64_t data = 0;
+        uint32_t count = 0, maxc = 0;
+        memcpy(&data, hdr, 8);
+        memcpy(&count, hdr + 8, 4);
+        memcpy(&maxc, hdr + 12, 4);
+        if (!ESPIsUserPtr(data) || count < 20 || count > 2000 || maxc < count) continue;
+        uint32_t limit = count < 512 ? count : 512;
+        static uint8_t tree[512 * ESPOff_BoneNodeSize];
+        if (!ESPMemoryRead(vmMap, data, tree, (size_t)limit * ESPOff_BoneNodeSize)) continue;
+
+        int best[ESPBone_Count];
+        int bestScore[ESPBone_Count];
+        for (int i = 0; i < ESPBone_Count; i++) { best[i] = -1; bestScore[i] = 0; }
+        int resolved = 0;
+        for (uint32_t i = 0; i < limit; i++) {
+            uint32_t fid = 0;
+            memcpy(&fid, tree + (size_t)i * ESPOff_BoneNodeSize, 4);
+            if (!fid || fid >= 2000000) continue;
+            char raw[96] = {0};
+            if (!ESPActorNameByID(vmMap, uname, fid, raw)) continue;
+            resolved++;
+            char nm[96];
+            ESPBoneLowerCopy(nm, sizeof(nm), raw);
+            for (int slot = 0; slot < ESPBone_Count; slot++) {
+                int sc = ESPBoneNameScore(nm, slot);
+                if (sc > bestScore[slot]) { bestScore[slot] = sc; best[slot] = (int)i; }
+            }
+            // Đủ joint chính với tên chuẩn -> không cần đọc tiếp 500 bone.
+            BOOL all = YES;
+            for (int slot = 0; slot < ESPBone_Count; slot++) {
+                if (slot == ESPBone_Root) continue;
+                if (bestScore[slot] < 90) { all = NO; break; }
+            }
+            if (all) break;
+        }
+        int missing = 0;
+        for (int slot = 0; slot < ESPBone_Count; slot++) {
+            if (slot == ESPBone_Root) continue;
+            if (best[slot] < 0) missing++;
+        }
+        if (missing || resolved < 8) continue;
+        if (best[ESPBone_Root] < 0) best[ESPBone_Root] = 0;
+        memcpy(outMap, best, sizeof(best));
+        ESPLog("bones names: tree=0x%x bones=%u resolved=%d head=%d neck=%d chest=%d pelvis=%d "
+               "Lsh=%d Lel=%d Lhd=%d Rsh=%d Rel=%d Rhd=%d Lhp=%d Lkn=%d Lft=%d Rhp=%d Rkn=%d Rft=%d",
+               (unsigned)off, (unsigned)count, resolved,
+               best[ESPBone_Head], best[ESPBone_Neck], best[ESPBone_Chest], best[ESPBone_Pelvis],
+               best[ESPBone_LShoulder], best[ESPBone_LElbow], best[ESPBone_LHand],
+               best[ESPBone_RShoulder], best[ESPBone_RElbow], best[ESPBone_RHand],
+               best[ESPBone_LHip], best[ESPBone_LKnee], best[ESPBone_LFoot],
+               best[ESPBone_RHip], best[ESPBone_RKnee], best[ESPBone_RFoot]);
+        return YES;
+    }
+    return NO;
+}
+
 // Dò (offset mảng xương, bảng index) trên 1 mesh player thật. Throttle 2s/lần.
 // Mutex riêng: configure chạy từ queue scan nền, sample chạy từ tick 60Hz —
 // mutex chỉ nhận ở đường configure (hiếm), reader chỉ snapshot (xem ESPBonesSample).
 static std::mutex g_espBoneCfgMutex;
-// Thử 1 offset: đọc TArray<FTransform>, validate 3 bảng index, nhận nếu khớp.
-// Caller đã giữ g_espBoneCfgMutex.
-static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off, ESPVector *pts) {
+// Thử 1 offset: đọc TArray<FTransform>, validate 3 bảng index cũ + bảng tên
+// xương (nếu có), nhận nếu khớp. Caller đã giữ g_espBoneCfgMutex.
+static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
+                                   const int *nameMap, ESPVector *pts) {
     uint64_t data = 0;
     uint32_t count = 0;
     if (!ESPBoneArrayAt(vmMap, mesh, off, &data, &count)) return NO;
-    int n = (int)(count < ESPOff_Bone_NumMax ? count : ESPOff_Bone_NumMax);
+    int n = (int)(count < 40 ? count : 40); // 3 bảng cũ chỉ dùng index <= 21
     if (n < 15) return NO;
     if (!ESPReadBoneLocals(vmMap, data, pts, n)) return NO;
+
+    // qblpack: bảng theo TÊN trước — sát skeleton thật hơn 3 bảng hard-code
+    // (PUBG đổi rig/season làm index lệch). Fail hình học thì mới fallback.
+    const char *nameWhy = NULL;
+    int nameNeed = 0;
+    BOOL nameTried = NO;
+    if (nameMap) {
+        nameTried = YES;
+        int need = 0;
+        for (int i = 0; i < ESPBone_Count; i++) {
+            if (nameMap[i] + 1 > need) need = nameMap[i] + 1;
+        }
+        nameNeed = need;
+        nameWhy = "index";
+        if (need > 0 && need <= (int)count && need <= (int)ESPOff_Bone_NumMax &&
+            ESPReadBoneLocals(vmMap, data, pts, need) &&
+            ESPBoneMapValidateEx(pts, need, nameMap, &nameWhy)) {
+            g_espBoneOff = off;
+            memcpy(g_espBoneMap, nameMap, sizeof(g_espBoneMap));
+            g_espBoneBadTicks.store(0);
+            g_espBonesReady.store(true);
+            snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones name 0x%x ok", (unsigned)off);
+            ESPLog("bones: offset=0x%x NAME-MAP ok bones=%u need=%d", (unsigned)off, (unsigned)count, need);
+            return YES;
+        }
+    }
+
     for (int m = 0; m < ESP_BONE_MAP_COUNT; m++) {
         if (!ESPBoneMapValidate(pts, n, kESPBoneMaps[m])) continue;
         g_espBoneOff = off;
@@ -2523,17 +2795,73 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off, 
         ESPLog("bones: offset=0x%x map=%d bones=%u (auto-detect)", (unsigned)off, m, (unsigned)count);
         return YES;
     }
+    if (nameTried) {
+        static CFAbsoluteTime s_lastWhy = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - s_lastWhy > 10.0) {
+            s_lastWhy = now;
+            ESPLog("bones names: off=0x%x count=%u need=%d why=%s",
+                   (unsigned)off, (unsigned)count, nameNeed, nameWhy ? nameWhy : "?");
+        }
+    }
     return NO;
 }
 
-static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh) {
-    std::lock_guard<std::mutex> lk(g_espBoneCfgMutex);
+static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
+                              BOOL allowNameScan) {
     if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
     if (!vmMap || !ESPIsUserPtr(mesh)) return NO;
+
+    // qblpack: resolve GNames TRƯỚC khi khoá bone-config. Lần resolve đầu có
+    // thể quét __DATA vài trăm ms; giữ mutex lúc đó sẽ làm tick box 4Hz đứng.
+    // Chỉ queue scan nền (allowNameScan=YES) mới được resolve.
+    if (allowNameScan && gameBase && !ESPUNameReady(gameBase)) {
+        (void)ESPResolveUName(vmMap, gameBase);
+    }
+
+    // Bridge tick (allowNameScan=NO) dùng try_lock: scan đang dò xương thì bỏ
+    // qua tick này, tuyệt đối không chặn HUD/SpringBoard.
+    std::unique_lock<std::mutex> lk(g_espBoneCfgMutex, std::defer_lock);
+    if (allowNameScan) lk.lock();
+    else if (!lk.try_lock()) return NO;
+
+    if (g_espBonesReady.load() || g_espBonesAutoOff.load()) return g_espBonesReady.load();
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (g_espBoneTryAt > 0 && now - g_espBoneTryAt < 2.0) return NO;
     g_espBoneTryAt = now;
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones detect");
+
+    // qblpack: bảng index theo TÊN xương (USkeleton.BoneTree). Cache theo mesh
+    // 30s để không đọc/resolve ~500 FName mỗi 2s khi bảng fail.
+    static uint64_t s_nameMesh = 0;
+    static CFAbsoluteTime s_nameAt = 0;
+    static BOOL s_nameOK = NO;
+    static int s_nameMap[ESPBone_Count];
+    int nameMap[ESPBone_Count];
+    BOOL haveNames = NO;
+    if (mesh == s_nameMesh && now - s_nameAt < 30.0) {
+        haveNames = s_nameOK;
+        if (haveNames) memcpy(nameMap, s_nameMap, sizeof(nameMap));
+    } else if (!allowNameScan) {
+        // Queue box 4Hz: KHÔNG đọc ~500 FName ở đây (có thể chặn HUD). Chờ
+        // scan nền dò xong; trong lúc đó dùng 3 bảng index cũ làm fallback.
+        haveNames = NO;
+    } else {
+        if (ESPUNameReady(gameBase)) {
+            haveNames = ESPBoneSkeletonMap(vmMap, gameBase, mesh, nameMap);
+        } else {
+            static CFAbsoluteTime s_noNameLog = 0;
+            if (now - s_noNameLog > 10.0) {
+                s_noNameLog = now;
+                ESPLog("bones names: GNames chua san sang (cho scan nen)");
+            }
+        }
+        s_nameMesh = mesh;
+        s_nameAt = now;
+        s_nameOK = haveNames;
+        if (haveNames) memcpy(s_nameMap, nameMap, sizeof(s_nameMap));
+    }
+
     static ESPVector pts[ESPOff_Bone_NumMax];
     // 1) Offset đã xác nhận từ DUMP: component space (0xCE0) trước, bone space
     //    (0xCD0) sau — validator sẽ loại cái sau nếu toạ độ không phải người.
@@ -2541,11 +2869,39 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh) {
         ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace
     };
     for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
-        if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i], pts)) return YES;
+        if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i],
+                                   haveNames ? nameMap : NULL, pts)) return YES;
+    }
+    // Chẩn đoán mảng 0xCE0: có TArray không, count bao nhiêu, vài toạ độ đầu.
+    {
+        static CFAbsoluteTime s_probeAt = 0;
+        if (now - s_probeAt > 10.0) {
+            s_probeAt = now;
+            uint64_t d = 0;
+            uint32_t c = 0;
+            if (ESPBoneArrayAt(vmMap, mesh, ESPOff_Mesh_BoneCompSpace, &d, &c)) {
+                ESPVector probe[24];
+                int pn = (int)(c < 24 ? c : 24);
+                if (ESPReadBoneLocals(vmMap, d, probe, pn)) {
+                    ESPLog("bones probe: 0xce0 data=0x%llx count=%u p0=(%.1f,%.1f,%.1f) "
+                           "p1=(%.1f,%.1f,%.1f) p6=(%.1f,%.1f,%.1f)",
+                           (unsigned long long)d, (unsigned)c,
+                           probe[0].x, probe[0].y, probe[0].z,
+                           probe[1].x, probe[1].y, probe[1].z,
+                           probe[6].x, probe[6].y, probe[6].z);
+                } else {
+                    ESPLog("bones probe: 0xce0 data=0x%llx count=%u read-fail",
+                           (unsigned long long)d, (unsigned)c);
+                }
+            } else {
+                ESPLog("bones probe: 0xce0 khong phai TArray<FTransform>");
+            }
+        }
     }
     // 2) Fallback: quét dải cũ phòng bản game sau dời field.
     for (uint32_t off = ESPOff_Mesh_BoneScanStart; off + 16 <= ESPOff_Mesh_BoneScanEnd; off += 8) {
-        if (ESPBoneTryOffsetLocked(vmMap, mesh, off, pts)) return YES;
+        if (ESPBoneTryOffsetLocked(vmMap, mesh, off,
+                                   haveNames ? nameMap : NULL, pts)) return YES;
     }
     // Không ứng viên nào qua validate: giữ tắt, thử lại sau (world khác có thể khác rig).
     snprintf(g_espBoneStatus, sizeof(g_espBoneStatus), "bones no-match");
@@ -2742,7 +3098,7 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
         // bên trong; chỉ chạy khi toggle bật và chưa dò được).
         if (g_espBonesWant.load() && !g_espBonesReady.load() && !g_espBonesAutoOff.load() &&
             team != ESPTeam_Dummy && meshComp && ESPIsUserPtr(meshComp)) {
-            ESPBonesConfigure(vmMap, meshComp);
+            ESPBonesConfigure(vmMap, meshComp, gameBase, NO);
         }
         uint64_t rootComp = ESPIsUserPtr(dg.root) ? dg.root : 0;
         if (foundTracked.size() < 64) {

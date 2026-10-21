@@ -139,7 +139,18 @@ static const uint32_t ESPOff_Mesh_BoneBoneSpace = 0xCD0; // DUMP: CachedBoneSpac
 static const uint32_t ESPOff_Mesh_BoneScanStart = 0x480; // fallback: đầu vùng nghi TArray<FTransform>
 static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xC00; // fallback: cuối vùng (kết thúc trước 0xC00)
 static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale
-static const uint32_t ESPOff_Bone_NumMax        = 40;    // đọc tối đa 40 khớp đầu (đủ cho bản đồ index)
+static const uint32_t ESPOff_Bone_NumMax        = 256;   // skeleton thật có thể >40 khớp (tên xương)
+
+// qblpack: chuỗi lấy TÊN xương từ USkeleton (DUMP-verified):
+//   USkeletalMeshComponent.SkeletalMesh @ 0xA20
+//   USkeletalMesh.Skeleton             @ 0x48
+//   USkeleton.BoneTree (TArray<FBoneNode>) @ 0x30
+// FBoneNode: FName @ 0x0 (ComparisonIndex + Number) + ParentIndex @ 0x8
+//            + TranslationRetargetingMode @ 0xC + pad 3 => stride 0x10.
+static const uint32_t ESPOff_Mesh_SkeletalMesh   = 0xA20;
+static const uint32_t ESPOff_SkeletalMesh_Skeleton = 0x48;
+static const uint32_t ESPOff_Skeleton_BoneTree   = 0x30;
+static const uint32_t ESPOff_BoneNodeSize        = 0x10;
 
 
 // TArray layout (UE4)

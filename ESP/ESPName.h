@@ -15,6 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 // Giải mã UName từ GNames static (cache theo gameBase). 0 nếu fail.
 uint64_t ESPResolveUName(uint64_t vmMap, uint64_t gameBase);
 
+// qblpack: GNames đã giải mã cho base này chưa? Dùng để quyết định có được
+// gọi ESPResolveUName trên queue vẽ (4Hz) hay không — lần resolve đầu có thể
+// quét __DATA vài trăm ms, chỉ nên chạy trên queue scan nền.
+BOOL ESPUNameReady(uint64_t gameBase);
+
 // Đọc tên instance của actor vào outName (tối đa 63 ký tự + null).
 // NO nếu fail. Dùng cache theo ID nên lần sau rẻ.
 BOOL ESPActorName(uint64_t vmMap, uint64_t uname, uint64_t actor, char outName[64]);
