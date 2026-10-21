@@ -174,6 +174,10 @@ static const uint32_t ESPOff_Bone_NumMax        = 256;   // skeleton thật có 
 //            + TranslationRetargetingMode @ 0xC + pad 3 => stride 0x10.
 static const uint32_t ESPOff_Mesh_SkeletalMesh   = 0xA20;
 static const uint32_t ESPOff_SkeletalMesh_Skeleton = 0x48;
+// USkeleton.RefLocalPoses (TArray<FTransform>, DUMP 0x40): ref pose của rig
+// (T/A-pose). Đây là mốc ỔN ĐỊNH để nhận diện khớp — người chơi đang nằm/ngồi
+// không làm sai hình học của ref pose.
+static const uint32_t ESPOff_Skeleton_RefLocalPoses = 0x40;
 static const uint32_t ESPOff_Skeleton_BoneTree   = 0x30;
 static const uint32_t ESPOff_BoneNodeSize        = 0x10;
 

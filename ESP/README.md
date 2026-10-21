@@ -223,10 +223,21 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   Hỗ trợ cả tên kiểu `Bip01 L UpperArm`. Chỉ nhận khi **đủ 17 khớp** và validate
   hình học; fail mới fallback 3 bảng index cũ. **Lưu ý:** build hiện tại GNames
   không resolve được nên nhánh tên tự bỏ qua; skeleton đi bằng offset + bảng index.
+- **Bảng tự dò từ ref pose (`ESPBoneMap.h`, kernrw66):** `USkeleton.RefLocalPoses`
+  (`0x40`, TArray<FTransform>) → nhân dồn theo `ParentIndex` → T/A-pose component
+  space, rồi nhận diện 17 khớp bằng **cấu trúc cây + hình học**: pelvis = tổ tiên
+  chung của 2 chân (2 lá thấp nhất 2 phía Y), hông/gối = con trên đường xuống,
+  cột sống = đi lên theo con có Z cao nhất, ngực = đốt còn 2 nhánh tay, tay =
+  đi ra theo ±Y (bỏ clavicle khi chuỗi >= 4 xương). Dùng ref pose nên **không
+  phụ thuộc pose đang chơi** (nằm/ngồi/leo) và **không cần GNames**; map được
+  cache 60s theo USkeleton. Đây là đường chính khi rig lệch 4 bảng hard-code.
 - **Composed path (ưu tiên):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
   (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
-  (UE `FTransform::Multiply`) rồi validate 3 bảng index. BoneTree được thử
-  `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index` cho mọi xương.
+  (UE `FTransform::Multiply`) rồi validate bảng tự dò / bảng tên / 4 bảng index.
+  BoneTree được thử `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index`.
+- **4 bảng index:** A/B/C cũ + **D = UE4 mannequin đủ clavicle** (`7/8/9/10` vai-
+  khuỷu-tay). Map A dùng `7/8/10` (clavicle/upperarm/hand) nên `upperarm→hand`
+  ~55cm > 45cm → validator loại; đây là lý do phổ biến nhất của `bones no-match`.
 - Fallback: thử lần lượt `0xCA8` (component space compact) → `0xCE0` → `0xCD0`;
   nếu header không phải TArray thì quét
   `mesh+[0x400..0xF00)` bước 8 (`ESPOff_Mesh_BoneScanStart/End`) — dải này đã
@@ -239,8 +250,11 @@ field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống t�
   20..80cm. `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
 - Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
   (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
-- Trạng thái hiện ở dòng status: `bones off` / `bones detect` / `bones 0xc98 map0 ok` /
+- Trạng thái hiện ở dòng status: `bones off` / `bones detect` /
+  `bones 0xc98 auto ok` (bảng tự dò) / `bones 0xc98 map3 ok` (hard-code) /
   `bones no-match` / `bones auto-off`.
+- Log chẩn đoán mới: `bones automap: ok skel=0x… head=.. neck=.. chest=.. pelvis=..`
+  hoặc `bones automap: skip (<lý do>)`; `bones: offset=0xc98 AUTO-MAP ok …`.
 - Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
 - Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
