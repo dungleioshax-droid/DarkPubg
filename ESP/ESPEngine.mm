@@ -2685,8 +2685,24 @@ static const int kESPBoneMapF[ESPBone_Count] = {
     15, 16, 17, 19, 20, 21,
     0
 };
+// G = bảng lấy từ source Troll (ShadowTrackerExtra, build khác):
+//   head 8, neck 5, spine_03 4, spine_02 3, spine_01 2, pelvis 1,
+//   upperarm_r 13, lowerarm_r 15, hand_r 16,
+//   upperarm_l 34, lowerarm_l 36, hand_l 37,
+//   thigh_r 55, calf_r 56, foot_r 57,
+//   thigh_l 59, calf_l 60, foot_l 61.
+// Đây là rig có finger/twist bone chen giữa nên KHÔNG giống các bảng cũ.
+// Chỉ dùng như candidate cuối; validator hình học vẫn quyết định, không tin
+// offset/index của build khác.
+static const int kESPBoneMapG[ESPBone_Count] = {
+    8, 5, 4, 1,
+    34, 36, 37, 13, 15, 16,
+    59, 60, 61, 55, 56, 57,
+    0
+};
 static const int *const kESPBoneMaps[] = {
-    kESPBoneMapD, kESPBoneMapE, kESPBoneMapA, kESPBoneMapB, kESPBoneMapC, kESPBoneMapF
+    kESPBoneMapD, kESPBoneMapE, kESPBoneMapA, kESPBoneMapB,
+    kESPBoneMapC, kESPBoneMapF, kESPBoneMapG
 };
 #define ESP_BONE_MAP_COUNT ((int)(sizeof(kESPBoneMaps) / sizeof(kESPBoneMaps[0])))
 
@@ -3194,7 +3210,7 @@ static BOOL ESPBoneMapPlausible(const ESPVector *p, int n, const int *map,
                                 const char **whyOut);
 
 // Dựng bảng index 17 khớp từ ref pose — KHÔNG cần GNames, không phụ thuộc
-// thứ tự xương hard-code. Đây là đường chính khi rig khác 4 bảng có sẵn.
+// thứ tự xương hard-code. Đây là đường chính khi rig khác các bảng có sẵn.
 static BOOL ESPBoneAutoMapForMesh(uint64_t vmMap, uint64_t mesh,
                                   int outMap[ESPBone_Count], int *outCount,
                                   char *why, size_t whyCap) {
@@ -3731,7 +3747,7 @@ static BOOL ESPBoneSkeletonMap(uint64_t vmMap, uint64_t gameBase, uint64_t mesh,
 // mutex chỉ nhận ở đường configure (hiếm), reader chỉ snapshot (xem ESPBonesSample).
 static std::mutex g_espBoneCfgMutex;
 // Thử 1 offset: đọc TArray<FTransform>, validate bảng tên (nếu có), bảng tự dò
-// từ ref/live pose, rồi 6 bảng index hard-code; nhận nếu khớp hình học.
+// từ ref/live pose, rồi 7 bảng index hard-code; nhận nếu khớp hình học.
 // Caller đã giữ g_espBoneCfgMutex.
 static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
                                    const int *nameMap, const int *autoMap,
@@ -3834,7 +3850,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
         if (haveNames) memcpy(nameMap, s_nameMap, sizeof(nameMap));
     } else if (!allowNameScan) {
         // Queue box 4Hz: KHÔNG đọc ~500 FName ở đây (có thể chặn HUD). Chờ
-        // scan nền dò xong; trong lúc đó dùng 3 bảng index cũ làm fallback.
+        // scan nền dò xong; trong lúc đó dùng các bảng index hard-code làm fallback.
         haveNames = NO;
     } else {
         if (ESPUNameReady(gameBase)) {
@@ -3855,7 +3871,7 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     // qblpack 2026-10-21: dựng bảng index 17 khớp từ REF POSE của chính rig
     // (RefLocalPoses + BoneTree) — không cần GNames. Cache 60s theo USkeleton:
     // dò 1 lần/rig, các lượt configure sau gần như free. Đây là đường chính
-    // khi rig không khớp 4 bảng hard-code (clavicle/spine khác thứ tự).
+    // khi rig không khớp bảng hard-code (clavicle/spine/finger khác thứ tự).
     int autoMap[ESPBone_Count];
     int autoCount = 0;
     BOOL haveAuto = NO;

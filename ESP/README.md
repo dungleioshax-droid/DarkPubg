@@ -271,6 +271,11 @@ validate lúc configure. Mọi lần đọc đều là `ESPMemoryRead` có kiể
   (`7/8/9/10` vai-khuỷu-tay). Map A dùng `7/8/10` (clavicle/upperarm/hand) nên
   `upperarm→hand` ~55cm > 45cm → validator loại; đây là lý do phổ biến của
   `bones no-match` khi rig không khớp bảng.
+- **Map G (tham chiếu source Troll / ShadowTrackerExtra):** head `8`, neck `5`,
+  chest `4`, pelvis `1`; tay phải `13/15/16`, tay trái `34/36/37`; chân phải
+  `55/56/57`, chân trái `59/60/61`. Đây là rig có finger/twist bone chen giữa,
+  khác hẳn map D; chỉ là candidate cuối và vẫn phải qua validator hình học, vì
+  offset/index của build Troll không nhất thiết khớp build hiện tại.
 - **Chỉ player/bot thật:** configure và sample xương chỉ chạy với `kind == 1`.
   Hình nhân `kind == 3` không sample xương; bridge cũng không vẽ skeleton và
   không kéo snapline cho `kind == 3`, tránh rig hình nhân làm hỏng map cache.
