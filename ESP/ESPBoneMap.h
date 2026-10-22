@@ -188,14 +188,18 @@ static int ESPBoneMapBuild(const ESPVector *p, int n, const int *parents,
     if (clen < 3) ESP_BM_FAIL("spine chain");
 
     // 4) Ngực = đốt gần cổ nhất còn 2 nhánh tay (clavicle/upperarm 2 bên).
+    // Bỏ 2 đốt cuối (cổ/đầu) để hair/eye/mũ không giả làm 2 nhánh tay; đồng
+    // thời không xét pelvis (2 chân cũng lệch Y). Nhánh tay thật phải lệch
+    // ngang >= 6cm; mắt/tóc thường chỉ 2-4cm.
     int chestIdx = -1;
-    for (int k = clen - 1; k >= 0 && chestIdx < 0; k--) {
+    int chestStart = (clen >= 4) ? clen - 3 : 0;
+    for (int k = chestStart; k >= 0 && chestIdx < 0; k--) {
         int node = chain[k];
         int branches = 0;
         for (int j = 0; j < n; j++) {
             if (parents[j] != node) continue;
             if (ESPBoneMapInChain(chain, clen, j)) continue;
-            if (fabsf(p[j].y - p[node].y) < 3.0f) continue;
+            if (fabsf(p[j].y - p[node].y) < 6.0f) continue;
             branches++;
         }
         if (branches >= 2) chestIdx = k;

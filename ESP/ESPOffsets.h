@@ -156,11 +156,26 @@ static const uint32_t ESPOff_Mesh_BoneBoneSpace = 0xCD0; // DUMP: CachedBoneSpac
 // (Max=67) — game xoá sau khi skin. Hai mảng transient nằm trong khoảng trống
 // DUMP không liệt kê (0xC98..0xCD0), đúng thứ tự UE4:
 //   0xC98 = BoneSpaceTransforms      (Num=67, local/parent space)
-//   0xCA8 = ComponentSpaceTransforms (Num=44, required-bone subset)
-// Vì 0xCA8 bị compact theo RequiredBones nên index không khớp skeleton; dùng
-// 0xC98 rồi tự nhân ma trận theo ParentIndex trong USkeleton.BoneTree.
+//   0xCA8 = RequiredBones / compact component-space subset (Num=44)
+// Vì 0xCA8 bị compact theo RequiredBones nên index không khớp skeleton.
 static const uint32_t ESPOff_Mesh_BoneSpaceTransforms = 0xC98;
 static const uint32_t ESPOff_Mesh_ComponentSpaceTransforms = 0xCA8;
+// kernrw70: USkinnedMeshComponent giữ 2 buffer ComponentSpaceTransformsArray[2].
+// Theo layout UE4, hai TArray này nằm ngay sau MasterPoseComponent (0xA28) và
+// trước bUseBoundsFromMasterPoseComponent (0xAE0), nên ứng viên là 0xA30/0xA40.
+// Đây là buffer đọc/ghi component-space live, đủ skeleton (không compact).
+static const uint32_t ESPOff_Mesh_CompSpaceRead0 = 0xA30;
+static const uint32_t ESPOff_Mesh_CompSpaceRead1 = 0xA40;
+// int32 CurrentReadComponentTransforms nằm sau 2 buffer + các field private
+// (0xA50 PreviousBoneVisibilityStates, 0xA60 PreviousComponentSpace..., 0xA70
+// CurrentEditable). Chỉ dùng để CHỌN buffer đọc; nếu giá trị không phải 0/1 thì
+// fallback thử lần lượt cả 2 buffer, không tin mù offset này.
+static const uint32_t ESPOff_Mesh_CompSpaceReadIdx = 0xA74;
+// Log kernrw63 thấy thêm 2 TArray<FTransform> Num=67 ở 0xE18/0xE28. Có thể là
+// FAnimationEvaluationContext (eval song song); buffer này có thể stale, nên chỉ
+// dùng làm fallback sau 0xA30/0xA40 và chỉ nhận khi validator hình học pass.
+static const uint32_t ESPOff_Mesh_CompSpaceLive0 = 0xE18;
+static const uint32_t ESPOff_Mesh_CompSpaceLive1 = 0xE28;
 static const uint32_t ESPOff_Mesh_BoneScanStart = 0x400; // fallback: đầu vùng nghi TArray<FTransform>
 static const uint32_t ESPOff_Mesh_BoneScanEnd   = 0xF00; // qblpack: phủ cả 0xCD0/0xCE0 và field dời sau đó
 static const uint32_t ESPOff_BoneTransformSize  = 0x30;  // sizeof(FTransform) = 16 quat + 16 trans + 16 scale

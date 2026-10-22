@@ -3277,6 +3277,9 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
     for (int i = 0; i < count; i++) {
         const ESPBox2D *b = &boxes[i];
         if (b->visible == 0 || b->w < 1.0f || b->h < 2.0f) continue;
+        // Skeleton/snapline chỉ dành cho player/bot thật (kind 1). Hình nhân
+        // kind 3 có rig/ý nghĩa khác, không vẽ xương hay kéo line từ tâm màn hình.
+        BOOL isPlayerBox = (b->kind == 1);
         // ESPScale (QBL player.ESPScale): phóng quanh tâm box.
         CGFloat bw = b->w * scale;
         CGFloat bh = b->h * scale;
@@ -3313,7 +3316,7 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
         // Head dot: ưu tiên khớp đầu thật (bones), không có thì 8% từ đỉnh box.
         CGFloat headX = bcx;
         CGFloat headY = by + bh * 0.08f;
-        if (f->bones && b->boneCount >= 2 && b->bones[ESPBone_Head].ok) {
+        if (isPlayerBox && f->bones && b->boneCount >= 2 && b->bones[ESPBone_Head].ok) {
             headX = (b->bones[ESPBone_Head].x - bcx) * scale + bcx;
             headY = (b->bones[ESPBone_Head].y - bcy) * scale + bcy;
         }
@@ -3323,8 +3326,8 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
                              ai ? kQBLBucketAIMark : kQBLBucketDot, YES);
         }
 
-        // Skeleton
-        if (f->bones && b->boneCount >= 2) {
+        // Skeleton — chỉ player/bot thật (kind 1).
+        if (isPlayerBox && f->bones && b->boneCount >= 2) {
             ds_qbl_emit_bones(b, scale, scale, bcx, bcy);
         }
 
@@ -3340,8 +3343,9 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             ESPDrawAddPolyline(tri, 3, kQBLColorAI, 1.5f, kQBLBucketAIMark, YES);
         }
 
-        // Snapline
-        if (f->line && lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
+        // Snapline — chỉ player/bot thật (kind 1).
+        if (isPlayerBox && f->line &&
+            lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
             linePts[lineN++] = lineStart;
             linePts[lineN++] = CGPointMake(bx + bw * 0.5f, by);
         }
@@ -4512,7 +4516,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw69-bonerefpose"
+#define DS_ESP_BUILD_TAG "kernrw70-compspace"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

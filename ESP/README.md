@@ -195,91 +195,110 @@ Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có th
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).
 
-### Bones (skeleton) — offset DUMP + tự dò/validate ở runtime
-
-DUMP/SDK (`USkeletalMeshComponent`) xác nhận 2 mảng transform:
-
-| Offset | Field | Hệ quy chiếu |
-|---|---|---|
-| `0xCE0` | `CachedComponentSpaceTransforms` | component space (DUMP) |
-| `0xCD0` | `CachedBoneSpaceTransforms` | bone/parent space (DUMP) |
-| `0xC98` | `BoneSpaceTransforms` (transient, DUMP không liệt kê) | bone/parent space, Num=67 |
-| `0xCA8` | `ComponentSpaceTransforms` (transient) | component space, compact theo RequiredBones |
-
-Log thực tế 2026-10-21: `0xCE0/0xCD0` có `count=0 max=67` — game xoá `Cached*`
-sau khi skin. Hai mảng transient `0xC98/0xCA8` nằm trong khoảng trống
-`0xC98..0xCD0` mà DUMP không in ra. `0xCA8` bị compact (Num=44) nên index
-không khớp skeleton; engine đọc `0xC98` rồi **tự nhân dồn theo ParentIndex**
-trong `USkeleton.BoneTree` để ra component space — không cần GNames.
+### Bones (skeleton) — component-space live + tự dò/validate ở runtime
 
 `ComponentToWorld` = `0x208` (ngay sau `RelativeScale3D` `0x1FC`; SDK không liệt kê
 field transient này nhưng đúng thứ tự UE4 và khớp khoảng trống tới `ComponentVelocity`
-`0x2C0`). Engine vẫn **validate runtime** trước khi dùng:
+`0x2C0`). Engine vẫn **validate runtime** trước khi dùng.
+
+Các mảng xương đã biết (log kernrw63 ngày 2026-10-21):
+
+| Offset | Field / nguồn | Hệ quy chiếu |
+|---|---|---|
+| `0xA30/0xA40` | `ComponentSpaceTransformsArray[0/1]` (private UE4) | component space đầy đủ, double buffer |
+| `0xA74` | `CurrentReadComponentTransforms` (`int32`, suy ra từ layout UE4) | `0/1` chọn buffer đọc |
+| `0xE18/0xE28` | 2 `TArray<FTransform>` Num=67 (eval-context) | component-space fallback |
+| `0xC98` | `BoneSpaceTransforms` (transient, DUMP không liệt kê) | bone/parent space, Num=67 |
+| `0xCD0/0xCE0` | `CachedBoneSpaceTransforms` / `CachedComponentSpaceTransforms` | DUMP; game xoá sau skin (`count=0`) |
+| `0xCA8` | `RequiredBones`/compact component-space subset | **không dùng** — Num=44, index không khớp skeleton |
+
+`0xA30/0xA40` được suy ra từ layout `USkinnedMeshComponent` (ngay sau
+`MasterPoseComponent` `0xA28`, trước `bUseBoundsFromMasterPoseComponent` `0xAE0`)
+nên vẫn là **ứng viên chưa xác nhận runtime**; engine chỉ nhận khi đọc được
+`TArray<FTransform>` và 17 khớp qua validator hình học. Nếu `0xA30/0xA40` rỗng
+hoặc không phải transform, engine tự rơi xuống `0xE18/0xE28`, rồi `0xC98`.
+`0xE18/0xE28` có thể là buffer eval tạm/stale; vì vậy chúng chỉ là fallback sau
+`0xA30/0xA40`, không phải nguồn duy nhất.
+
+Thứ tự đọc trực tiếp trong `ESPBonesConfigure`:
+
+1. Buffer `CurrentRead` của `0xA30/0xA40` trước, buffer còn lại sau.
+2. `0xE18`, rồi `0xE28` (fallback eval-context).
+3. Chỉ khi các mảng trên fail mới compose `0xC98` (bone space + `BoneTree.ParentIndex`).
+4. Cuối cùng mới quét mù `mesh+[0x400..0xF00)` bước 8 để chịu được build dời field.
+   `0xCA8` bị bỏ khỏi cả direct lẫn blind scan vì là mảng compact `RequiredBones`.
+
+Khi đọc trực tiếp `0xA30/0xA40`, engine đọc `CurrentReadComponentTransforms`
+(`0xA74`) **mỗi frame sample** để lấy buffer game đang đọc, tránh đọc trúng buffer
+đang ghi (pose bị xé). Nếu giá trị không phải `0/1`, engine quay lại buffer đã
+validate lúc configure. Mọi lần đọc đều là `ESPMemoryRead` có kiểm tra `BOOL`.
+
+**Bảng index:**
 
 - **Bảng theo TÊN xương** (qblpack): đọc `mesh+0xA20` → `SkeletalMesh`,
   `+0x48` → `USkeleton`, `+0x30` → `BoneTree` (`TArray<FBoneNode>`, stride `0x10`),
   resolve FName qua GNames và khớp 17 khớp (`head`, `neck`, `spine_03`, `pelvis`,
   `upperarm_l/r`, `lowerarm_l/r`, `hand_l/r`, `thigh_l/r`, `calf_l/r`, `foot_l/r`).
   Hỗ trợ cả tên kiểu `Bip01 L UpperArm`. Chỉ nhận khi **đủ 17 khớp** và validate
-  hình học; fail mới fallback 3 bảng index cũ. **Lưu ý:** build hiện tại GNames
-  không resolve được nên nhánh tên tự bỏ qua; skeleton đi bằng offset + bảng index.
-- **Bảng tự dò từ ref pose (`ESPBoneMap.h`, kernrw66):** `USkeleton.RefLocalPoses`
+  hình học; fail mới fallback bảng tự dò/index. **Lưu ý:** build hiện tại GNames
+  không resolve được nên nhánh tên tự bỏ qua.
+- **Bảng tự dò từ ref pose (`ESPBoneMap.h`):** `USkeleton.RefLocalPoses`
   (`0x40`, TArray<FTransform>) → nhân dồn theo `ParentIndex` → T/A-pose component
   space, rồi nhận diện 17 khớp bằng **cấu trúc cây + hình học**: pelvis = tổ tiên
   chung của 2 chân (2 lá thấp nhất 2 phía Y), hông/gối = con trên đường xuống,
   cột sống = đi lên theo con có Z cao nhất, ngực = đốt còn 2 nhánh tay, tay =
   đi ra theo ±Y (bỏ clavicle khi chuỗi >= 4 xương). Dùng ref pose nên **không
-  phụ thuộc pose đang chơi** (nằm/ngồi/leo) và **không cần GNames**; map được
-  cache 60s theo USkeleton. Đây là đường chính khi rig lệch 4 bảng hard-code.
-- **Ref pose đa-offset + fallback LIVE-POSE (kernrw69):** `ESPBoneReadRefPose`
-  không còn dừng ở 1 offset `0x40`: thử `USkeleton.RefLocalPoses` (nới lỏng
-  count), quét `kSkelScan[]` quanh nó — ứng viên chỉ accept khi **đúng số
-  xương của BoneTree** (lệch là TArray khác như notifies/sockets) — rồi quét
+  phụ thuộc pose đang chơi** và **không cần GNames**; cache 60s theo `USkeleton`.
+- **Ref pose đa-offset:** `ESPBoneReadRefPose` thử `USkeleton.RefLocalPoses`
+  (nới lỏng count), quét `kSkelScan[]` quanh nó — ứng viên chỉ accept khi **đúng
+  số xương của BoneTree** (lệch là TArray khác như notifies/sockets) — rồi quét
   tiếp trên **USkeletalMesh asset** (`FReferenceSkeleton.RefPose` nằm ở asset,
-  không ở component). Nếu ref pose vẫn không đọc được (build bị xoá/dời như
+  không ở component).
+- **Fallback LIVE-POSE:** nếu ref pose vẫn không đọc được (build bị xoá/dời như
   `0xCD0/0xCE0`) thì `ESPBoneAutoMapFromLive` dựng bảng index từ **pose hiện
-  tại**: 0xC98 compose xong (đường engine vẫn dùng để vẽ) + `ESPBoneMapBuild`
-  + validator tỉ lệ `ESPBoneMapPlausible` (chỉ độ dài xương, bỏ thứ tự Z nên
-  đứng/đi/chạy đều pass; nằm/ngồi xộm trả NO — không vẽ bảng sai). Log:
+  tại**: thử trực tiếp `0xA30/0xA40` (theo `CurrentRead`), `0xE18/0xE28`, rồi
+  mới compose `0xC98`; dùng `ESPBoneMapBuild` + validator tỉ lệ
+  `ESPBoneMapPlausible` (chỉ độ dài xương, bỏ thứ tự Z nên đứng/đi/chạy đều pass;
+  nằm/ngồi xổm có thể fail). Cache thành công 60s, thất bại chỉ 8s để lần configure
+  sau cơ hội gặp pose đứng. Log:
   `bones automap: LIVE-POSE ok skel=0x… n=… head=…` hoặc
   `bones automap: skip (<refpose> | live <lý do>)`.
-- **Composed path (ưu tiên):** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
+- **Composed path:** đọc `0xC98` (bone space) + `BoneTree.ParentIndex`
   (int32 @ `+8`), nhân dồn `parent * local` bằng quaternion/translation/scale
-  (UE `FTransform::Multiply`) rồi validate bảng tự dò / bảng tên / 4 bảng index.
+  (UE `FTransform::Multiply`) rồi validate bảng tự dò / bảng tên / các bảng index.
   BoneTree được thử `0x30/0x68/0x78/0x28`; chỉ nhận khi `parent < index`.
-- **4 bảng index:** A/B/C cũ + **D = UE4 mannequin đủ clavicle** (`7/8/9/10` vai-
-  khuỷu-tay). Map A dùng `7/8/10` (clavicle/upperarm/hand) nên `upperarm→hand`
-  ~55cm > 45cm → validator loại; đây là lý do phổ biến nhất của `bones no-match`.
-- Fallback: thử lần lượt `0xCA8` (component space compact) → `0xCE0` → `0xCD0`;
-  nếu header không phải TArray thì quét
-  `mesh+[0x400..0xF00)` bước 8 (`ESPOff_Mesh_BoneScanStart/End`) — dải này đã
-  phủ cả vùng `0xCD0/0xCE0` và các field có thể dời sau đó. Stride `0x30`.
-- **Backoff**: 3 lượt đầu thử mỗi 2s; sau đó 30s/lượt. Tránh đọc 352 offset
-  liên tục trên queue nền khi offset chưa đúng (nguồn giật).
-- Với mỗi ứng viên thử bảng tên + 3 bảng index khớp phổ biến (UE4 mannequin + 2
-  biến thể rig) và **validate bằng tỉ lệ cơ thể thật**: đầu>cổ>ngực>hông, tay
-  15..45cm, chân 25..70cm, bàn chân thấp hơn hông, 2 vai ngược hướng + cách nhau
-  20..80cm. `0xCD0` (bone space) sẽ bị loại ở bước này vì toạ độ quá nhỏ.
-- Mỗi tick kiểm tra chéo: đầu phải quanh mép trên box → lệch liên tục ~600 tick
-  (~10s) thì **tự tắt** (`bones auto-off`) để không vẽ rác.
-- Trạng thái hiện ở dòng status: `bones off` / `bones detect` /
-  `bones 0xc98 auto ok` (bảng tự dò) / `bones 0xc98 map3 ok` (hard-code) /
-  `bones no-match` / `bones auto-off`.
-- Log chẩn đoán mới: `bones automap: ok skel=0x… head=.. neck=.. chest=.. pelvis=..`
-  hoặc `bones automap: skip (<lý do>)`; `bones: offset=0xc98 AUTO-MAP ok …`.
+- **Các bảng index hard-code:** A/B/C cũ + **D = UE4 mannequin đủ clavicle**
+  (`7/8/9/10` vai-khuỷu-tay). Map A dùng `7/8/10` (clavicle/upperarm/hand) nên
+  `upperarm→hand` ~55cm > 45cm → validator loại; đây là lý do phổ biến của
+  `bones no-match` khi rig không khớp bảng.
+- **Chỉ player/bot thật:** configure và sample xương chỉ chạy với `kind == 1`.
+  Hình nhân `kind == 3` không sample xương; bridge cũng không vẽ skeleton và
+  không kéo snapline cho `kind == 3`, tránh rig hình nhân làm hỏng map cache.
+- **Throttle:** configure tối đa 1.5s/lượt, chạy trên queue nền + mutex riêng
+  (`try_lock` ở tick 60Hz) nên không chặn HUD. Khi chưa dò được, engine giữ
+  `bones off`; không đọc offset mỗi frame.
+- **Auto-off:** mỗi tick kiểm tra chéo đầu phải quanh mép trên box; lệch liên tục
+  ~600 tick (~10s) thì tự tắt (`bones auto-off`) để không vẽ rác.
+- Trạng thái: `bones off` / `bones detect` / `bones 0xc98 auto ok` (bảng tự dò) /
+  `bones 0xc98 map3 ok` (hard-code) / `bones no-match` / `bones auto-off`.
+- Log chẩn đoán (10s/lần): `bones readidx: 0xa74 ok=… value=…`;
+  `bones probe: 0xa30/0xa40/0xe18/0xe28/0xce0/0xcd0 data=… count=… max=…` và
+  `p0/p1/p6`; `bones automap: ok…` / `LIVE-POSE ok…` / `skip…`;
+  `bones: offset=0xa30 AUTO-MAP ok…`; `bones cand: off=…`;
+  `bones compose: 0xc98 fail (…)`; `bones sample: compose fail (…)`.
 - Bật/tắt toggle Bones là engine bật/tắt đọc xương ngay tick sau (không reset app).
-- Rig khác? Thêm bảng index vào `kESPBoneMaps` (`ESPEngine.mm`) — validate sẽ tự chọn.
 
 **Lưu ý:** nếu `bones no-match`, xem các dòng chẩn đoán (10s/lần):
-- `bones compose: 0xc98 fail` — không đọc được BoneSpaceTransforms/BoneTree,
-  hoặc parent index không hợp lệ.
-- `bones probe: 0xce0 data=... count=... max=...` — nếu `data=0/count=0` thì mảng
-  rỗng (game đã xoá sau skin); `0xC98/0xCA8` là ứng viên thay thế.
-- `bones probe: 0xce0 p0=(...)...` — toạ độ thật để đối chiếu hệ quy chiếu.
-- `bones cand: off=... data=... count=...` — TArray 20..400 tìm thấy trong
-  `0xC00..0xF00` (ứng viên offset mới).
-- `bones names: ...` — chỉ có khi GNames resolve được (build này đang tắt scan).
-`bones auto-off` thì offset/map sai (engine tự tắt, các tính năng khác không ảnh hưởng).
+- `bones readidx` và `bones probe` cho biết `0xA30/0xA40/0xE18/0xE28` có phải
+  `TArray<FTransform>` không (`data != 0`, `count/max` hợp lệ, `p0/p1/p6` có toạ độ
+  người thật). `0xCE0/0xCD0` `count=0` là bình thường sau skin.
+- `bones: offset=...` cho biết offset nào được nhận; `AUTO-MAP`/`mapN` cho biết
+  bảng index. `bones automap: skip (...)` cho biết ref/live fail ở bước nào.
+- `bones cand: off=...` là TArray 20..400 tìm thấy trong `0xC00..0xF00` (offset mới).
+- `bones compose: 0xc98 fail` = không đọc được bone-space / `BoneTree` hoặc parent
+  không hợp lệ. `bones sample: compose fail` = mảng bị xoá/dời giữa trận.
+- Nếu offset đúng nhưng skeleton lệch box, kiểm tra `ComponentToWorld` `0x208` và
+  xem `p0/p1/p6` có cùng hệ quy chiếu component-space (cm, Z hướng lên) không.
 
 ### Chiều cao box
 

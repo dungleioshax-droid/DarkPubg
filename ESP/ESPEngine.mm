@@ -1255,7 +1255,9 @@ ESPScanResult ESPEngineScan(uint64_t gameBase) {
         tr.team = (team != ESPTeam_Dummy && team >= 0 && team <= 200000000) ? team : INT_MIN;
         tr.isAI = (dg.ai || aiHint) ? 1 : 0;
         // qblpack: dò bảng xương ngay trên queue scan nền (không chặn tick).
-        if (g_espBonesWant.load() && !g_espBonesReady.load() &&
+        // Chỉ dùng mesh player/bot thật; hình nhân (kind 3) có rig khác, nếu
+        // configure từ nó thì map/offset đúng có thể bị cache sai cho player.
+        if (team != ESPTeam_Dummy && g_espBonesWant.load() && !g_espBonesReady.load() &&
             meshComp && ESPIsUserPtr(meshComp)) {
             ESPBonesConfigure(vmMap, meshComp, gameBase, YES);
         }
@@ -2602,28 +2604,35 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
 // xương trong SkeletalMeshComponent, nhân với ComponentToWorld rồi trả vị trí
 // world — sau đó project ra màn hình và nối các khớp.
 //
-// DUMP/SDK xác nhận mảng xương nằm trong USkeletalMeshComponent:
-//   0xCD0 CachedBoneSpaceTransforms / 0xCE0 CachedComponentSpaceTransforms.
-// ComponentToWorld cũng đã xác nhận ở 0x208 (xem ESPOffsets.h). Engine vẫn
-// validate runtime thay vì tin offset mù:
-//   1. Thử 0xCE0 rồi 0xCD0 (offset từ DUMP), sau đó quét dải cũ
-//      mesh+[0x480..0xC00) làm fallback nếu bản game sau dời field.
-//   2. Với mỗi ứng viên, thử 3 bảng index khớp phổ biến (UE4 mannequin /
-//      biến thể PUBG mobile) và VALIDATE bằng tỉ lệ cơ thể thật:
-//      đầu > cổ > ngực > hông, tay 2 bên ngược hướng, độ dài từng đoạn tay/chân
-//      trong khoảng người thật. Chỉ nhận khi TẤT CẢ điều kiện khớp.
-//   3. Mỗi tick còn kiểm tra chéo: đầu phải nằm quanh mép trên box. Lệch liên
-//      tục => tự tắt xương (tránh vẽ rác) + ghi log.
+// DUMP/SDK xác nhận 0xCD0/0xCE0 là Cached* (game xoá sau skin, count=0).
+// kernrw70 đọc component-space live theo layout UE4:
+//   0xA30/0xA40 ComponentSpaceTransformsArray[2] (double buffer),
+//   0xA74 CurrentReadComponentTransforms (0/1) chọn buffer đang đọc,
+//   0xE18/0xE28 hai TArray<FTransform> Num=67 (eval-context) làm fallback,
+//   0xC98 BoneSpaceTransforms (bone space) để compose theo ParentIndex.
+// 0xCA8 là RequiredBones compact (Num=44), KHÔNG dùng vì index lệch skeleton.
+// ComponentToWorld đã xác nhận ở 0x208 (xem ESPOffsets.h). Engine vẫn validate
+// runtime thay vì tin offset mù:
+//   1. Thử trực tiếp buffer CurrentRead (0xA30/0xA40), buffer còn lại,
+//      0xE18/0xE28, rồi compose 0xC98; cuối cùng mới quét dải cũ
+//      mesh+[0x400..0xF00) làm fallback nếu bản game sau dời field.
+//   2. Với mỗi ứng viên, dùng bảng tự dò từ ref/live pose, bảng tên (nếu GNames
+//      resolve được) và các bảng index phổ biến; VALIDATE bằng tỉ lệ cơ thể thật
+//      (đầu-hông, tay/chân, đối xứng trái-phải, khoảng cách vai).
+//   3. Chỉ configure/sample cho player/bot thật (kind 1), không dùng rig hình
+//      nhân kind 3. Mỗi tick kiểm tra chéo đầu với mép box; lệch liên tục thì
+//      tự tắt xương (tránh vẽ rác) + ghi log.
 // Không dò được => xương tắt (các tính năng khác không bị ảnh hưởng).
 // Muốn thêm bảng index cho bản game khác: thêm vào kESPBoneMaps bên dưới.
 
 static std::atomic_int g_espBoneBadTicks{0};
-static uint32_t g_espBoneOff = 0;      // offset TArray<FTransform> trong mesh
+static uint32_t g_espBoneOff = 0;      // offset mảng transform đã validate
 static int g_espBoneMap[ESPBone_Count] = {0};
 static CFAbsoluteTime g_espBoneTryAt = 0;
 static char g_espBoneStatus[64] = "bones off";
-// qblpack 2026-10-21: 0xCD0/0xCE0 bị game xoá (Num=0). Dùng BoneSpaceTransforms
-// (0xC98) rồi tự nhân theo ParentIndex của USkeleton.BoneTree — không cần GNames.
+// qblpack 2026-10-21: 0xCD0/0xCE0 bị game xoá (Num=0). kernrw70 ưu tiên
+// component-space live 0xA30/0xA40 (theo CurrentRead 0xA74), fallback 0xE18/
+// 0xE28; nếu fail mới compose BoneSpaceTransforms (0xC98) theo ParentIndex.
 static std::atomic_bool g_espBoneComposed{false};
 
 // Thứ tự slot: head, neck, chest, pelvis, LShoulder, LElbow, LHand,
@@ -2776,13 +2785,34 @@ static BOOL ESPBoneArrayAt(uint64_t vmMap, uint64_t mesh, uint32_t off,
     uint8_t hdr[16];
     if (!ESPMemoryRead(vmMap, mesh + off, hdr, sizeof(hdr))) return NO;
     uint64_t d = 0;
-    uint32_t c = 0;
+    uint32_t c = 0, maxc = 0;
     memcpy(&d, hdr, 8);
     memcpy(&c, hdr + 8, 4);
-    if (!ESPIsUserPtr(d) || c < 15 || c > 800) return NO;
+    memcpy(&maxc, hdr + 12, 4);
+    if (!ESPIsUserPtr(d) || c < 15 || c > 800 || maxc < c) return NO;
     if (outData) *outData = d;
     if (outCount) *outCount = c;
     return YES;
+}
+
+// Thứ tự đọc 4 buffer component-space: buffer CurrentRead trước, buffer còn lại
+// sau, rồi 2 buffer eval-context. Trả về chỉ số CurrentRead nếu đọc được hợp lệ
+// (0/1), ngược lại -1. Mỗi lần chỉ đọc 4 byte, có kiểm tra BOOL.
+static int ESPBoneCompSpaceOrder(uint64_t vmMap, uint64_t mesh, uint32_t out[4]) {
+    if (!out) return -1;
+    out[0] = ESPOff_Mesh_CompSpaceRead0;
+    out[1] = ESPOff_Mesh_CompSpaceRead1;
+    out[2] = ESPOff_Mesh_CompSpaceLive0;
+    out[3] = ESPOff_Mesh_CompSpaceLive1;
+    if (!vmMap || !ESPIsUserPtr(mesh)) return -1;
+    int32_t rd = -1;
+    if (!ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx, &rd, sizeof(rd)) ||
+        (rd != 0 && rd != 1)) {
+        return -1;
+    }
+    out[0] = rd ? ESPOff_Mesh_CompSpaceRead1 : ESPOff_Mesh_CompSpaceRead0;
+    out[1] = rd ? ESPOff_Mesh_CompSpaceRead0 : ESPOff_Mesh_CompSpaceRead1;
+    return (int)rd;
 }
 
 // Đọc translation (component space) của `count` FTransform đầu trong mảng.
@@ -3141,7 +3171,11 @@ static BOOL ESPBoneReadRefPose(uint64_t vmMap, uint64_t mesh, const int *parents
     }
     // 2) USkeletalMesh.ReferenceSkeleton.RefPose — asset giữ ref pose đầy đủ
     //    kể cả khi USkeleton bị game tối ưu/đổi layout.
-    for (uint32_t off = 0x20; off <= 0x180; off += 8) {
+    // RefSkeleton nằm sau nhiều field private/editor trong UE4; build này có
+    // thể đặt nó quá 0x180. Quét tới 0x300; bỏ 0x30 vì nằm trong vùng header
+    // UObject, không phải TArray<FTransform>. Chỉ accept khi compose + map pass.
+    for (uint32_t off = 0x20; off <= 0x300; off += 8) {
+        if (off == 0x30) continue;
         int n = 0;
         if (ESPBoneRefPoseFromArray(vmMap, skelMesh, off, parents, parentCount,
                                     YES, outPts, &n, w, sizeof(w))) {
@@ -3187,11 +3221,14 @@ static BOOL ESPBoneAutoMapForMesh(uint64_t vmMap, uint64_t mesh,
 }
 
 // kernrw69: fallback khi ref pose KHÔNG đọc được (build bị xoá/dời như
-// 0xCD0/0xCE0 trên máy user). Dựng bảng từ pose HIỆN TẠI của nhân vật (0xC98
-// đã compose xong). Chỉ chấp nhận khi ESPBoneMapBuild + validator tỉ lệ
-// cơ thể/đối xứng trái-phải đều pass — những kiểm tra đó là ĐỘ DÀI XƯƠNG nên
-// đứng/đi/chạy đều đúng; pose nằm/ngồi xổm sẽ fail và trả NO (giữ nguyên
-// hành vi cũ, không vẽ bảng sai). Cache theo USkeleton như ref pose.
+// 0xCD0/0xCE0 trên máy user). Dựng bảng từ pose HIỆN TẠI của nhân vật.
+// kernrw70: ưu tiên 2 buffer ComponentSpaceTransformsArray[2] (0xA30/0xA40,
+// Num=67) theo CurrentReadComponentTransforms (0xA74), rồi 2 buffer
+// eval-context (0xE18/0xE28, Num=67); chỉ khi không đọc được mới compose 0xC98.
+// Chỉ chấp nhận khi ESPBoneMapBuild + validator tỉ lệ cơ thể/đối xứng
+// trái-phải đều pass — những kiểm tra đó là ĐỘ DÀI XƯƠNG nên đứng/đi/chạy đều
+// đúng; pose nằm/ngồi xổm sẽ fail và trả NO (giữ nguyên hành vi cũ, không vẽ
+// bảng sai). Cache theo USkeleton như ref pose.
 static BOOL ESPBoneAutoMapFromLive(uint64_t vmMap, uint64_t mesh,
                                    int outMap[ESPBone_Count], int *outCount,
                                    char *why, size_t whyCap) {
@@ -3200,16 +3237,48 @@ static BOOL ESPBoneAutoMapFromLive(uint64_t vmMap, uint64_t mesh,
     if (outCount) *outCount = 0;
     int parents[ESPOff_Bone_NumMax];
     uint32_t treeCount = 0;
-    if (!ESPBoneReadParents(vmMap, mesh, parents, &treeCount)) {
+    if (!ESPBoneReadParents(vmMap, mesh, parents, &treeCount) || treeCount < 18) {
         if (why && whyCap) snprintf(why, whyCap, "live parents");
         return NO;
     }
     static thread_local ESPVector livePts[ESPOff_Bone_NumMax];
     int n = 0;
+    char whyLive[64] = {0};
+    // 1) Component space live đầy đủ (không compact) — đọc thẳng, không compose.
+    uint32_t liveOffs[4];
+    ESPBoneCompSpaceOrder(vmMap, mesh, liveOffs);
+    for (int oi = 0; oi < 4; oi++) {
+        uint64_t data = 0;
+        uint32_t count = 0;
+        if (!ESPBoneArrayAt(vmMap, mesh, liveOffs[oi], &data, &count)) continue;
+        // Không đọc quá số bone của BoneTree: parents[] chỉ có treeCount phần tử,
+        // mảng lạ dài hơn sẽ làm ESPBoneMapBuild đọc ngoài mảng.
+        uint32_t cap = count < treeCount ? count : treeCount;
+        n = (int)(cap < (uint32_t)ESPOff_Bone_NumMax ? cap : (uint32_t)ESPOff_Bone_NumMax);
+        if (n < 18 || !ESPReadBoneLocals(vmMap, data, livePts, n)) continue;
+        char whyBuild[48] = {0};
+        if (!ESPBoneMapBuild(livePts, n, parents, outMap, whyBuild,
+                             (int)sizeof(whyBuild))) {
+            snprintf(whyLive, sizeof(whyLive), "0x%x build %s",
+                     (unsigned)liveOffs[oi], whyBuild);
+            continue;
+        }
+        if (!ESPBoneMapPlausible(livePts, n, outMap, NULL)) {
+            snprintf(whyLive, sizeof(whyLive), "0x%x implausible",
+                     (unsigned)liveOffs[oi]);
+            continue;
+        }
+        if (outCount) *outCount = n;
+        if (why && whyCap)
+            snprintf(why, whyCap, "live direct 0x%x n=%d", (unsigned)liveOffs[oi], n);
+        return YES;
+    }
+    // 2) Fallback: 0xC98 bone-space + tự nhân ParentIndex của USkeleton.BoneTree.
     const char *whyC = NULL;
     if (!ESPBoneComposeAt(vmMap, mesh, livePts, &n, &whyC) || n < 18) {
         if (why && whyCap)
-            snprintf(why, whyCap, "live compose %s", whyC ? whyC : "-");
+            snprintf(why, whyCap, "live compose %s%s%s",
+                     whyC ? whyC : "-", whyLive[0] ? " | " : "", whyLive);
         return NO;
     }
     char whyBuild[48] = {0};
@@ -3222,7 +3291,7 @@ static BOOL ESPBoneAutoMapFromLive(uint64_t vmMap, uint64_t mesh,
         return NO;
     }
     if (outCount) *outCount = n;
-    if (why && whyCap) snprintf(why, whyCap, "ok n=%d", n);
+    if (why && whyCap) snprintf(why, whyCap, "ok compose n=%d", n);
     return YES;
 }
 
@@ -3433,8 +3502,8 @@ static BOOL ESPBoneTryComposedLocked(uint64_t vmMap, uint64_t mesh,
 // qblpack: dò TÊN xương từ USkeleton thay vì chỉ hard-code index.
 // PUBG đổi rig/season làm index lệch, nhưng tên xương ("head", "pelvis",
 // "upperarm_l"...) ổn định. BoneTree là mảng ref-skeleton, cùng thứ tự với
-// CachedComponentSpaceTransforms của mesh full-body. Validate hình học xong
-// mới nhận; fail thì caller fallback 3 bảng index cũ.
+// component-space array đầy đủ của mesh (0xA30/0xA40 hoặc 0xC98 compose).
+// Validate hình học xong mới nhận; fail thì caller fallback bảng tự dò/index.
 // ---------------------------------------------------------------------------
 
 static void ESPBoneLowerCopy(char *dst, size_t cap, const char *src) {
@@ -3657,12 +3726,13 @@ static BOOL ESPBoneSkeletonMap(uint64_t vmMap, uint64_t gameBase, uint64_t mesh,
     return NO;
 }
 
-// Dò (offset mảng xương, bảng index) trên 1 mesh player thật. Throttle 2s/lần.
+// Dò (offset mảng xương, bảng index) trên 1 mesh player thật. Throttle 1.5s/lần.
 // Mutex riêng: configure chạy từ queue scan nền, sample chạy từ tick 60Hz —
 // mutex chỉ nhận ở đường configure (hiếm), reader chỉ snapshot (xem ESPBonesSample).
 static std::mutex g_espBoneCfgMutex;
-// Thử 1 offset: đọc TArray<FTransform>, validate 3 bảng index cũ + bảng tên
-// xương (nếu có), nhận nếu khớp. Caller đã giữ g_espBoneCfgMutex.
+// Thử 1 offset: đọc TArray<FTransform>, validate bảng tên (nếu có), bảng tự dò
+// từ ref/live pose, rồi 6 bảng index hard-code; nhận nếu khớp hình học.
+// Caller đã giữ g_espBoneCfgMutex.
 static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
                                    const int *nameMap, const int *autoMap,
                                    int autoCount, ESPVector *pts) {
@@ -3678,9 +3748,9 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
         for (int i = 0; i < ESPBone_Count; i++) {
             if (nameMap[i] + 1 > need) need = nameMap[i] + 1;
         }
-        if (need > 0 && need <= (int)count &&
-            (ESPBoneMapValidateEx(pts, need, nameMap, NULL) ||
-             ESPBoneMapPlausible(pts, need, nameMap, NULL))) {
+        if (need > 0 && need <= n &&
+            (ESPBoneMapValidateEx(pts, n, nameMap, NULL) ||
+             ESPBoneMapPlausible(pts, n, nameMap, NULL))) {
             g_espBoneOff = off;
             g_espBoneComposed.store(false);
             memcpy(g_espBoneMap, nameMap, sizeof(g_espBoneMap));
@@ -3697,9 +3767,9 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
         for (int i = 0; i < ESPBone_Count; i++) {
             if (autoMap[i] + 1 > need) need = autoMap[i] + 1;
         }
-        if (need > 0 && need <= (int)count &&
-            (ESPBoneMapPlausible(pts, need, autoMap, NULL) ||
-             ESPBoneMapValidateEx(pts, need, autoMap, NULL))) {
+        if (need > 0 && need <= n &&
+            (ESPBoneMapPlausible(pts, n, autoMap, NULL) ||
+             ESPBoneMapValidateEx(pts, n, autoMap, NULL))) {
             g_espBoneOff = off;
             g_espBoneComposed.store(false);
             memcpy(g_espBoneMap, autoMap, sizeof(g_espBoneMap));
@@ -3718,7 +3788,7 @@ static BOOL ESPBoneTryOffsetLocked(uint64_t vmMap, uint64_t mesh, uint32_t off,
         for (int i = 0; i < ESPBone_Count; i++) {
             if (mMap[i] + 1 > need) need = mMap[i] + 1;
         }
-        if (need > (int)count) continue;
+        if (need > n) continue;
         if (ESPBoneMapValidateEx(pts, n, mMap, NULL) ||
             ESPBoneMapPlausible(pts, n, mMap, NULL)) {
             g_espBoneOff = off;
@@ -3800,7 +3870,10 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
             ESPIsUserPtr(skelMesh) &&
             ESPMemoryRead(vmMap, skelMesh + ESPOff_SkeletalMesh_Skeleton, &skel, 8) &&
             ESPIsUserPtr(skel)) {
-            if (skel == s_autoSkel && s_autoAt > 0 && now - s_autoAt < 60.0) {
+            // Thành công cache 60s; thất bại chỉ 8s để pose nằm/ngồi lúc đầu
+            // không khoá skeleton cả phút — lần configure sau cơ hội đứng lại.
+            double autoTtl = s_autoOK ? 60.0 : 8.0;
+            if (skel == s_autoSkel && s_autoAt > 0 && now - s_autoAt < autoTtl) {
                 haveAuto = s_autoOK;
                 autoCount = s_autoCount;
                 if (haveAuto) memcpy(autoMap, s_autoMap, sizeof(autoMap));
@@ -3850,15 +3923,19 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     }
 
     static ESPVector pts[ESPOff_Bone_NumMax];
-    // 0) Thử mảng component space trực tiếp (0xCA8, 0xCE0, 0xCD0) — nhanh,
-    //    không phụ thuộc USkeleton hay compose ma trận.
-    static const uint32_t kDumpOffsets[] = {
-        ESPOff_Mesh_ComponentSpaceTransforms,
-        ESPOff_Mesh_BoneCompSpace,
-        ESPOff_Mesh_BoneBoneSpace
+    // 0) Thử mảng component space trực tiếp — nhanh, không phụ thuộc USkeleton
+    //    hay compose ma trận. kernrw70: buffer CurrentRead của
+    //    ComponentSpaceTransformsArray[2] (0xA30/0xA40) trước, buffer còn lại
+    //    sau, rồi 2 buffer eval-context (0xE18/0xE28). 0xCA8 không dùng vì là
+    //    RequiredBones compact, index không khớp skeleton đầy đủ.
+    uint32_t csOffs[4];
+    ESPBoneCompSpaceOrder(vmMap, mesh, csOffs);
+    uint32_t directOffs[6] = {
+        csOffs[0], csOffs[1], csOffs[2], csOffs[3],
+        ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace
     };
-    for (size_t i = 0; i < sizeof(kDumpOffsets) / sizeof(kDumpOffsets[0]); i++) {
-        if (ESPBoneTryOffsetLocked(vmMap, mesh, kDumpOffsets[i],
+    for (int i = 0; i < 6; i++) {
+        if (ESPBoneTryOffsetLocked(vmMap, mesh, directOffs[i],
                                    haveNames ? nameMap : NULL,
                                    haveAuto ? autoMap : NULL, autoCount, pts)) {
             s_failTries = 0;
@@ -3877,8 +3954,18 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
         static CFAbsoluteTime s_probeAt = 0;
         if (now - s_probeAt > 10.0) {
             s_probeAt = now;
-            uint32_t probes[2] = { ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace };
-            for (int pi = 0; pi < 2; pi++) {
+            int32_t readIdx = -1;
+            BOOL haveReadIdx = ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx,
+                                             &readIdx, sizeof(readIdx));
+            ESPLog("bones readidx: 0x%x ok=%d value=%d",
+                   (unsigned)ESPOff_Mesh_CompSpaceReadIdx,
+                   haveReadIdx ? 1 : 0, (int)readIdx);
+            uint32_t probes[6] = {
+                ESPOff_Mesh_CompSpaceRead0, ESPOff_Mesh_CompSpaceRead1,
+                ESPOff_Mesh_CompSpaceLive0, ESPOff_Mesh_CompSpaceLive1,
+                ESPOff_Mesh_BoneCompSpace, ESPOff_Mesh_BoneBoneSpace
+            };
+            for (int pi = 0; pi < 6; pi++) {
                 uint8_t hdr[16];
                 if (!ESPMemoryRead(vmMap, mesh + probes[pi], hdr, sizeof(hdr))) {
                     ESPLog("bones probe: 0x%x read-fail mesh=0x%llx",
@@ -3925,6 +4012,9 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
     }
     // 2) Fallback: quét dải cũ phòng bản game sau dời field.
     for (uint32_t off = ESPOff_Mesh_BoneScanStart; off + 16 <= ESPOff_Mesh_BoneScanEnd; off += 8) {
+        // 0xCA8 là mảng compact theo RequiredBones: index full-skeleton không
+        // tương ứng, dễ false-match. Bỏ qua trong blind scan.
+        if (off == ESPOff_Mesh_ComponentSpaceTransforms) continue;
         // Quét mù vẫn dùng autoMap: nó chỉ nhận khi 17 khớp đúng tỉ lệ người
         // (đầu-hông 40..150cm, tay/chân trong khoảng, 2 vai cách 18..90cm) —
         // mảng rác gần như không thể qua. Nhờ vậy mảng xương dời offset vẫn dò ra.
@@ -4015,9 +4105,22 @@ static int ESPBonesSample(uint64_t vmMap, uint64_t mesh, const ESPCamBasis *basi
             have[i] = YES;
         }
     } else {
+        // 0xA30/0xA40 là double buffer: đọc buffer CurrentRead của chính mesh
+        // này mỗi frame để không đọc trúng buffer game đang ghi (pose bị xé).
+        uint32_t useOff = boneOff;
+        if (boneOff == ESPOff_Mesh_CompSpaceRead0 ||
+            boneOff == ESPOff_Mesh_CompSpaceRead1) {
+            uint32_t csOffs[4];
+            if (ESPBoneCompSpaceOrder(vmMap, mesh, csOffs) >= 0) useOff = csOffs[0];
+        }
         uint64_t data = 0;
         uint32_t count = 0;
-        if (!ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
+        if (!ESPBoneArrayAt(vmMap, mesh, useOff, &data, &count)) {
+            // Buffer CurrentRead có thể vừa bị đổi/clear; quay lại buffer đã
+            // validate lúc configure thay vì bỏ cả skeleton frame này.
+            if (useOff == boneOff ||
+                !ESPBoneArrayAt(vmMap, mesh, boneOff, &data, &count)) return 0;
+        }
         int need = 0;
         for (int i = 0; i < ESPBone_Count; i++) {
             if (boneMap[i] + 1 > need) need = boneMap[i] + 1;
@@ -4250,7 +4353,10 @@ int ESPEngineBoxes(uint64_t gameBase, float screenW, float screenH, ESPBox2D *ou
             strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
         }
         box.nick[sizeof(box.nick) - 1] = '\0';
-        if (g_espBonesWant.load() && g_espBonesReady.load() && meshComp && ESPIsUserPtr(meshComp)) {
+        // Hình nhân (kind 3) không bao giờ lấy xương: rig khác player và yêu cầu
+        // chỉ vẽ skeleton/snapline cho player/bot thật.
+        if (box.kind == 1 && g_espBonesWant.load() && g_espBonesReady.load() &&
+            meshComp && ESPIsUserPtr(meshComp)) {
             (void)ESPBonesSample(vmMap, meshComp, &basis, &box, box.y, box.h);
         }
         outBoxes[n++] = box;
@@ -4772,7 +4878,7 @@ int ESPEngineRefreshBoxes(uint64_t gameBase, float screenW, float screenH, ESPBo
             strncpy(box.nick, "Unknown", sizeof(box.nick) - 1);
         }
         box.nick[sizeof(box.nick) - 1] = '\0';
-        if (g_espBonesWant.load()) {
+        if (tr->kind == 1 && g_espBonesWant.load()) {
             if (!g_espBonesReady.load() && tr->mesh && ESPIsUserPtr(tr->mesh)) {
                 static CFAbsoluteTime s_lastFastCfg = 0;
                 CFAbsoluteTime nowFast = CFAbsoluteTimeGetCurrent();
