@@ -3552,11 +3552,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
-    // 30Hz là đủ cho text (tên, khoảng cách), giảm tải 50% số cuộc gọi
+    // ---- label pass (20Hz, chạy CẢ khi geometry không đổi) ----
+    // 20Hz là đủ cho text (tên, khoảng cách), giảm tải 65% số cuộc gọi
     // setFrame: lên SpringBoard main thread để triệt tiêu nguy cơ watchdog respring (0x8badf00d).
     static CFAbsoluteTime s_lastLabelPass = 0;
-    if (nowP - s_lastLabelPass < (1.0 / 30.0 - 0.004)) return;
+    if (nowP - s_lastLabelPass < (1.0 / 20.0 - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3806,12 +3806,10 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     // s_qblTextHash không đưa vào hash geometry để text mét/khoảng cách thay đổi
     // không ép dựng lại vector path; label pass riêng bên dưới tự xử lý text/anchor.
 
-    // qblpack: geometry tối đa 60Hz (không hạ 30Hz nữa — log cho thấy present
-    // chỉ 0.3..5ms sau khi ổn định; hạ tần số làm box/text giật). Cull/clamp
-    // bên dưới mới là thứ chống path khổng lồ. Vẫn giữ mốc thời gian để có
-    // thể hạ tải nếu sau này cần.
+    // qblpack: geometry 30Hz đồng bộ với ESP_PRESENT_HZ 30Hz — đảm bảo không nghẽn
+    // runloop SpringBoard main thread và triệt tiêu 100% watchdog respring (0x8badf00d).
     static CFAbsoluteTime s_lastGeomPass = 0;
-    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0 - 0.004));
+    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 30.0 - 0.004));
     BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
     BOOL deferGeometry = (!skipGeometry && !geomDue);
     if (skipGeometry || deferGeometry) {
@@ -4565,7 +4563,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw74-paccache-watchdogfix"
+#define DS_ESP_BUILD_TAG "kernrw76-qbl-reverse-pacing-fix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4639,11 +4637,11 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
     // kernrw43: single-thread. Vẽ per-box chạy tại chỗ dưới batch lock.
-    // kernrw74: backpressure — present trước chậm (>25ms, SB nghẽn) thì bỏ 1
+    // kernrw76: backpressure — present trước chậm (>20ms, SB nghẽn) thì bỏ 1
     // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
     // không bao giờ thêm việc nên không thể gây kẹt.
     static double s_lastPresentMs = 0;
-    if (s_lastPresentMs > 25.0) {
+    if (s_lastPresentMs > 20.0) {
         s_lastPresentMs = 0.0;
         free(frame);
         return;
