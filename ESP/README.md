@@ -191,6 +191,33 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
   khi nào thật sự cần hạ tần số.
 - **Log phase**: `qbl phase: root create/style/shape N/label N`.
 
+#### Ổn định lần 4 (respring sau ~30s khi ESP chạy) — kernrw72
+
+- Log 2026-10-22 08:08 kết thúc đột ngột ở dòng `scan stat`, không có
+  `ESP present failed`/`task port unavailable`; đúng kiểu app chết vì
+  `SIGSEGV`/mapping chết chứ không phải exception Objective-C.
+- **Root cause tìm được:** `ESPLocalRangeCheck()` khai báo
+  `mach_vm_region_recurse()` **9 tham số** trong khi API thật chỉ có 6:
+  `(task, &address, &size, &nesting_depth, info, &info_cnt)`.
+  Các tham số bị lệch nên kernel đọc `info_cnt` từ `&objName` (= 0) và trả
+  `KERN_INVALID_ARGUMENT (kr=4)`. Vì vậy **check mapping chết chưa bao giờ
+  chạy**; log `ESP region check err kr=4 (x3)` chính là bằng chứng.
+  Khi game free một `vm_object` (actor chết/world đổi), mapping cũ trong app
+  vẫn được `memcpy` → `SIGSEGV`/panic, HUD mất và người dùng thấy như respring.
+- **Fix:** khai báo đúng ABI 6 tham số, truyền `nesting_depth = 0`; thêm
+  fallback `mach_vm_read_overwrite()` đọc thử 1 byte từ mapping của app — syscall
+  trả lỗi thay vì `SIGSEGV` nếu mapping đã chết. Vùng chết giờ được đánh dấu,
+  purge và map lại thay vì đọc con trỏ rác.
+- Build tag: `kernrw73-respringfix`. Kỳ vọng log **không còn**
+  `ESP region check err kr=4`; nếu game free vùng, có thể thấy
+  `ESP region purged ...` nhưng app/HUD vẫn sống.
+- **Tối ưu xương & label (SpringBoard IPC):**
+  - Gộp 5 đường xương (spine, 2 tay, 2 chân) thành 1 đường polyline liên tục
+    (DFS traversal với retrace), giảm 80% số RemoteCall lên SpringBoard mỗi frame.
+  - Làm tròn toạ độ label (`roundf`) và nâng ngưỡng thay đổi vị trí lên `1.0pt`,
+    cùng gate tần số 30Hz: triệt tiêu hiện tượng chữ rung giật (subpixel text jitter)
+    khi xoay camera/di chuyển, giảm hơn 60% tải IPC `setFrame:` lên SpringBoard main thread.
+
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).

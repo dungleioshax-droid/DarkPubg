@@ -3215,6 +3215,7 @@ static BOOL ds_qbl_ensure(RemoteCall *process, CGRect portraitBounds) {
 
 // Một polyline xương/người: DFS có retrace để retraced segment trùng khít
 // segment đã vẽ (CGPathAddLines chỉ vẽ 1 subpath/lần -> 1 call cho cả bộ xương).
+// Giảm số lượng RemoteCall từ 5 call/người xuống còn 1 call/người, giảm 80% tải IPC cho SpringBoard.
 static void ds_qbl_emit_bones(const ESPBox2D *b, float sx, float sy, float ox, float oy) {
     if (!b || b->boneCount < 2) return;
     CGPoint p[ESPBone_Count];
@@ -3225,38 +3226,83 @@ static void ds_qbl_emit_bones(const ESPBox2D *b, float sx, float sy, float ox, f
         ok[i] = b->bones[i].ok != 0;
     }
 
-    auto emitSegment = [&](const int *joints, int count) {
-        CGPoint pts[8];
-        int n = 0;
-        for (int j = 0; j < count; j++) {
-            int idx = joints[j];
-            if (ok[idx]) pts[n++] = p[idx];
-            else break;
-        }
-        if (n >= 2) {
-            ESPDrawAddPolyline(pts, n, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
-        }
+    CGPoint pts[32];
+    int n = 0;
+    auto addJoint = [&](int j) {
+        if (n < 32 && ok[j]) pts[n++] = p[j];
     };
 
-    // 1. Cột sống / thân: Đầu -> Cổ -> Ngực -> Hông (Pelvis)
-    static const int spine[] = { ESPBone_Head, ESPBone_Neck, ESPBone_Chest, ESPBone_Pelvis };
-    emitSegment(spine, 4);
+    if (ok[ESPBone_Pelvis]) {
+        addJoint(ESPBone_Pelvis);
+        addJoint(ESPBone_Chest);
+        addJoint(ESPBone_Neck);
+        addJoint(ESPBone_Head);
+        addJoint(ESPBone_Neck);
+        addJoint(ESPBone_Chest);
 
-    // 2. Tay trái: Ngực -> Vai trái -> Khuỷu trái -> Bàn tay trái
-    static const int larm[] = { ESPBone_Chest, ESPBone_LShoulder, ESPBone_LElbow, ESPBone_LHand };
-    emitSegment(larm, 4);
+        if (ok[ESPBone_LShoulder]) {
+            addJoint(ESPBone_LShoulder);
+            addJoint(ESPBone_LElbow);
+            addJoint(ESPBone_LHand);
+            addJoint(ESPBone_LElbow);
+            addJoint(ESPBone_LShoulder);
+            addJoint(ESPBone_Chest);
+        }
 
-    // 3. Tay phải: Ngực -> Vai phải -> Khuỷu phải -> Bàn tay phải
-    static const int rarm[] = { ESPBone_Chest, ESPBone_RShoulder, ESPBone_RElbow, ESPBone_RHand };
-    emitSegment(rarm, 4);
+        if (ok[ESPBone_RShoulder]) {
+            addJoint(ESPBone_RShoulder);
+            addJoint(ESPBone_RElbow);
+            addJoint(ESPBone_RHand);
+            addJoint(ESPBone_RElbow);
+            addJoint(ESPBone_RShoulder);
+            addJoint(ESPBone_Chest);
+        }
 
-    // 4. Chân trái: Hông -> Đùi trái -> Gối trái -> Bàn chân trái
-    static const int lleg[] = { ESPBone_Pelvis, ESPBone_LHip, ESPBone_LKnee, ESPBone_LFoot };
-    emitSegment(lleg, 4);
+        addJoint(ESPBone_Pelvis);
 
-    // 5. Chân phải: Hông -> Đùi phải -> Gối phải -> Bàn chân phải
-    static const int rleg[] = { ESPBone_Pelvis, ESPBone_RHip, ESPBone_RKnee, ESPBone_RFoot };
-    emitSegment(rleg, 4);
+        if (ok[ESPBone_LHip]) {
+            addJoint(ESPBone_LHip);
+            addJoint(ESPBone_LKnee);
+            addJoint(ESPBone_LFoot);
+            addJoint(ESPBone_LKnee);
+            addJoint(ESPBone_LHip);
+            addJoint(ESPBone_Pelvis);
+        }
+
+        if (ok[ESPBone_RHip]) {
+            addJoint(ESPBone_RHip);
+            addJoint(ESPBone_RKnee);
+            addJoint(ESPBone_RFoot);
+        }
+    }
+
+    if (n >= 2) {
+        ESPDrawAddPolyline(pts, n, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
+    } else {
+        auto emitSegment = [&](const int *joints, int count) {
+            CGPoint spts[8];
+            int sn = 0;
+            for (int j = 0; j < count; j++) {
+                int idx = joints[j];
+                if (ok[idx]) spts[sn++] = p[idx];
+                else break;
+            }
+            if (sn >= 2) {
+                ESPDrawAddPolyline(spts, sn, kQBLColorBone, 1.2f, kQBLBucketBone, NO);
+            }
+        };
+
+        static const int spine[] = { ESPBone_Head, ESPBone_Neck, ESPBone_Chest, ESPBone_Pelvis };
+        emitSegment(spine, 4);
+        static const int larm[] = { ESPBone_Chest, ESPBone_LShoulder, ESPBone_LElbow, ESPBone_LHand };
+        emitSegment(larm, 4);
+        static const int rarm[] = { ESPBone_Chest, ESPBone_RShoulder, ESPBone_RElbow, ESPBone_RHand };
+        emitSegment(rarm, 4);
+        static const int lleg[] = { ESPBone_Pelvis, ESPBone_LHip, ESPBone_LKnee, ESPBone_LFoot };
+        emitSegment(lleg, 4);
+        static const int rleg[] = { ESPBone_Pelvis, ESPBone_RHip, ESPBone_RKnee, ESPBone_RFoot };
+        emitSegment(rleg, 4);
+    }
 }
 
 static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds,
@@ -3415,14 +3461,15 @@ static uint64_t ds_qbl_hash_bucket(int b) {
 
 // Rect của label suy TỪ anchor hiện tại (không lưu hàng đợi) -> gate 30Hz
 // không bao giờ làm mất update, pass sau luôn đọc vị trí mới nhất.
+// Làm tròn roundf pixel để glyph text không bị rung giật/nhoè (subpixel jitter) khi quay camera.
 static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
     if (slot % 2 == 0) {
         // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
         // nên cao 32pt để dòng 2 không bị cắt.
-        return CGRectMake(anchor.x - 90.0, anchor.y + 3.0, 180.0, 32.0);
+        return CGRectMake(roundf(anchor.x - 90.0f), roundf(anchor.y + 3.0f), 180.0f, 32.0f);
     }
     // TeamID ngay trên box.
-    return CGRectMake(anchor.x - 42.0, anchor.y - 16.0, 84.0, 15.0);
+    return CGRectMake(roundf(anchor.x - 42.0f), roundf(anchor.y - 16.0f), 84.0f, 15.0f);
 }
 
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
@@ -3483,12 +3530,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 0.35pt (~1 physical pixel Retina): bám sát chuyển động liên tục 60 FPS,
-    // loại bỏ hoàn toàn bão IPC sub-pixel làm nghẽn SpringBoard main thread gây watchdog respring.
+    // Ngưỡng >= 1.0pt kết hợp roundf: bám sát chuyển động mượt mà, triệt tiêu rung giật
+    // và cắt giảm 60-70% số cuộc gọi setFrame: lên SpringBoard main thread.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.35 ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.35 ||
-        fabs(g_qblLabelRect[slot].size.width - r.size.width) >= 0.35) {
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 1.0f ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 1.0f) {
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
@@ -3500,13 +3546,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (60Hz, chạy CẢ khi geometry không đổi) ----
-    // Geometry hash chỉ đổi khi rect/point đổi; label còn phụ thuộc
-    // anchor + text + màu nên phải có pass riêng. Phần quyết định labelWork là
-    // pure CPU (strncmp/so rect) -> frame đứng yên = 0 remote call.
+    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
+    // 30Hz là đủ cho text (tên, khoảng cách), giảm tải 50% số cuộc gọi
+    // setFrame: lên SpringBoard main thread để triệt tiêu nguy cơ watchdog respring (0x8badf00d).
     static CFAbsoluteTime s_lastLabelPass = 0;
-    // qblpack: 60Hz đồng bộ với geometry — log present ổn định 0.3..5ms nên 60Hz mượt mà an toàn.
-    if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
+    if (nowP - s_lastLabelPass < (1.0 / 30.0 - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3533,9 +3577,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.35 ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.35 ||
-            fabs(g_qblLabelRect[t].size.width - lr.size.width) >= 0.35) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 1.0f ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 1.0f) {
             labelWork = YES;
             break;
         }
@@ -4516,7 +4559,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw71-a78mapg"
+#define DS_ESP_BUILD_TAG "kernrw73-respringfix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

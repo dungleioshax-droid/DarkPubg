@@ -53,6 +53,11 @@ extern "C" uint64_t vmmapfindentry(uint64_t vmMap, uint64_t address);
 extern "C" void vmmapiterateentries(uint64_t vmmapptr, void (^itblock)(uint64_t start, uint64_t end, uint64_t entry, BOOL *stop));
 extern "C" void vmentrygetrange(uint64_t entry, uint64_t *startout, uint64_t *endout);
 extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
+extern "C" kern_return_t mach_vm_read_overwrite(task_t target_task,
+                                               mach_vm_address_t address,
+                                               mach_vm_size_t size,
+                                               mach_vm_address_t data,
+                                               mach_vm_size_t *outsize);
 // mach_vm_region_recurse: header <mach/mach_vm.h> bị SDK iOS chặn ("mach_vm.h
 // unsupported") nên tự khai báo — y hệt cách codebase đã tự khai báo
 // mach_vm_deallocate ở trên. Dùng để hỏi kernel "mapping localAddress của ta
@@ -60,12 +65,9 @@ extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr,
 extern "C" kern_return_t mach_vm_region_recurse(vm_map_t target_task,
                                                mach_vm_address_t *address,
                                                mach_vm_size_t *size,
+                                               natural_t *nesting_depth,
                                                vm_region_recurse_info_t info,
-                                               mach_msg_type_number_t *infoCnt,
-                                               mach_port_t *object_name,
-                                               mach_msg_type_number_t object_nameCnt,
-                                               mach_msg_type_number_t object_nameDealloc,
-                                               uint32_t *pages_dirty);
+                                               mach_msg_type_number_t *infoCnt);
 
 // vmmapremoterange()/vmmapremotepage() không re-entrant: nó tạo memory entry rồi
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
@@ -193,35 +195,59 @@ static inline uint64_t ESPRegionSpan(const ESPRegion *r) {
 // Trả 1 = còn sống, 0 = đã chết, -1 = lỗi kiểm tra (không kết luận chết).
 static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
     if (!local || !span) return 0;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t infoCnt = VM_REGION_BASIC_INFO_COUNT_64;
+    // mach_vm_region_recurse() luôn trả submap info, không phải basic info.
+    // Dùng đúng struct/count; nếu dùng basic (count nhỏ hơn) kernel trả
+    // KERN_INVALID_ARGUMENT hoặc ghi tràn struct.
+    vm_region_submap_info_data_64_t info;
+    mach_msg_type_number_t infoCnt = VM_REGION_SUBMAP_INFO_COUNT_64;
     mach_vm_address_t regionAddr = (mach_vm_address_t)local;
     mach_vm_size_t regionSize = 0;
-    // TUYỆT ĐỐI không truyền NULL cho out-param: MIG stub của kernel ghi kết
-    // quả ra các con trỏ này; NULL = kernel ghi vào địa chỉ 0 = panic/reboot
-    // ngay lần check đầu (đúng kiểu "bấm HUD chưa kịp hiện đã respring").
-    mach_port_t objName = MACH_PORT_NULL;
-    uint32_t pagesDirty = 0;
+    // mach_vm_region_recurse() chỉ có 6 tham số:
+    //   (task, &address, &size, &nesting_depth, info, &infoCnt)
+    // Trước kernrw72 code khai báo thêm object_name/object_nameCnt/... nên các
+    // tham số bị lệch: kernel đọc infoCnt từ &objName (thường = 0) và trả
+    // KERN_INVALID_ARGUMENT (kr=4). Vì vậy check mapping chết chưa bao giờ chạy;
+    // một vùng bị game free có thể bị memcpy -> SIGSEGV/panic. Giữ đúng ABI ở
+    // đây là điều kiện sống còn của region-map.
+    natural_t nestingDepth = 0;
     kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
-                                               (vm_region_recurse_info_t)&info, &infoCnt,
-                                               &objName, 0, 0, &pagesDirty);
-    if (objName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self_, objName);
+                                               &nestingDepth,
+                                               (vm_region_recurse_info_t)&info, &infoCnt);
     // kr=1 (KERN_INVALID_ADDRESS) = địa chỉ chắc chắn không còn map -> chết.
-    // kr khác (!=0) = trap từ chối tham số (transient lúc khởi động, đã thấy
-    // kr=4 x3 ở kernrw30) -> KHÔNG kết luận chết để tránh vứt nhầm vùng tốt.
+    // kr khác (!=0) = lỗi tạm thời/không kết luận -> KHÔNG vứt nhầm vùng tốt.
     if (kr == KERN_INVALID_ADDRESS) return 0;
     if (kr != KERN_SUCCESS || regionSize == 0) {
+        // Fallback: đọc thử byte đầu và byte cuối của mapping bằng syscall.
+        // mach_vm_read_overwrite trả lỗi thay vì SIGSEGV nếu mapping đã chết,
+        // nên đây là lưới an toàn nếu region_recurse bị sandbox/trap từ chối.
+        // Kiểm tra cả byte cuối để không đọc tràn khi vùng bị co lại.
+        uint8_t probe = 0;
+        mach_vm_size_t probeOut = 0;
+        kern_return_t rk = mach_vm_read_overwrite(
+            mach_task_self(), (mach_vm_address_t)local, 1,
+            (mach_vm_address_t)(uintptr_t)&probe, &probeOut);
+        if (rk == KERN_SUCCESS && probeOut == 1 && span > 1) {
+            probeOut = 0;
+            rk = mach_vm_read_overwrite(
+                mach_task_self(), (mach_vm_address_t)(local + span - 1), 1,
+                (mach_vm_address_t)(uintptr_t)&probe, &probeOut);
+        }
+        if (rk == KERN_SUCCESS && probeOut == 1) return 1;
+        if (rk == KERN_INVALID_ADDRESS) return 0;
         static std::atomic<uint32_t> s_checkErr{0};
         uint32_t e = s_checkErr.fetch_add(1, std::memory_order_relaxed) + 1;
         if (e <= 3) {
-            ESPLog("ESP region check err kr=%d (x%u) — bo qua ket luan chet lan nay",
-                   (int)kr, e);
+            ESPLog("ESP region check err kr=%d probe=%d (x%u) — bo qua ket luan chet lan nay",
+                   (int)kr, (int)rk, e);
         }
         return -1;
     }
-    // local phải nằm trong đúng vùng kernel trả về.
-    return (local >= (uint64_t)regionAddr &&
-            local < (uint64_t)regionAddr + (uint64_t)regionSize) ? 1 : 0;
+    // local phải nằm trong đúng vùng kernel trả về, và vùng phải phủ đủ span.
+    // Nếu game đã co/unmap phần đuôi, coi như chết để map lại thay vì memcpy
+    // qua lỗ hổng.
+    uint64_t regionEnd = (uint64_t)regionAddr + (uint64_t)regionSize;
+    if ((uint64_t)regionAddr > (uint64_t)local || regionEnd < (uint64_t)local) return 0;
+    return (regionEnd - (uint64_t)local >= span) ? 1 : 0;
 }
 
 // Gỡ vùng chết khỏi bảng (exclusive lock) + nhả memory-entry port.
