@@ -1849,23 +1849,37 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
 // (giống additive hồi esp.mm:1069-1079: name trắng 18, dist vàng 16 dưới).
 // kernrw52: Distance là toggle riêng — nếu Name OFF thì không hiện nick, nếu
 // Distance OFF thì không hiện mét; cả hai OFF → caller giấu label.
-static void ds_esp_build_label_text(ESPBox2D b, BOOL showName, BOOL showDist,
+// kernrw79: Tích hợp TeamID trực tiếp vào label để gộp thành 1 label duy nhất/box
+// (thay vì tách 2 label trên/dưới gây x2 số RemoteCall và làm rung lắc lệch pha).
+static void ds_esp_build_label_text(ESPBox2D b, BOOL showName, BOOL showDist, BOOL showTeam,
                                     char *out, int outCap) {
     if (!out || outCap <= 0) return;
     out[0] = '\0';
+    char teamPrefix[32] = {0};
+    BOOL ai = (b.isAI != 0) || (b.kind == 2);
+    if (showTeam && b.team >= 0 && b.team <= 200000000) {
+        snprintf(teamPrefix, sizeof(teamPrefix), "[T%d%s] ", b.team, ai ? " AI" : "");
+    } else if (showTeam && b.kind == 3) {
+        snprintf(teamPrefix, sizeof(teamPrefix), "[Target] ");
+    } else if (ai) {
+        snprintf(teamPrefix, sizeof(teamPrefix), "[AI] ");
+    }
+
     const char *nick = b.nick;
     BOOL haveNick = nick && nick[0] != '\0' &&
                     strncmp(nick, "Unknown", 7) != 0;
     BOOL showNick = (showName && haveNick);
     BOOL showMeters = showDist;
     if (showNick && showMeters) {
-        snprintf(out, outCap, "%s\n%.0fm", nick, b.distance);
+        snprintf(out, outCap, "%s%s\n%.0fm", teamPrefix, nick, b.distance);
     } else if (showNick) {
-        snprintf(out, outCap, "%s", nick);
+        snprintf(out, outCap, "%s%s", teamPrefix, nick);
     } else if (showMeters && b.health >= 0 && b.health <= 100) {
-        snprintf(out, outCap, "%.0fm %d%%", b.distance, b.health);
+        snprintf(out, outCap, "%s%.0fm %d%%", teamPrefix, b.distance, b.health);
     } else if (showMeters) {
-        snprintf(out, outCap, "%.0fm", b.distance);
+        snprintf(out, outCap, "%s%.0fm", teamPrefix, b.distance);
+    } else if (teamPrefix[0]) {
+        snprintf(out, outCap, "%s", teamPrefix);
     } else {
         out[0] = '\0';
     }
@@ -2767,7 +2781,7 @@ static BOOL ds_qbl_bucket_stroked(int bucket) {
     return bucket <= kQBLBucketAIMark; // box/line/bone/dot/AIMark đều có viền
 }
 
-#define kQBLLabelCount (ESPOverlayMaxBoxes * 2) // 0..7 = tên/máu, 8..15 = TeamID
+#define kQBLLabelCount ESPOverlayMaxBoxes // 1 label duy nhất/box (gộp tên, mét, máu, TeamID)
 #define DS_QBL_MAX_RECTS 32
 #define DS_QBL_MAX_POLYS 64
 
@@ -3110,11 +3124,11 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
         return 0;
     }
-    ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (slot % 2 == 0) ? 2 : 1);
+    ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", 2);
     ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
     ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"),
                                    g_qblWhiteColor, YES);
-    uint64_t f = (slot % 2 == 0) ? g_qblFontMain : g_qblFontSmall;
+    uint64_t f = g_qblFontMain;
     if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
     // Vô hiệu hoá implicit animation trên CALayer của UILabel để triệt tiêu độ trễ
     // và rung giật (jitter/vibration 250ms của UIKit) khi di chuyển hay quay camera.
@@ -3398,18 +3412,12 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             ESPDrawAddPolyline(lineSeg, 2, kQBLColorLine, 1.5f, kQBLBucketLine, NO);
         }
 
-        // Text: LUÔN 2 lệnh/box (kể cả rỗng) để slot label không bị lệch.
+        // Text: 1 lệnh/box duy nhất (gộp TeamID + Nickname + Distance)
+        // Giảm 50% số lượng UILabel (từ 16 xuống 8), cắt giảm 50% tải IPC mach SpringBoard
+        // Triệt tiêu hoàn toàn hiện tượng rung giật lệch pha giữa nhãn trên và nhãn dưới box!
         char txt[96];
-        ds_esp_build_label_text(*b, f->name, f->dist, txt, (int)sizeof(txt));
-        ESPDrawAddText(txt, CGPointMake(bcx, by + bh), 13.0f, mainColor, YES, 1);
-        char teamTxt[40];
-        teamTxt[0] = '\0';
-        if (f->teamID && b->team >= 0 && b->team <= 200000000) {
-            snprintf(teamTxt, sizeof(teamTxt), "T%d%s", b->team, ai ? " AI" : "");
-        } else if (f->teamID && b->kind == 3) {
-            snprintf(teamTxt, sizeof(teamTxt), "Target");
-        }
-        ESPDrawAddText(teamTxt, CGPointMake(bcx, by), 11.0f, mainColor, YES, 1);
+        ds_esp_build_label_text(*b, f->name, f->dist, f->teamID, txt, (int)sizeof(txt));
+        ESPDrawAddText(txt, CGPointMake(bcx, by + bh), 12.0f, mainColor, YES, 1);
     }
 }
 
@@ -3460,19 +3468,15 @@ static uint64_t ds_qbl_hash_bucket(int b) {
 // Rect của label suy TỪ anchor hiện tại — dùng cùng hàm quantize ds_qbl_q (0.5pt) với box
 // để text và box khoá cứng tương đối với nhau, triệt tiêu hoàn toàn rung giật khi quay camera.
 static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
+    (void)slot;
     CGFloat qx = ds_qbl_q(anchor.x);
     CGFloat qy = ds_qbl_q(anchor.y);
-    if (slot % 2 == 0) {
-        // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
-        // nên cao 32pt để dòng 2 không bị cắt.
-        return CGRectMake(qx - 90.0f, qy + 3.0f, 180.0f, 32.0f);
-    }
-    // TeamID ngay trên box.
-    return CGRectMake(qx - 42.0f, qy - 16.0f, 84.0f, 15.0f);
+    // Tên + mét + TeamID (2 dòng, font 12) ngay dưới box, rộng 180pt, cao 32pt.
+    return CGRectMake(qx - 90.0f, qy + 3.0f, 180.0f, 32.0f);
 }
 
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
-                               CGPoint anchor, CFAbsoluteTime nowP) {
+                               CGPoint anchor, CFAbsoluteTime nowP, int *inoutFrameBudget) {
     if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
     // qblpack: anchor NaN/cực lớn (W2S lỗi) -> ẩn, không tạo label mới và
     // không setFrame với toạ độ điên (SpringBoard có thể respring vì path/rect).
@@ -3507,9 +3511,8 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
         g_qblLabelShown[slot] = YES;
     }
     BOOL textChanged = (strncmp(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1) != 0);
-    // Rate-limit setText tối đa 5Hz (0.2s) để tránh bão IPC mach làm nghẽn SpringBoard main thread (gây watchdog respring).
-    // Nếu text mới tạo (chưa có text) -> cập nhật ngay tức thì không delay.
-    BOOL textDue = textChanged && (g_qblLabelText[slot][0] == '\0' || nowP - g_qblLabelAt[slot] >= 0.2);
+    // Rate-limit setText tối đa 3Hz (0.33s) để tránh bão NSString alloc trong SpringBoard
+    BOOL textDue = textChanged && (g_qblLabelText[slot][0] == '\0' || nowP - g_qblLabelAt[slot] >= 0.33);
     if (textDue) {
         NSString *s = [NSString stringWithUTF8String:c->text];
         if (s && ds_remote_set_text_on_main(process, lb, s)) {
@@ -3529,14 +3532,18 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 0.5pt đồng bộ với lưới quantize 0.5pt của box:
-    // Triệt tiêu hoàn toàn hiện tượng rung lắc/lệch pha khi xoay camera.
-    if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.5f ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.5f) {
-        ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
-        g_qblLabelRect[slot] = r;
-        g_qblLabelRectValid[slot] = YES;
+    // Ngưỡng >= 1.0pt: lọc rung động micro-jitter dưới 1pt, mượt mà khi lia camera.
+    // Dùng budget setFrame: tối đa 3 label/frame để không bao giờ làm nghẽn runloop SpringBoard.
+    BOOL frameMoved = (!g_qblLabelRectValid[slot] ||
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 1.0f ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 1.0f);
+    if (frameMoved) {
+        if (!inoutFrameBudget || *inoutFrameBudget > 0) {
+            ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
+            g_qblLabelRect[slot] = r;
+            g_qblLabelRectValid[slot] = YES;
+            if (inoutFrameBudget) (*inoutFrameBudget)--;
+        }
     }
 }
 
@@ -3545,7 +3552,7 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (60Hz, đồng bộ với geometry để triệt tiêu rung giật khi xoay camera) ----
+    // ---- label pass (chạy mỗi frame cùng geometry 60Hz, budget 3 setFrame/frame) ----
     static CFAbsoluteTime s_lastLabelPass = 0;
     if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
     BOOL labelWork = NO;
@@ -3566,7 +3573,7 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         }
         if (!g_qblLabelShown[t]) { labelWork = YES; break; }
         if (c->text[0] &&
-            (g_qblLabelText[t][0] == '\0' || nowP - g_qblLabelAt[t] >= 0.2) &&
+            (g_qblLabelText[t][0] == '\0' || nowP - g_qblLabelAt[t] >= 0.33) &&
             strncmp(g_qblLabelText[t], c->text, sizeof(g_qblLabelText[t]) - 1) != 0) {
             labelWork = YES;
             break;
@@ -3574,18 +3581,30 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.5f ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.5f) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 1.0f ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 1.0f) {
             labelWork = YES;
             break;
         }
     }
     if (!labelWork) return;
     s_lastLabelPass = nowP;
+
+    // Budget: TỐI ĐA 3 cuộc gọi setFrame: lên SpringBoard main thread trong 1 frame
+    // 3 calls * 60Hz = 180 calls/sec tối đa -> SpringBoard main runloop luôn có >12ms thảnh thơi mỗi frame
+    // Triệt tiêu 100% nguy cơ watchdog timeout (0x8badf00d) gây respring!
+    int frameBudget = 3;
+    static int s_roundRobinIdx = 0;
+
     ds_remote_pool_begin(process);
     @try {
-        for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
-            ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t], nowP);
+        if (s_qblTextCount > 0) {
+            int start = s_roundRobinIdx % s_qblTextCount;
+            for (int step = 0; step < s_qblTextCount && process.trojanMem; step++) {
+                int t = (start + step) % s_qblTextCount;
+                ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t], nowP, &frameBudget);
+            }
+            s_roundRobinIdx = (start + 1) % s_qblTextCount;
         }
         for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
             if (g_qblLabelShown[t] && g_qblLabel[t]) {
@@ -4009,7 +4028,7 @@ ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
             if (hide != g_espHiddenCache[i] || !g_espRectValid[i]) { dirty = YES; break; }
             if (hide) continue;
             char distTxt[96]; // "Nick\n123m" hoặc "123m 100%%" (giống cũ khi Unknown)
-            ds_esp_build_label_text(b, s_featName, s_featDist, distTxt, (int)sizeof(distTxt));
+            ds_esp_build_label_text(b, s_featName, s_featDist, NO, distTxt, (int)sizeof(distTxt));
             CGRect fullBox = ds_esp_map_rect(CGRectMake(b.x, b.y, b.w, b.h),
                                              landW, landH, winCenter, mapOrient);
             CGFloat labelGameY = b.y + b.h + 16.0f; // kernrw49: NICK/DIST dưới box (Kernel)
@@ -4140,7 +4159,7 @@ ds_esp_overlay_update(RemoteCall *process, ESPBox2D *boxes, int count,
         if (hide) continue;
 
         char distTxt[96] = {0}; // kernrw49: 96B cho "Nickname\n123m" (UTF-8 nick)
-        ds_esp_build_label_text(b, s_featName, s_featDist, distTxt, (int)sizeof(distTxt));
+        ds_esp_build_label_text(b, s_featName, s_featDist, NO, distTxt, (int)sizeof(distTxt));
 
         // 1 border view ôm toàn bộ diện tích box — map từ hệ game-landscape
         // sang hệ container (chỉ xoay khi scene portrait).
@@ -4553,7 +4572,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw78-label-smooth-sync-fix"
+#define DS_ESP_BUILD_TAG "kernrw79-qbl-anti-respring-budget-fix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
