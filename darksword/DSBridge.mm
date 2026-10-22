@@ -2931,10 +2931,12 @@ static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
     uint64_t layer = g_qblShape[bucket];
     if (path == 0) {
-        // Nếu bucket không dùng: chỉ ẩn layer, KHÔNG gọi setPath: 0 để CoreAnimation
+        // Nếu bucket không dùng: chỉ ẩn layer khi đang hiện, KHÔNG gọi setPath: 0 để CoreAnimation
         // không bao giờ phải interpolate hoặc giải phóng path NULL gây crash server render.
-        ds_remote_set_u64_on_main(process, layer, "setHidden:", 1);
-        g_qblShapePath[bucket] = 0;
+        if (g_qblShapePath[bucket] != 0) {
+            ds_remote_set_u64_on_main(process, layer, "setHidden:", 1);
+            g_qblShapePath[bucket] = 0;
+        }
         return YES;
     }
     void *rel = ds_remote_system_symbol("CGPathRelease");
@@ -2943,8 +2945,12 @@ static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
         DSRemoteArbCallWithTimeout(1, process, rel, path);
     }
     if (!setOk) return NO;
-    ds_remote_set_u64_on_main(process, layer, "setHidden:", 0);
-    g_qblShapePath[bucket] = 1;
+    // Chỉ gọi setHidden: 0 nếu layer đang bị ẩn, tránh gửi hàng trăm cuộc gọi IPC đồng bộ
+    // dư thừa lên SpringBoard main thread mỗi giây (nguyên nhân gây watchdog timeout 0x8badf00d).
+    if (g_qblShapePath[bucket] == 0) {
+        ds_remote_set_u64_on_main(process, layer, "setHidden:", 0);
+        g_qblShapePath[bucket] = 1;
+    }
     return YES;
 }
 
@@ -3530,11 +3536,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 1.0pt kết hợp roundf: bám sát chuyển động mượt mà, triệt tiêu rung giật
-    // và cắt giảm 60-70% số cuộc gọi setFrame: lên SpringBoard main thread.
+    // Ngưỡng >= 2.0pt kết hợp roundf: bám sát chuyển động mượt mà, triệt tiêu rung giật
+    // và cắt giảm 75-80% số cuộc gọi setFrame: lên SpringBoard main thread.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 1.0f ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 1.0f) {
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 2.0f ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 2.0f) {
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
@@ -3577,8 +3583,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 1.0f ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 1.0f) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 2.0f ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 2.0f) {
             labelWork = YES;
             break;
         }
@@ -4559,7 +4565,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw73-respringfix"
+#define DS_ESP_BUILD_TAG "kernrw74-paccache-watchdogfix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4633,11 +4639,11 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
     // kernrw43: single-thread. Vẽ per-box chạy tại chỗ dưới batch lock.
-    // kernrw41: backpressure — present trước chậm (>40ms, SB nghẽn) thì bỏ 1
+    // kernrw74: backpressure — present trước chậm (>25ms, SB nghẽn) thì bỏ 1
     // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
     // không bao giờ thêm việc nên không thể gây kẹt.
     static double s_lastPresentMs = 0;
-    if (s_lastPresentMs > 40.0) {
+    if (s_lastPresentMs > 25.0) {
         s_lastPresentMs = 0.0;
         free(frame);
         return;

@@ -51,10 +51,10 @@
 #define ESP_PROVIDER_DEGRADED_BUDGET 4
 
 // Nhịp cập nhật VỊ TRÍ label mét (Hz)
-#define ESP_OVERLAY_LABEL_HZ 60
+#define ESP_OVERLAY_LABEL_HZ 30
 
-// Nhịp PRESENT lên SpringBoard: 60Hz đồng bộ 60 FPS mượt mà không khựng giật
-#define ESP_PRESENT_HZ 60
+// Nhịp PRESENT lên SpringBoard: 40Hz cân bằng hoàn hảo giữa độ mượt mà cao và tải IPC SpringBoard
+#define ESP_PRESENT_HZ 40
 
 // kernrw43: bitmap overlay (kernrw19-42) đã bị XOÁ HOÀN TOÀN — remote_write
 // vài MB + setImage: mỗi frame là nguồn gây đơ máy. ESP giờ chỉ vẽ per-box
