@@ -2685,15 +2685,16 @@ static const int kESPBoneMapF[ESPBone_Count] = {
     15, 16, 17, 19, 20, 21,
     0
 };
-// G = bảng lấy từ source Troll (ShadowTrackerExtra, build khác):
+// G = bảng lấy từ source Troll (ShadowTrackerExtra):
 //   head 8, neck 5, spine_03 4, spine_02 3, spine_01 2, pelvis 1,
 //   upperarm_r 13, lowerarm_r 15, hand_r 16,
 //   upperarm_l 34, lowerarm_l 36, hand_l 37,
 //   thigh_r 55, calf_r 56, foot_r 57,
 //   thigh_l 59, calf_l 60, foot_l 61.
 // Đây là rig có finger/twist bone chen giữa nên KHÔNG giống các bảng cũ.
-// Chỉ dùng như candidate cuối; validator hình học vẫn quyết định, không tin
-// offset/index của build khác.
+// Runtime 2026-10-22 (kernrw71): 0xA30 count=67, map=6 pass validator;
+// ref/live auto-map fail ở "feet" nhưng map G cứu được. Vẫn giữ validator
+// hình học vì index có thể đổi theo build/skin.
 static const int kESPBoneMapG[ESPBone_Count] = {
     8, 5, 4, 1,
     34, 36, 37, 13, 15, 16,

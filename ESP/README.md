@@ -205,7 +205,7 @@ Các mảng xương đã biết (log kernrw63 ngày 2026-10-21):
 
 | Offset | Field / nguồn | Hệ quy chiếu |
 |---|---|---|
-| `0xA30/0xA40` | `ComponentSpaceTransformsArray[0/1]` (private UE4) | component space đầy đủ, double buffer |
+| `0xA30/0xA40` | `ComponentSpaceTransformsArray[0/1]` (private UE4) | component space đầy đủ, double buffer; **0xA30 đã xác nhận runtime 2026-10-22** (count=67, map G pass) |
 | `0xA74` / `0xA78` | `CurrentReadComponentTransforms` (`int32`, suy ra từ layout UE4) | `0/1` chọn buffer đọc; `0xA74` là field chính, `0xA78` là ứng viên fallback/log |
 | `0xE18/0xE28` | 2 `TArray<FTransform>` Num=67 (eval-context) | component-space fallback |
 | `0xC98` | `BoneSpaceTransforms` (transient, DUMP không liệt kê) | bone/parent space, Num=67 |
@@ -276,8 +276,9 @@ mọi lần đọc đều là `ESPMemoryRead` có kiểm tra `BOOL`.
 - **Map G (tham chiếu source Troll / ShadowTrackerExtra):** head `8`, neck `5`,
   chest `4`, pelvis `1`; tay phải `13/15/16`, tay trái `34/36/37`; chân phải
   `55/56/57`, chân trái `59/60/61`. Đây là rig có finger/twist bone chen giữa,
-  khác hẳn map D; chỉ là candidate cuối và vẫn phải qua validator hình học, vì
-  offset/index của build Troll không nhất thiết khớp build hiện tại.
+  khác hẳn map D. **Runtime 2026-10-22 (kernrw71):** `0xA30` count=67, map=6
+  pass validator; ref/live auto-map fail ở `feet` nhưng map G cứu được. Vẫn giữ
+  validator hình học vì index có thể đổi theo build/skin.
 - **Chỉ player/bot thật:** configure và sample xương chỉ chạy với `kind == 1`.
   Hình nhân `kind == 3` không sample xương; bridge cũng không vẽ skeleton và
   không kéo snapline cho `kind == 3`, tránh rig hình nhân làm hỏng map cache.
@@ -287,7 +288,8 @@ mọi lần đọc đều là `ESPMemoryRead` có kiểm tra `BOOL`.
 - **Auto-off:** mỗi tick kiểm tra chéo đầu phải quanh mép trên box; lệch liên tục
   ~600 tick (~10s) thì tự tắt (`bones auto-off`) để không vẽ rác.
 - Trạng thái: `bones off` / `bones detect` / `bones 0xc98 auto ok` (bảng tự dò) /
-  `bones 0xc98 map3 ok` (hard-code) / `bones no-match` / `bones auto-off`.
+  `bones 0xa30 map6 ok` (map G, runtime 2026-10-22) / `bones no-match` /
+  `bones auto-off`.
 - Log chẩn đoán (10s/lần): `bones readidx: 0xa74 ok=… value=…; 0xa78 ok=… value=…`;
   `bones probe: 0xa30/0xa40/0xe18/0xe28/0xce0/0xcd0 data=… count=… max=…` và
   `p0/p1/p6`; `bones automap: ok…` / `LIVE-POSE ok…` / `skip…`;

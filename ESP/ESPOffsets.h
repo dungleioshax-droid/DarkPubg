@@ -163,6 +163,8 @@ static const uint32_t ESPOff_Mesh_ComponentSpaceTransforms = 0xCA8;
 // kernrw70: USkinnedMeshComponent giữ 2 buffer ComponentSpaceTransformsArray[2].
 // Theo layout UE4, hai TArray này nằm ngay sau MasterPoseComponent (0xA28) và
 // trước bUseBoundsFromMasterPoseComponent (0xAE0), nên ứng viên là 0xA30/0xA40.
+// Runtime 2026-10-22 (kernrw71): 0xA30 count=67, map G pass -> đây là buffer
+// component-space thật. 0xA40 vẫn là buffer còn lại của double buffer.
 // Đây là buffer đọc/ghi component-space live, đủ skeleton (không compact).
 static const uint32_t ESPOff_Mesh_CompSpaceRead0 = 0xA30;
 static const uint32_t ESPOff_Mesh_CompSpaceRead1 = 0xA40;
