@@ -206,7 +206,7 @@ Các mảng xương đã biết (log kernrw63 ngày 2026-10-21):
 | Offset | Field / nguồn | Hệ quy chiếu |
 |---|---|---|
 | `0xA30/0xA40` | `ComponentSpaceTransformsArray[0/1]` (private UE4) | component space đầy đủ, double buffer |
-| `0xA74` | `CurrentReadComponentTransforms` (`int32`, suy ra từ layout UE4) | `0/1` chọn buffer đọc |
+| `0xA74` / `0xA78` | `CurrentReadComponentTransforms` (`int32`, suy ra từ layout UE4) | `0/1` chọn buffer đọc; `0xA74` là field chính, `0xA78` là ứng viên fallback/log |
 | `0xE18/0xE28` | 2 `TArray<FTransform>` Num=67 (eval-context) | component-space fallback |
 | `0xC98` | `BoneSpaceTransforms` (transient, DUMP không liệt kê) | bone/parent space, Num=67 |
 | `0xCD0/0xCE0` | `CachedBoneSpaceTransforms` / `CachedComponentSpaceTransforms` | DUMP; game xoá sau skin (`count=0`) |
@@ -230,8 +230,10 @@ Thứ tự đọc trực tiếp trong `ESPBonesConfigure`:
 
 Khi đọc trực tiếp `0xA30/0xA40`, engine đọc `CurrentReadComponentTransforms`
 (`0xA74`) **mỗi frame sample** để lấy buffer game đang đọc, tránh đọc trúng buffer
-đang ghi (pose bị xé). Nếu giá trị không phải `0/1`, engine quay lại buffer đã
-validate lúc configure. Mọi lần đọc đều là `ESPMemoryRead` có kiểm tra `BOOL`.
+đang ghi (pose bị xé). Nếu `0xA74` không đọc được hoặc không phải `0/1`, engine
+thử `0xA78` (có thể là `CurrentRead` thật nếu `0xA74` là `CurrentEditable`), rồi
+mới quay lại buffer đã validate lúc configure. Log chẩn đoán in cả hai field;
+mọi lần đọc đều là `ESPMemoryRead` có kiểm tra `BOOL`.
 
 **Bảng index:**
 
@@ -286,7 +288,7 @@ validate lúc configure. Mọi lần đọc đều là `ESPMemoryRead` có kiể
   ~600 tick (~10s) thì tự tắt (`bones auto-off`) để không vẽ rác.
 - Trạng thái: `bones off` / `bones detect` / `bones 0xc98 auto ok` (bảng tự dò) /
   `bones 0xc98 map3 ok` (hard-code) / `bones no-match` / `bones auto-off`.
-- Log chẩn đoán (10s/lần): `bones readidx: 0xa74 ok=… value=…`;
+- Log chẩn đoán (10s/lần): `bones readidx: 0xa74 ok=… value=…; 0xa78 ok=… value=…`;
   `bones probe: 0xa30/0xa40/0xe18/0xe28/0xce0/0xcd0 data=… count=… max=…` và
   `p0/p1/p6`; `bones automap: ok…` / `LIVE-POSE ok…` / `skip…`;
   `bones: offset=0xa30 AUTO-MAP ok…`; `bones cand: off=…`;

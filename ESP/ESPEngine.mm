@@ -2607,7 +2607,7 @@ BOOL ESPWorldToScreen(ESPVector world, ESPCamera cam, float screenW, float scree
 // DUMP/SDK xác nhận 0xCD0/0xCE0 là Cached* (game xoá sau skin, count=0).
 // kernrw70 đọc component-space live theo layout UE4:
 //   0xA30/0xA40 ComponentSpaceTransformsArray[2] (double buffer),
-//   0xA74 CurrentReadComponentTransforms (0/1) chọn buffer đang đọc,
+//   0xA74 CurrentReadComponentTransforms (0/1; 0xA78 là ứng viên/log) chọn buffer,
 //   0xE18/0xE28 hai TArray<FTransform> Num=67 (eval-context) làm fallback,
 //   0xC98 BoneSpaceTransforms (bone space) để compose theo ParentIndex.
 // 0xCA8 là RequiredBones compact (Num=44), KHÔNG dùng vì index lệch skeleton.
@@ -2822,10 +2822,19 @@ static int ESPBoneCompSpaceOrder(uint64_t vmMap, uint64_t mesh, uint32_t out[4])
     out[3] = ESPOff_Mesh_CompSpaceLive1;
     if (!vmMap || !ESPIsUserPtr(mesh)) return -1;
     int32_t rd = -1;
-    if (!ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx, &rd, sizeof(rd)) ||
-        (rd != 0 && rd != 1)) {
-        return -1;
+    BOOL ok = ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx,
+                            &rd, sizeof(rd));
+    if (!ok || (rd != 0 && rd != 1)) {
+        // 0xA74 có thể là CurrentEditable; thử 0xA78 (CurrentRead) nếu field
+        // đầu không đọc được/không phải 0/1. Không log ở đây: caller log 10s/lần.
+        int32_t rd2 = -1;
+        if (ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx2,
+                          &rd2, sizeof(rd2)) && (rd2 == 0 || rd2 == 1)) {
+            rd = rd2;
+            ok = YES;
+        }
     }
+    if (!ok) return -1;
     out[0] = rd ? ESPOff_Mesh_CompSpaceRead1 : ESPOff_Mesh_CompSpaceRead0;
     out[1] = rd ? ESPOff_Mesh_CompSpaceRead0 : ESPOff_Mesh_CompSpaceRead1;
     return (int)rd;
@@ -3239,7 +3248,7 @@ static BOOL ESPBoneAutoMapForMesh(uint64_t vmMap, uint64_t mesh,
 // kernrw69: fallback khi ref pose KHÔNG đọc được (build bị xoá/dời như
 // 0xCD0/0xCE0 trên máy user). Dựng bảng từ pose HIỆN TẠI của nhân vật.
 // kernrw70: ưu tiên 2 buffer ComponentSpaceTransformsArray[2] (0xA30/0xA40,
-// Num=67) theo CurrentReadComponentTransforms (0xA74), rồi 2 buffer
+// Num=67) theo CurrentReadComponentTransforms (0xA74; fallback 0xA78), rồi 2 buffer
 // eval-context (0xE18/0xE28, Num=67); chỉ khi không đọc được mới compose 0xC98.
 // Chỉ chấp nhận khi ESPBoneMapBuild + validator tỉ lệ cơ thể/đối xứng
 // trái-phải đều pass — những kiểm tra đó là ĐỘ DÀI XƯƠNG nên đứng/đi/chạy đều
@@ -3970,12 +3979,16 @@ static BOOL ESPBonesConfigure(uint64_t vmMap, uint64_t mesh, uint64_t gameBase,
         static CFAbsoluteTime s_probeAt = 0;
         if (now - s_probeAt > 10.0) {
             s_probeAt = now;
-            int32_t readIdx = -1;
+            int32_t readIdx = -1, readIdx2 = -1;
             BOOL haveReadIdx = ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx,
                                              &readIdx, sizeof(readIdx));
-            ESPLog("bones readidx: 0x%x ok=%d value=%d",
+            BOOL haveReadIdx2 = ESPMemoryRead(vmMap, mesh + ESPOff_Mesh_CompSpaceReadIdx2,
+                                              &readIdx2, sizeof(readIdx2));
+            ESPLog("bones readidx: 0x%x ok=%d value=%d; 0x%x ok=%d value=%d",
                    (unsigned)ESPOff_Mesh_CompSpaceReadIdx,
-                   haveReadIdx ? 1 : 0, (int)readIdx);
+                   haveReadIdx ? 1 : 0, (int)readIdx,
+                   (unsigned)ESPOff_Mesh_CompSpaceReadIdx2,
+                   haveReadIdx2 ? 1 : 0, (int)readIdx2);
             uint32_t probes[6] = {
                 ESPOff_Mesh_CompSpaceRead0, ESPOff_Mesh_CompSpaceRead1,
                 ESPOff_Mesh_CompSpaceLive0, ESPOff_Mesh_CompSpaceLive1,

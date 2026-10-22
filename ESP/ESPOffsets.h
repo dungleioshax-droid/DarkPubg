@@ -170,7 +170,11 @@ static const uint32_t ESPOff_Mesh_CompSpaceRead1 = 0xA40;
 // (0xA50 PreviousBoneVisibilityStates, 0xA60 PreviousComponentSpace..., 0xA70
 // CurrentEditable). Chỉ dùng để CHỌN buffer đọc; nếu giá trị không phải 0/1 thì
 // fallback thử lần lượt cả 2 buffer, không tin mù offset này.
+// Có khả năng 0xA74 là CurrentEditable và 0xA78 mới là CurrentRead (bool/padding
+// giữa hai int32). Vì vậy đọc thêm 0xA78: chỉ dùng khi 0xA74 không hợp lệ, và
+// luôn log cả hai để lần chạy thật xác nhận; không đổi buffer nếu 0xA74 đã 0/1.
 static const uint32_t ESPOff_Mesh_CompSpaceReadIdx = 0xA74;
+static const uint32_t ESPOff_Mesh_CompSpaceReadIdx2 = 0xA78;
 // Log kernrw63 thấy thêm 2 TArray<FTransform> Num=67 ở 0xE18/0xE28. Có thể là
 // FAnimationEvaluationContext (eval song song); buffer này có thể stale, nên chỉ
 // dùng làm fallback sau 0xA30/0xA40 và chỉ nhận khi validator hình học pass.
