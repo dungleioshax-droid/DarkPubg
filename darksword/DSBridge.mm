@@ -2751,7 +2751,7 @@ static float ds_qbl_bucket_width(int bucket) {
     switch (bucket) {
         case kQBLBucketBox: return 1.5f;
         case kQBLBucketBoxAI: return 2.0f;
-        case kQBLBucketLine: return 1.0f;
+        case kQBLBucketLine: return 1.5f;
         case kQBLBucketBone: return 1.2f;
         case kQBLBucketAIMark: return 1.5f;
         default: return 1.0f;
@@ -3319,10 +3319,6 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
     ESPDrawFrameBegin(CGSizeMake(landW, landH));
     if (!boxes || count <= 0 || !f) return;
 
-    // Snapline của MỌI player gộp 1 polyline: start -> đỉnh box -> start -> ...
-    // (start trùng nhau nên đoạn quay lại không tạo đường lạ — như bản cũ).
-    CGPoint linePts[2 + ESPOverlayMaxBoxes * 2];
-    int lineN = 0;
     CGPoint lineStart = CGPointMake(landW * 0.5f, 25.0f);
     float scale = (f->scale >= 1.0f && f->scale <= 2.0f) ? f->scale : 1.0f;
 
@@ -3395,11 +3391,11 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             ESPDrawAddPolyline(tri, 3, kQBLColorAI, 1.5f, kQBLBucketAIMark, YES);
         }
 
-        // Snapline — chỉ player/bot thật (kind 1).
-        if (isPlayerBox && f->line &&
-            lineN + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
-            linePts[lineN++] = lineStart;
-            linePts[lineN++] = CGPointMake(bx + bw * 0.5f, by);
+        // Snapline — vẽ cho cả player/bot và hình nhân phòng tập (kind 1 & 3).
+        // Mỗi địch là 1 đoạn thẳng 2 điểm riêng biệt để không bị culling gộp làm mất line.
+        if (f->line) {
+            CGPoint lineSeg[2] = { lineStart, CGPointMake(bcx, by) };
+            ESPDrawAddPolyline(lineSeg, 2, kQBLColorLine, 1.5f, kQBLBucketLine, NO);
         }
 
         // Text: LUÔN 2 lệnh/box (kể cả rỗng) để slot label không bị lệch.
@@ -3414,10 +3410,6 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             snprintf(teamTxt, sizeof(teamTxt), "Target");
         }
         ESPDrawAddText(teamTxt, CGPointMake(bcx, by), 11.0f, mainColor, YES, 1);
-    }
-
-    if (lineN >= 2) {
-        ESPDrawAddPolyline(linePts, lineN, kQBLColorLine, 1.0f, kQBLBucketLine, NO);
     }
 }
 
@@ -3806,10 +3798,9 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     // s_qblTextHash không đưa vào hash geometry để text mét/khoảng cách thay đổi
     // không ép dựng lại vector path; label pass riêng bên dưới tự xử lý text/anchor.
 
-    // qblpack: geometry 30Hz đồng bộ với ESP_PRESENT_HZ 30Hz — đảm bảo không nghẽn
-    // runloop SpringBoard main thread và triệt tiêu 100% watchdog respring (0x8badf00d).
+    // qblpack: geometry 60Hz mượt mà bám sát chuyển động camera và game 60 FPS
     static CFAbsoluteTime s_lastGeomPass = 0;
-    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 30.0 - 0.004));
+    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0 - 0.004));
     BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
     BOOL deferGeometry = (!skipGeometry && !geomDue);
     if (skipGeometry || deferGeometry) {
@@ -4563,7 +4554,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw76-qbl-reverse-pacing-fix"
+#define DS_ESP_BUILD_TAG "kernrw77-60fps-snapline-fix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4637,11 +4628,11 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
     // kernrw43: single-thread. Vẽ per-box chạy tại chỗ dưới batch lock.
-    // kernrw76: backpressure — present trước chậm (>20ms, SB nghẽn) thì bỏ 1
+    // kernrw77: backpressure — present trước chậm (>25ms, SB nghẽn) thì bỏ 1
     // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
     // không bao giờ thêm việc nên không thể gây kẹt.
     static double s_lastPresentMs = 0;
-    if (s_lastPresentMs > 20.0) {
+    if (s_lastPresentMs > 25.0) {
         s_lastPresentMs = 0.0;
         free(frame);
         return;

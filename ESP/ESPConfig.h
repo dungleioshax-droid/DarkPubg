@@ -53,8 +53,8 @@
 // Nhịp cập nhật VỊ TRÍ label mét (Hz)
 #define ESP_OVERLAY_LABEL_HZ 30
 
-// Nhịp PRESENT lên SpringBoard: 30Hz chuẩn chống bão IPC runloop và triệt tiêu watchdog respring (0x8badf00d)
-#define ESP_PRESENT_HZ 30
+// Nhịp PRESENT lên SpringBoard: 60Hz chuẩn mượt mà không delay
+#define ESP_PRESENT_HZ 60
 
 // kernrw43: bitmap overlay (kernrw19-42) đã bị XOÁ HOÀN TOÀN — remote_write
 // vài MB + setImage: mỗi frame là nguồn gây đơ máy. ESP giờ chỉ vẽ per-box

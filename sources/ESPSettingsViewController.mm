@@ -319,6 +319,8 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
     [self loadUserDefaults:NO];
     [self.userDefaults setObject:@(sender.on) forKey:cell.key];
     [self.userDefaults writeToFile:(JBROOT_PATH_NSSTRING(USER_DEFAULTS_PATH)) atomically:YES];
+    [NSUserDefaults.standardUserDefaults setBool:sender.on forKey:cell.key];
+    [NSUserDefaults.standardUserDefaults synchronize];
     notify_post(NOTIFY_RELOAD_HUD);
 }
 
