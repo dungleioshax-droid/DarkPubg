@@ -1617,13 +1617,14 @@ static void ds_inv_cache_drop(void) {
 // which makes UIView initialization abort SpringBoard under
 // CA_ASSERT_MAIN_THREAD_TRANSACTIONS. Build an NSInvocation on the call thread,
 // then synchronously ask NSObject to invoke it on SpringBoard's real main thread.
-static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target,
-                                            uint64_t selector,
-                                            const DSRemoteArgument *arguments,
-                                            NSUInteger argumentCount,
-                                            void *result,
-                                            NSUInteger resultSize,
-                                            BOOL retainResultObject = NO) {
+static BOOL ds_remote_invoke_result_internal(RemoteCall *process, uint64_t target,
+                                             uint64_t selector,
+                                             const DSRemoteArgument *arguments,
+                                             NSUInteger argumentCount,
+                                             void *result,
+                                             NSUInteger resultSize,
+                                             BOOL retainResultObject = NO,
+                                             BOOL onMainThread = YES) {
     if (!process || !target || !selector || !process.trojanMem) return NO;
 
     // Fast path kernrw18: invocation đã dựng + retain từ frame trước (chỉ cho
@@ -1710,8 +1711,14 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
         scratch += (arguments[index].size + 15) & ~15ULL;
     }
 
-    ds_perform_on_springboard_main(process, invocation,
-                                   ds_remote_sel(process, "invoke"), 0, YES);
+    if (onMainThread) {
+        ds_perform_on_springboard_main(process, invocation,
+                                       ds_remote_sel(process, "invoke"), 0, YES);
+    } else {
+        // Chạy trực tiếp trên thread RemoteCall trong SpringBoard: không bão IPC mach
+        // vào SpringBoard main runloop, hoàn toàn triệt tiêu watchdog timeout (0x8badf00d respring).
+        remote_msg(process, invocation, ds_remote_sel(process, "invoke"), 0, 0, 0, 0);
+    }
     if (!process.trojanMem) return NO;
     if (result && resultSize > 0) {
         uint64_t resultScratch = process.trojanMem + 0xC00;
@@ -1738,6 +1745,25 @@ static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target
             remote_msg(process, autoreleasePool, drainSelector, 0, 0, 0, 0);
         }
     }
+}
+
+static BOOL ds_remote_invoke_on_main_result(RemoteCall *process, uint64_t target,
+                                            uint64_t selector,
+                                            const DSRemoteArgument *arguments,
+                                            NSUInteger argumentCount,
+                                            void *result,
+                                            NSUInteger resultSize,
+                                            BOOL retainResultObject = NO) {
+    return ds_remote_invoke_result_internal(process, target, selector, arguments, argumentCount,
+                                            result, resultSize, retainResultObject, YES);
+}
+
+static BOOL ds_remote_invoke_direct(RemoteCall *process, uint64_t target,
+                                    uint64_t selector,
+                                    const DSRemoteArgument *arguments,
+                                    NSUInteger argumentCount) {
+    return ds_remote_invoke_result_internal(process, target, selector, arguments, argumentCount,
+                                            NULL, 0, NO, NO);
 }
 
 static BOOL ds_remote_invoke_on_main(RemoteCall *process, uint64_t target,
@@ -1839,6 +1865,50 @@ static BOOL ds_remote_set_point_on_main(RemoteCall *process, uint64_t target,
     DSRemoteArgument argument = { &value, sizeof(value) };
     return ds_remote_invoke_on_main(process, target, ds_remote_sel(process, selectorName),
                                     &argument, 1);
+}
+
+static BOOL ds_remote_set_rect_direct(RemoteCall *process, uint64_t target,
+                                      const char *selectorName, CGRect value) {
+    if (!isfinite(value.origin.x) || !isfinite(value.origin.y) ||
+        !isfinite(value.size.width) || !isfinite(value.size.height) ||
+        value.size.width < 0 || value.size.height < 0 ||
+        value.size.width > 100000 || value.size.height > 100000) {
+        return NO;
+    }
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_direct(process, target, ds_remote_sel(process, selectorName),
+                                   &argument, 1);
+}
+
+static BOOL ds_remote_set_u64_direct(RemoteCall *process, uint64_t target,
+                                     const char *selectorName, uint64_t value) {
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_direct(process, target, ds_remote_sel(process, selectorName),
+                                   &argument, 1);
+}
+
+static BOOL ds_remote_set_point_direct(RemoteCall *process, uint64_t target,
+                                       const char *selectorName, CGPoint value) {
+    if (!isfinite(value.x) || !isfinite(value.y)) {
+        return NO;
+    }
+    DSRemoteArgument argument = { &value, sizeof(value) };
+    return ds_remote_invoke_direct(process, target, ds_remote_sel(process, selectorName),
+                                   &argument, 1);
+}
+
+static BOOL ds_remote_set_text_direct(RemoteCall *process, uint64_t label,
+                                      NSString *text) {
+    uint64_t remoteText = ds_remote_create_string(process, text);
+    if (!remoteText) return NO;
+    DSRemoteArgument argument = { &remoteText, sizeof(remoteText) };
+    BOOL sent = ds_remote_invoke_direct(process, label, ds_remote_sel(process, "setText:"),
+                                        &argument, 1);
+    uint64_t release = ds_remote_sel(process, "release");
+    if (release && process.trojanMem) {
+        remote_msg(process, remoteText, release, 0, 0, 0, 0);
+    }
+    return sent;
 }
 
 // Map 1 điểm từ hệ game-landscape sang hệ portrait-window, quay quanh tâm
@@ -2790,6 +2860,7 @@ static uint64_t g_qblShape[kQBLBucketCount];
 static uint64_t g_qblShapePath[kQBLBucketCount];
 static uint64_t g_qblShapeHash[kQBLBucketCount]; // hash nội dung path đã set (dirty per-bucket)
 static uint64_t g_qblLabel[kQBLLabelCount];
+static uint64_t g_qblLabelLayer[kQBLLabelCount];
 static uint32_t g_qblLabelColor[kQBLLabelCount];
 static char g_qblLabelText[kQBLLabelCount][112];
 static CGRect g_qblLabelRect[kQBLLabelCount];
@@ -2858,6 +2929,7 @@ static void ds_qbl_reset_remote(void) {
     memset(g_qblShapePath, 0, sizeof(g_qblShapePath));
     memset(g_qblShapeHash, 0, sizeof(g_qblShapeHash));
     memset(g_qblLabel, 0, sizeof(g_qblLabel));
+    memset(g_qblLabelLayer, 0, sizeof(g_qblLabelLayer));
     memset(g_qblLabelRectValid, 0, sizeof(g_qblLabelRectValid));
     memset(g_qblLabelShown, 0, sizeof(g_qblLabelShown));
     memset(g_qblLabelText, 0, sizeof(g_qblLabelText));
@@ -2927,28 +2999,30 @@ static BOOL ds_qbl_buf(RemoteCall *process, size_t bytes) {
 }
 
 // setPath: + release creation reference ngay lập tức (layer tự giữ reference).
+// Sử dụng direct remote_msg trên thread của RemoteCall, 0 cuộc gọi vào SpringBoard main runloop,
+// triệt tiêu hoàn toàn nghẽn IPC gây watchdog timeout (0x8badf00d respring).
 static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     if (!process || bucket < 0 || bucket >= kQBLBucketCount || !g_qblShape[bucket]) return NO;
     uint64_t layer = g_qblShape[bucket];
+    uint64_t sel_setHidden = ds_remote_sel(process, "setHidden:");
     if (path == 0) {
         // Nếu bucket không dùng: chỉ ẩn layer khi đang hiện, KHÔNG gọi setPath: 0 để CoreAnimation
         // không bao giờ phải interpolate hoặc giải phóng path NULL gây crash server render.
         if (g_qblShapePath[bucket] != 0) {
-            ds_remote_set_u64_on_main(process, layer, "setHidden:", 1);
+            remote_msg(process, layer, sel_setHidden, 1, 0, 0, 0);
             g_qblShapePath[bucket] = 0;
         }
         return YES;
     }
+    uint64_t sel_setPath = ds_remote_sel(process, "setPath:");
+    remote_msg(process, layer, sel_setPath, path, 0, 0, 0);
     void *rel = ds_remote_system_symbol("CGPathRelease");
-    BOOL setOk = ds_remote_set_u64_on_main(process, layer, "setPath:", path);
     if (rel) {
         DSRemoteArbCallWithTimeout(1, process, rel, path);
     }
-    if (!setOk) return NO;
-    // Chỉ gọi setHidden: 0 nếu layer đang bị ẩn, tránh gửi hàng trăm cuộc gọi IPC đồng bộ
-    // dư thừa lên SpringBoard main thread mỗi giây (nguyên nhân gây watchdog timeout 0x8badf00d).
+    // Chỉ gọi setHidden: 0 nếu layer đang bị ẩn
     if (g_qblShapePath[bucket] == 0) {
-        ds_remote_set_u64_on_main(process, layer, "setHidden:", 0);
+        remote_msg(process, layer, sel_setHidden, 0, 0, 0, 0);
         g_qblShapePath[bucket] = 1;
     }
     return YES;
@@ -3110,27 +3184,27 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
         return 0;
     }
-    ds_remote_set_u64_on_main(process, lb, "setNumberOfLines:", (slot % 2 == 0) ? 2 : 1);
-    ds_remote_set_u64_on_main(process, lb, "setTextAlignment:", 1);
-    ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setTextColor:"),
-                                   g_qblWhiteColor, YES);
+    ds_remote_set_u64_direct(process, lb, "setNumberOfLines:", (slot % 2 == 0) ? 2 : 1);
+    ds_remote_set_u64_direct(process, lb, "setTextAlignment:", 1);
+    if (g_qblWhiteColor) {
+        remote_msg(process, lb, ds_remote_sel(process, "setTextColor:"), g_qblWhiteColor, 0, 0, 0);
+    }
     uint64_t f = (slot % 2 == 0) ? g_qblFontMain : g_qblFontSmall;
-    if (f) ds_perform_on_springboard_main(process, lb, ds_remote_sel(process, "setFont:"), f, YES);
+    if (f) remote_msg(process, lb, ds_remote_sel(process, "setFont:"), f, 0, 0, 0);
     // Vô hiệu hoá implicit animation trên CALayer của UILabel để triệt tiêu độ trễ
     // và rung giật (jitter/vibration 250ms của UIKit) khi di chuyển hay quay camera.
     uint64_t lbLayer = ds_remote_get_object_on_main(process, lb, "layer");
     if (lbLayer && g_qblNoAnimActions) {
-        ds_remote_set_u64_on_main(process, lbLayer, "setActions:", g_qblNoAnimActions);
+        ds_remote_set_u64_direct(process, lbLayer, "setActions:", g_qblNoAnimActions);
     }
-    ds_remote_set_u64_on_main(process, lb, "setUserInteractionEnabled:", 0);
+    ds_remote_set_u64_direct(process, lb, "setUserInteractionEnabled:", 0);
     // QBL AddOutlinedText: UILabel không có stroke -> shadow đen, offset 0.
     // Dùng shadow của UILabel (2 call) thay shadow của layer (1 getter + 4
     // setter) để giảm mạnh thời gian tạo label; label nền clear + container
     // không tương tác nên bỏ luôn setBackgroundColor:/setUserInteractionEnabled:.
     if (g_qblBlackColor) {
-        ds_perform_on_springboard_main(process, lb, ds_remote_sel(process,
-            "setShadowColor:"), g_qblBlackColor, YES);
-        ds_remote_set_point_on_main(process, lb, "setShadowOffset:", CGPointMake(0, 0));
+        remote_msg(process, lb, ds_remote_sel(process, "setShadowColor:"), g_qblBlackColor, 0, 0, 0);
+        ds_remote_set_point_direct(process, lb, "setShadowOffset:", CGPointMake(0, 0));
     }
     if (!ds_perform_on_springboard_main(process, g_qblRoot, addSubview, lb, YES)) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
@@ -3138,6 +3212,7 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
     }
     s_qblLabelBudget--;
     g_qblLabel[slot] = lb;
+    g_qblLabelLayer[slot] = lbLayer;
     g_qblLabelColor[slot] = 0xFFFFFFFFu;
     g_qblLabelText[slot][0] = '\0';
     g_qblLabelRect[slot] = frame;
@@ -3481,13 +3556,14 @@ static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
                                CGPoint anchor, CFAbsoluteTime nowP) {
     if (!process || !c || slot < 0 || slot >= kQBLLabelCount) return;
+    uint64_t sel_setHidden = ds_remote_sel(process, "setHidden:");
     // qblpack: anchor NaN/cực lớn (W2S lỗi) -> ẩn, không tạo label mới và
     // không setFrame với toạ độ điên (SpringBoard có thể respring vì path/rect).
     if (!isfinite((double)anchor.x) || !isfinite((double)anchor.y) ||
         fabs((double)anchor.x) > 20000.0 || fabs((double)anchor.y) > 20000.0) {
         uint64_t hidden = g_qblLabel[slot];
         if (hidden && g_qblLabelShown[slot]) {
-            ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
+            remote_msg(process, hidden, sel_setHidden, 1, 0, 0, 0);
             g_qblLabelShown[slot] = NO;
             g_qblLabelRectValid[slot] = NO;
             g_qblLabelText[slot][0] = '\0';
@@ -3498,7 +3574,7 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
     if (!c->text[0]) {
         uint64_t hidden = g_qblLabel[slot];
         if (hidden && g_qblLabelShown[slot]) {
-            ds_remote_set_u64_on_main(process, hidden, "setHidden:", 1);
+            remote_msg(process, hidden, sel_setHidden, 1, 0, 0, 0);
             g_qblLabelShown[slot] = NO;
             g_qblLabelRectValid[slot] = NO;
             g_qblLabelText[slot][0] = '\0';
@@ -3510,16 +3586,16 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
     uint64_t lb = ds_qbl_label_for(process, slot, r);
     if (!lb) return;
     if (!g_qblLabelShown[slot]) {
-        ds_remote_set_u64_on_main(process, lb, "setHidden:", 0);
+        remote_msg(process, lb, sel_setHidden, 0, 0, 0, 0);
         g_qblLabelShown[slot] = YES;
     }
     BOOL textChanged = (strncmp(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1) != 0);
-    // Rate-limit setText tối đa 5Hz (0.2s) để tránh bão IPC mach làm nghẽn SpringBoard main thread (gây watchdog respring).
+    // Rate-limit setText tối đa 5Hz (0.2s) để tránh bão allocation NSString.
     // Nếu text mới tạo (chưa có text) -> cập nhật ngay tức thì không delay.
     BOOL textDue = textChanged && (g_qblLabelText[slot][0] == '\0' || nowP - g_qblLabelAt[slot] >= 0.2);
     if (textDue) {
         NSString *s = [NSString stringWithUTF8String:c->text];
-        if (s && ds_remote_set_text_on_main(process, lb, s)) {
+        if (s && ds_remote_set_text_direct(process, lb, s)) {
             strncpy(g_qblLabelText[slot], c->text, sizeof(g_qblLabelText[slot]) - 1);
             g_qblLabelText[slot][sizeof(g_qblLabelText[slot]) - 1] = '\0';
             g_qblLabelAt[slot] = nowP;
@@ -3528,20 +3604,19 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
     if (g_qblLabelColor[slot] != c->color) {
         // Chỉ 2 màu text (trắng player / vàng AI) — dùng singleton, không tạo
         // UIColor mới (tránh factory autoreleased + retain race trong SB).
-        uint64_t col = 0;
-        if (c->color == 0xFFFFFFFFu) col = g_qblWhiteColor;
-        else if (c->color == kQBLColorAI) col = g_qblAIColor;
-        if (col && ds_perform_on_springboard_main(process, lb,
-                ds_remote_sel(process, "setTextColor:"), col, YES)) {
+        uint64_t col = (c->color == kQBLColorAI) ? g_qblAIColor : g_qblWhiteColor;
+        if (col) {
+            remote_msg(process, lb, ds_remote_sel(process, "setTextColor:"), col, 0, 0, 0);
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 2.0pt kết hợp roundf: bám sát chuyển động mượt mà, triệt tiêu rung giật
-    // và cắt giảm 75-80% số cuộc gọi setFrame: lên SpringBoard main thread.
+    // Cập nhật vị trí mượt mà, hạ ngưỡng xuống 0.5pt (thay vì 2.0pt gây giật rung khi quay camera),
+    // chuyển sang direct background setter nên 0 ảnh hưởng runloop SpringBoard.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 2.0f ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 2.0f) {
-        ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.5f ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.5f) {
+        uint64_t targetMove = g_qblLabelLayer[slot] ?: lb;
+        ds_remote_set_rect_direct(process, targetMove, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
     }
@@ -3552,11 +3627,10 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (30Hz, chạy CẢ khi geometry không đổi) ----
-    // 30Hz là đủ cho text (tên, khoảng cách), giảm tải 50% số cuộc gọi
-    // setFrame: lên SpringBoard main thread để triệt tiêu nguy cơ watchdog respring (0x8badf00d).
+    // Bỏ throttle 30Hz: cho phép label cập nhật mượt theo FPS hiển thị (60Hz),
+    // vì toàn bộ là direct background calls nên không nghẽn runloop SpringBoard.
     static CFAbsoluteTime s_lastLabelPass = 0;
-    if (nowP - s_lastLabelPass < (1.0 / 30.0 - 0.004)) return;
+    if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3583,8 +3657,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 2.0f ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 2.0f) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.5f ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.5f) {
             labelWork = YES;
             break;
         }
@@ -3596,14 +3670,19 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         for (int t = 0; t < s_qblTextCount && process.trojanMem; t++) {
             ds_qbl_place_label(process, t, &s_qblTexts[t], s_qblTextAnchor[t], nowP);
         }
+        uint64_t sel_setHidden = ds_remote_sel(process, "setHidden:");
         for (int t = s_qblTextCount; t < kQBLLabelCount; t++) {
             if (g_qblLabelShown[t] && g_qblLabel[t]) {
-                ds_remote_set_u64_on_main(process, g_qblLabel[t], "setHidden:", 1);
+                remote_msg(process, g_qblLabel[t], sel_setHidden, 1, 0, 0, 0);
                 g_qblLabelShown[t] = NO;
                 g_qblLabelRectValid[t] = NO;
                 g_qblLabelText[t][0] = '\0';
                 g_qblLabelAt[t] = 0;
             }
+        }
+        uint64_t catransaction = ds_remote_class(process, "CATransaction");
+        if (catransaction) {
+            remote_msg(process, catransaction, ds_remote_sel(process, "flush"), 0, 0, 0, 0);
         }
     } @finally {
         ds_remote_pool_end(process);
@@ -3918,6 +3997,10 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
             if (!ds_qbl_set_path(process, b, path)) break;
             g_qblShapeHash[b] = bucketHash[b];
             if (!process.trojanMem) { ok = NO; break; }
+        }
+        uint64_t catransaction = ds_remote_class(process, "CATransaction");
+        if (catransaction) {
+            remote_msg(process, catransaction, ds_remote_sel(process, "flush"), 0, 0, 0, 0);
         }
     } @finally {
         ds_remote_pool_end(process);
@@ -4565,7 +4648,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw74-paccache-watchdogfix"
+#define DS_ESP_BUILD_TAG "kernrw75-direct-calayer-norunloop-fix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
