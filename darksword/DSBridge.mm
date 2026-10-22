@@ -3457,17 +3457,18 @@ static uint64_t ds_qbl_hash_bucket(int b) {
     return h;
 }
 
-// Rect của label suy TỪ anchor hiện tại (không lưu hàng đợi) -> gate 30Hz
-// không bao giờ làm mất update, pass sau luôn đọc vị trí mới nhất.
-// Làm tròn roundf pixel để glyph text không bị rung giật/nhoè (subpixel jitter) khi quay camera.
+// Rect của label suy TỪ anchor hiện tại — dùng cùng hàm quantize ds_qbl_q (0.5pt) với box
+// để text và box khoá cứng tương đối với nhau, triệt tiêu hoàn toàn rung giật khi quay camera.
 static inline CGRect ds_qbl_label_rect(int slot, CGPoint anchor) {
+    CGFloat qx = ds_qbl_q(anchor.x);
+    CGFloat qy = ds_qbl_q(anchor.y);
     if (slot % 2 == 0) {
         // Tên + mét (2 dòng, font 13) ngay dưới box, rộng 180pt — numberOfLines=2
         // nên cao 32pt để dòng 2 không bị cắt.
-        return CGRectMake(roundf(anchor.x - 90.0f), roundf(anchor.y + 3.0f), 180.0f, 32.0f);
+        return CGRectMake(qx - 90.0f, qy + 3.0f, 180.0f, 32.0f);
     }
     // TeamID ngay trên box.
-    return CGRectMake(roundf(anchor.x - 42.0f), roundf(anchor.y - 16.0f), 84.0f, 15.0f);
+    return CGRectMake(qx - 42.0f, qy - 16.0f, 84.0f, 15.0f);
 }
 
 static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawCommand *c,
@@ -3528,11 +3529,11 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
             g_qblLabelColor[slot] = c->color;
         }
     }
-    // Ngưỡng >= 2.0pt kết hợp roundf: bám sát chuyển động mượt mà, triệt tiêu rung giật
-    // và cắt giảm 75-80% số cuộc gọi setFrame: lên SpringBoard main thread.
+    // Ngưỡng >= 0.5pt đồng bộ với lưới quantize 0.5pt của box:
+    // Triệt tiêu hoàn toàn hiện tượng rung lắc/lệch pha khi xoay camera.
     if (!g_qblLabelRectValid[slot] ||
-        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 2.0f ||
-        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 2.0f) {
+        fabs(g_qblLabelRect[slot].origin.x - r.origin.x) >= 0.5f ||
+        fabs(g_qblLabelRect[slot].origin.y - r.origin.y) >= 0.5f) {
         ds_remote_set_rect_on_main(process, lb, "setFrame:", r);
         g_qblLabelRect[slot] = r;
         g_qblLabelRectValid[slot] = YES;
@@ -3544,11 +3545,9 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (20Hz, chạy CẢ khi geometry không đổi) ----
-    // 20Hz là đủ cho text (tên, khoảng cách), giảm tải 65% số cuộc gọi
-    // setFrame: lên SpringBoard main thread để triệt tiêu nguy cơ watchdog respring (0x8badf00d).
+    // ---- label pass (60Hz, đồng bộ với geometry để triệt tiêu rung giật khi xoay camera) ----
     static CFAbsoluteTime s_lastLabelPass = 0;
-    if (nowP - s_lastLabelPass < (1.0 / 20.0 - 0.004)) return;
+    if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3575,8 +3574,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
         if (g_qblLabelColor[t] != c->color) { labelWork = YES; break; }
         CGRect lr = ds_qbl_label_rect(t, s_qblTextAnchor[t]);
         if (!g_qblLabelRectValid[t] ||
-            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 2.0f ||
-            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 2.0f) {
+            fabs(g_qblLabelRect[t].origin.x - lr.origin.x) >= 0.5f ||
+            fabs(g_qblLabelRect[t].origin.y - lr.origin.y) >= 0.5f) {
             labelWork = YES;
             break;
         }
@@ -4554,7 +4553,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw77-60fps-snapline-fix"
+#define DS_ESP_BUILD_TAG "kernrw78-label-smooth-sync-fix"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
