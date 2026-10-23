@@ -42,6 +42,13 @@ struct ESPVmShmem {
     bool used;
 };
 extern "C" struct ESPVmShmem vmmapremotepage(uint64_t vmMap, uint64_t address);
+// Cùng lý do với ESPMemory: không deref trực tiếp mapping có thể vừa bị game
+// free; đọc qua kernel để lỗi trả về thay vì SIGSEGV.
+extern "C" kern_return_t mach_vm_read_overwrite(task_t target_task,
+                                               mach_vm_address_t address,
+                                               mach_vm_size_t size,
+                                               mach_vm_address_t data,
+                                               mach_vm_size_t *outsize);
 extern "C" kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t addr, mach_vm_size_t size);
 // Ép DSBridge quét lại base ngay (bypass TTL 30s), dùng khi engine phát hiện
 // base stale (pid đổi / world fail liên tiếp mà pid/base không đổi).
@@ -841,7 +848,16 @@ static uint64_t ESPWorldViaViewport(uint64_t vmMap, uint64_t gameBase) {
         {
             struct ESPVmShmem sh = vmmapremotepage(vmMap, geStatic & ~(uint64_t)(PAGE_SIZE - 1));
             if (sh.used && sh.localAddress) {
-                direct = *(volatile uint64_t *)(uintptr_t)(sh.localAddress + (geStatic & (PAGE_SIZE - 1)));
+                mach_vm_size_t copied = 0;
+                kern_return_t kr = mach_vm_read_overwrite(
+                    mach_task_self(),
+                    (mach_vm_address_t)(sh.localAddress + (geStatic & (PAGE_SIZE - 1))),
+                    (mach_vm_size_t)sizeof(direct),
+                    (mach_vm_address_t)(uintptr_t)&direct,
+                    &copied);
+                if (kr != KERN_SUCCESS || copied != (mach_vm_size_t)sizeof(direct)) {
+                    direct = 0;
+                }
                 mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)sh.localAddress, PAGE_SIZE);
                 if (sh.port) mach_port_deallocate(mach_task_self(), (mach_port_t)sh.port);
             }

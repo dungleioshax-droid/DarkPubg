@@ -218,6 +218,39 @@ Ba lỗi gốc của bản cmdlist đầu tiên:
     cùng gate tần số 30Hz: triệt tiêu hiện tượng chữ rung giật (subpixel text jitter)
     khi xoay camera/di chuyển, giảm hơn 60% tải IPC `setFrame:` lên SpringBoard main thread.
 
+#### Ổn định lần 5 (respring/đứng HUD khi ESP chạy) — kernrw80
+
+Đây là lớp bảo vệ thứ hai, sau fix ABI region-check ở lần 4. Lần 4 đã sửa
+`mach_vm_region_recurse` nhưng vẫn còn một cửa sổ race: check mapping chỉ chạy
+tối đa 250ms/lần, nên game có thể free `vm_object` ngay sau check rồi kernel
+huỷ mapping trước `memcpy`. Khi đó app đọc trang đã unmap → `SIGSEGV` (không có
+exception Objective-C, log dừng đột ngột), người dùng thấy như respring.
+
+- **Copy an toàn:** mọi lần copy từ region-map (`ESPReadSharedLocked`,
+  `ESPReadCachedLocked`, `ESPMemoryReadCached`), 2 chỗ đọc trực tiếp trong
+  `ESPGameBaseViaKernel` và mapping tạm trong `ESPWorldViaViewport`
+  (`ESPEngine.mm`) đã chuyển sang
+  `mach_vm_read_overwrite(mach_task_self(), ...)`. Nếu mapping chết giữa chừng,
+  syscall trả `KERN_INVALID_ADDRESS`/đọc thiếu; vùng được đánh dấu `dead` ngay
+  và purge/map lại, **không còn SIGSEGV trong `memcpy`/deref trực tiếp**.
+- **Giảm tải SpringBoard:** geometry QBL (`CGPathCreate/AddLines/setPath`) và
+  label pass hạ từ 60Hz xuống **30Hz** (`ESP_QBL_GEOMETRY_HZ` /
+  `ESP_QBL_LABEL_HZ`). Present tick vẫn 60Hz; frame không đổi hình học chỉ còn
+  label pass 30Hz. Các snapline được gộp vào **một polyline** (start→top1→start→top2…)
+  nên bucket Line chỉ còn 1 `CGPathAddLines` thay vì N call.
+- **Watchdog guard:** nếu một present vượt `ESP_PRESENT_OVERLOAD_MS` (8ms), bridge
+  tạm bỏ các frame box tiếp theo 50ms rồi tăng dần tối đa 400ms
+  (`esp present overload` trong log). Lệnh hide/clear (`count <= 0`) luôn được
+  xử lý ngay, nên tắt ESP/địch biến mất không bị kẹt box ma. Đây là backoff có
+  kiểm soát, không phải bỏ frame vô hạn như bản 25ms cũ.
+- **Build tag:** `kernrw80-saferead-30hz-watchdog`.
+
+Kỳ vọng log khi chạy ổn: không còn `ESP region check err kr=4`; nếu game free
+vùng có thể thấy `ESP region purged ...` nhưng app/HUD vẫn sống; nếu máy yếu có
+thể thấy `esp present overload` thay vì respring. 30Hz là mức an toàn đã từng
+ổn định; sau khi có log mới xác nhận không còn crash mới cân nhắc nâng lại
+geometry 60Hz.
+
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).

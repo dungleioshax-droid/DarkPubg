@@ -3335,6 +3335,12 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
 
     CGPoint lineStart = CGPointMake(landW * 0.5f, 25.0f);
     float scale = (f->scale >= 1.0f && f->scale <= 2.0f) ? f->scale : 1.0f;
+    // Gộp tất cả snapline vào MỘT polyline: start->top1->start->top2...
+    // Các đoạn topN->start trùng khít đoạn start->topN nên không thấy thêm
+    // đường chéo giữa các box. Nhờ vậy bucket Line chỉ cần 1 CGPathAddLines
+    // thay vì N call, giảm mạnh IPC khi có nhiều địch.
+    CGPoint linePts[2 * ESPOverlayMaxBoxes + 2];
+    int linePtCount = 0;
 
     for (int i = 0; i < count; i++) {
         const ESPBox2D *b = &boxes[i];
@@ -3405,11 +3411,13 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
             ESPDrawAddPolyline(tri, 3, kQBLColorAI, 1.5f, kQBLBucketAIMark, YES);
         }
 
-        // Snapline — vẽ cho cả player/bot và hình nhân phòng tập (kind 1 & 3).
-        // Mỗi địch là 1 đoạn thẳng 2 điểm riêng biệt để không bị culling gộp làm mất line.
-        if (f->line) {
-            CGPoint lineSeg[2] = { lineStart, CGPointMake(bcx, by) };
-            ESPDrawAddPolyline(lineSeg, 2, kQBLColorLine, 1.5f, kQBLBucketLine, NO);
+        // Snapline — chỉ player/bot thật (kind 1); kind 3 là hình nhân nên
+        // không kéo line từ tâm màn hình. Gom vào polyline chung ở cuối frame;
+        // mỗi box thêm lại lineStart để đoạn nối bị retrace, không sinh line rác.
+        if (isPlayerBox && f->line &&
+            linePtCount + 2 <= (int)(sizeof(linePts) / sizeof(linePts[0]))) {
+            linePts[linePtCount++] = lineStart;
+            linePts[linePtCount++] = CGPointMake(bcx, by);
         }
 
         // Text: 1 lệnh/box duy nhất (gộp TeamID + Nickname + Distance)
@@ -3418,6 +3426,11 @@ static void ds_qbl_build_frame(ESPBox2D *boxes, int count, CGRect portraitBounds
         char txt[96];
         ds_esp_build_label_text(*b, f->name, f->dist, f->teamID, txt, (int)sizeof(txt));
         ESPDrawAddText(txt, CGPointMake(bcx, by + bh), 12.0f, mainColor, YES, 1);
+    }
+
+    // Một lệnh duy nhất cho toàn bộ snapline -> 1 CGPathAddLines cho bucket.
+    if (linePtCount >= 2) {
+        ESPDrawAddPolyline(linePts, linePtCount, kQBLColorLine, 1.5f, kQBLBucketLine, NO);
     }
 }
 
@@ -3552,9 +3565,12 @@ static void ds_qbl_place_label(RemoteCall *process, int slot, const ESPDrawComma
 // không đổi để text/anchor cập nhật.
 static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!process || !process.trojanMem || g_qblDead) return;
-    // ---- label pass (chạy mỗi frame cùng geometry 60Hz, budget 3 setFrame/frame) ----
+    // ---- label pass 30Hz, budget 3 setFrame/frame ----
+    // Không chạy 60Hz: mỗi setFrame:/setText: đều là một performSelector
+    // đồng bộ lên main thread của SpringBoard. 30Hz vẫn đủ mượt cho label và
+    // giảm một nửa số lần đánh thức runloop.
     static CFAbsoluteTime s_lastLabelPass = 0;
-    if (nowP - s_lastLabelPass < (1.0 / 60.0 - 0.004)) return;
+    if (nowP - s_lastLabelPass < (1.0 / (double)ESP_QBL_LABEL_HZ - 0.004)) return;
     BOOL labelWork = NO;
     for (int t = 0; t < kQBLLabelCount && !labelWork; t++) {
         if (t >= s_qblTextCount) {
@@ -3590,9 +3606,8 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     if (!labelWork) return;
     s_lastLabelPass = nowP;
 
-    // Budget: TỐI ĐA 3 cuộc gọi setFrame: lên SpringBoard main thread trong 1 frame
-    // 3 calls * 60Hz = 180 calls/sec tối đa -> SpringBoard main runloop luôn có >12ms thảnh thơi mỗi frame
-    // Triệt tiêu 100% nguy cơ watchdog timeout (0x8badf00d) gây respring!
+    // Budget: tối đa 3 cuộc gọi setFrame: lên SpringBoard main thread mỗi
+    // label-pass. Ở 30Hz = 90 call/giây tối đa, thay vì 180 call/giây ở 60Hz.
     int frameBudget = 3;
     static int s_roundRobinIdx = 0;
 
@@ -3654,6 +3669,7 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     }
 
     // ---- show/hide window (1 call) ----
+    BOOL wasHidden = g_espWindowHiddenCache;
     BOOL wantHidden = (count <= 0);
     if (wantHidden != g_espWindowHiddenCache) {
         ds_remote_set_u64_on_main(process, g_espWindow, "setHidden:", wantHidden ? 1 : 0);
@@ -3816,11 +3832,20 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     // s_qblTextHash không đưa vào hash geometry để text mét/khoảng cách thay đổi
     // không ép dựng lại vector path; label pass riêng bên dưới tự xử lý text/anchor.
 
-    // qblpack: geometry 60Hz mượt mà bám sát chuyển động camera và game 60 FPS
+    // Geometry 30Hz: đây là phần nặng nhất (CGPathCreate + AddRects/AddLines
+    // + setPath + release cho từng bucket). Present tick vẫn 60Hz; frame không
+    // đổi geometry thì chỉ label pass 30Hz. Giảm một nửa số remote call so với
+    // bản 60Hz từng gây SpringBoard main-thread watchdog/respring.
+    // Ngoại lệ: vừa hiện lại window sau count==0 thì phải dựng lại path ngay;
+    // nếu defer 33ms, frame đầu tiên có thể lộ path cũ ở vị trí cũ. count==0
+    // thực tế đã return ở wantHidden phía trên nhưng vẫn giữ điều kiện cho an
+    // toàn nếu luồng hide thay đổi.
+    BOOL mustRefresh = (count <= 0 || wasHidden);
     static CFAbsoluteTime s_lastGeomPass = 0;
-    BOOL geomDue = (s_lastGeomPass <= 0 || (nowP - s_lastGeomPass) >= (1.0 / 60.0 - 0.004));
-    BOOL skipGeometry = (!missing && hash == g_qblFrameHash);
-    BOOL deferGeometry = (!skipGeometry && !geomDue);
+    BOOL geomDue = (mustRefresh || s_lastGeomPass <= 0 ||
+                    (nowP - s_lastGeomPass) >= (1.0 / (double)ESP_QBL_GEOMETRY_HZ - 0.004));
+    BOOL skipGeometry = (!mustRefresh && !missing && hash == g_qblFrameHash);
+    BOOL deferGeometry = (!mustRefresh && !skipGeometry && !geomDue);
     if (skipGeometry || deferGeometry) {
         g_qblSkips++;
     } else {
@@ -4572,7 +4597,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw79-qbl-anti-respring-budget-fix"
+#define DS_ESP_BUILD_TAG "kernrw80-saferead-30hz-watchdog"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4646,12 +4671,20 @@ static void ds_esp_present_single(DSESPFrame *frame) {
     ds_esp_present_heartbeat();
     ds_trace("esp present count=%d", frame->count);
     // kernrw43: single-thread. Vẽ per-box chạy tại chỗ dưới batch lock.
-    // kernrw77: backpressure — present trước chậm (>25ms, SB nghẽn) thì bỏ 1
-    // tick cho SB thở (frame rớt đã có s_latestFrame.exchange lo). Chỉ skip,
-    // không bao giờ thêm việc nên không thể gây kẹt.
+    // kernrw77: backpressure — present trước chậm thì bỏ frame cho SB thở
+    // (frame rớt đã có s_latestFrame.exchange lo). Từ kernrw80 dùng ngưỡng 8ms
+    // + backoff tăng dần thay vì chỉ bỏ đúng 1 tick như bản 25ms.
     static double s_lastPresentMs = 0;
-    if (s_lastPresentMs > 25.0) {
-        s_lastPresentMs = 0.0;
+    // Watchdog guard: nếu một present vừa tốn >8ms (SpringBoard đang bận),
+    // tạm bỏ các frame box tiếp theo trong một khoảng ngắn thay vì dồn tiếp
+    // performSelector vào main thread. Tăng dần nếu tiếp tục quá tải.
+    static CFAbsoluteTime s_presentPauseUntil = 0;
+    static CFAbsoluteTime s_lastOverloadLog = 0;
+    static int s_overloadStreak = 0;
+    CFAbsoluteTime nowBp = CFAbsoluteTimeGetCurrent();
+    // Lệnh hide/clear (count <= 0) luôn được xử lý ngay, kể cả đang backoff,
+    // để không còn box ma khi địch biến mất hoặc tắt ESP.
+    if (frame->count > 0 && s_presentPauseUntil > nowBp) {
         free(frame);
         return;
     }
@@ -4686,7 +4719,10 @@ static void ds_esp_present_single(DSESPFrame *frame) {
             const double kPresentMinInterval = (kTargetPresentHz > 0) ? (1.0 / kTargetPresentHz - 0.004) : 0.0;
             static CFAbsoluteTime s_lastPresentUpdate = 0;
             CFAbsoluteTime nowPu = CFAbsoluteTimeGetCurrent();
-            if (kPresentMinInterval <= 0 || (nowPu - s_lastPresentUpdate >= kPresentMinInterval)) {
+            // count <= 0 là lệnh clear/hide cuối, chỉ được gửi một lần bởi
+            // worker; không để pacing 60Hz nuốt mất (nếu không box ma ở lại).
+            if (frame->count <= 0 || kPresentMinInterval <= 0 ||
+                (nowPu - s_lastPresentUpdate >= kPresentMinInterval)) {
                 s_lastPresentUpdate = nowPu;
                 CFAbsoluteTime tPres = CFAbsoluteTimeGetCurrent();
 #if DS_ESP_RENDER_COMMANDLIST
@@ -4700,6 +4736,21 @@ static void ds_esp_present_single(DSESPFrame *frame) {
                 double usP = (CFAbsoluteTimeGetCurrent() - tPres) * 1000000.0;
                 if (usP < 0) usP = 0;
                 s_lastPresentMs = usP / 1000.0; // backpressure tick sau
+                CFAbsoluteTime nowAfter = CFAbsoluteTimeGetCurrent();
+                if (s_lastPresentMs > ESP_PRESENT_OVERLOAD_MS) {
+                    if (s_overloadStreak < 4) s_overloadStreak++;
+                    double pauseSec = 0.05 * (double)(1 << (s_overloadStreak - 1));
+                    if (pauseSec > 0.8) pauseSec = 0.8;
+                    s_presentPauseUntil = nowAfter + pauseSec;
+                    if (nowAfter - s_lastOverloadLog >= 2.0) {
+                        s_lastOverloadLog = nowAfter;
+                        ESPLog("esp present overload: last=%.1fms pause=%.0fms streak=%d",
+                               s_lastPresentMs, pauseSec * 1000.0, s_overloadStreak);
+                    }
+                } else if (s_lastPresentMs < ESP_PRESENT_RECOVER_MS) {
+                    // Hồi phục từ từ; chỉ giảm streak khi present thật sự nhẹ.
+                    if (s_overloadStreak > 0) s_overloadStreak--;
+                }
                 s_presentN.fetch_add(1, std::memory_order_relaxed);
                 s_presentUsTotal.fetch_add((uint64_t)usP, std::memory_order_relaxed);
                 uint32_t prevMax = s_presentMaxUs.load(std::memory_order_relaxed);

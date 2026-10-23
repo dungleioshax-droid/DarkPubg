@@ -1,12 +1,12 @@
 //
 //  ESPMemory.mm
-//  Implementation: map 1 lần cho cả VÙNG của vm_map_entry rồi memcpy.
+//  Implementation: map 1 lần cho cả VÙNG của vm_map_entry rồi copy an toàn.
 //
 //  CƠ CHẾ (thay cho page-cache LRU cũ):
 //  Lần chạm đầu vào một vùng -> tìm vm_map_entry phủ địa chỉ, map MỘT LẦN
 //  cả vùng liên tiếp (tối đa ESP_REGION_PAGES, cắt theo biên entry) bằng
 //  vmmapremoterange và GIỮ VĨNH VIỄN. Từ đó mọi lần đọc trong vùng chỉ còn
-//  memcpy — không còn allocate/make_memory_entry/refcount/map/dealloc mỗi lần,
+//  copy qua kernel — không còn allocate/make_memory_entry/refcount/map/dealloc mỗi lần,
 //  không còn LRU đuổi slot (dealloc + hạ refcount) trên đường vẽ.
 //
 //  Vì sao bỏ LRU/dealloc: mapping này SHARE vm_object của game nên không tốn
@@ -73,7 +73,7 @@ extern "C" kern_return_t mach_vm_region_recurse(vm_map_t target_task,
 // bump vm_object ref_count trong kernel bằng ds_kwrite32. Hai thread cùng map
 // (ESP scan ở queue nền + HUD tick ở bridge queue) có thể ghi đè refcount của
 // cùng vm_object -> vm_object bị free sớm -> panic/respring.
-// shared_mutex: READ (memcpy từ vùng đã map) concurrent không chặn nhau —
+// shared_mutex: READ (copy từ vùng đã map) concurrent không chặn nhau —
 // fix refresh đói mutex khi scan nền ôm lock qua hàng nghìn read (box đứng im
 // rồi nhảy = BOX-JUMP). Chỉ MAP/XẢ mới cần độc quyền (hiếm sau warmup).
 static std::shared_mutex s_espReadMutex;
@@ -179,6 +179,41 @@ static inline uint64_t ESPRegionSpan(const ESPRegion *r) {
     return (uint64_t)(r->pages ? r->pages : 1) * PAGE_SIZE;
 }
 
+// Copy từ mapping local bằng syscall của CHÍNH process mình.
+//
+// memcpy() trên một mapping share với game là không an toàn: game có thể free
+// vm_object và kernel huỷ mapping bất cứ lúc nào, kể cả ngay sau
+// ESPLocalRangeCheck() (check chỉ là ảnh chụp tại một thời điểm, throttle
+// 250ms). Khi đó memcpy() chạm trang đã unmap -> SIGSEGV, app/HUD chết và
+// người dùng thấy như respring.
+//
+// mach_vm_read_overwrite(mach_task_self(), ...) đi qua kernel nên nếu mapping
+// đã chết nó trả KERN_INVALID_ADDRESS (hoặc đọc thiếu) thay vì fault. Đây là
+// đường copy an toàn cho toàn bộ region-map, kể cả khi mapping bị huỷ giữa
+// lúc kiểm tra và lúc đọc.
+static BOOL ESPSafeCopyFromLocal(uint64_t local, void *out, size_t len) {
+    if (!local || !out || len == 0) return NO;
+    mach_vm_size_t copied = 0;
+    kern_return_t kr = mach_vm_read_overwrite(
+        mach_task_self(),
+        (mach_vm_address_t)local,
+        (mach_vm_size_t)len,
+        (mach_vm_address_t)(uintptr_t)out,
+        &copied);
+    return kr == KERN_SUCCESS && copied == (mach_vm_size_t)len;
+}
+
+// Đánh dấu vùng chết ngay khi copy thất bại (không đợi throttle 250ms).
+// Chỉ tăng counter ở lần chuyển sống -> chết đầu tiên.
+static inline void ESPRegionMarkDead(ESPRegion *r) {
+    if (!r) return;
+    if (__atomic_exchange_n(&r->dead, 1, __ATOMIC_ACQ_REL) == 0) {
+        uint64_t nowMs = (uint64_t)(CFAbsoluteTimeGetCurrent() * 1000.0);
+        __atomic_store_n(&r->deadAt, nowMs, __ATOMIC_RELAXED);
+        s_regionDeadDrops.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 // ---- Kiểm tra mapping còn sống (kernrw28) ----
 // Region-map của mình KHÔNG copy dữ liệu game: nó tạo memory-entry trỏ thẳng
 // vào vm_object CỦA GAME (vmcreateshmemwithobjpages) và giữ object sống bằng
@@ -187,6 +222,8 @@ static inline uint64_t ESPRegionSpan(const ESPRegion *r) {
 // dọn) -> kernel huỷ mapping của ta -> s_regions[] vẫn giữ localAddress cũ ->
 // memcpy kế tiếp đọc vùng trống -> SIGSEGV giết app (crash thật 2026-10-13,
 // thread esp-scan, _platform_memmove, KERN_INVALID_ADDRESS nằm trong GAP).
+// kernrw80: mọi copy đã đổi sang mach_vm_read_overwrite(self) để kernel trả
+// lỗi thay vì fault; check dưới đây chỉ còn để purge sớm.
 //
 // Trước đây ESPRegionFind() TIN MÙI BLIND: một lần hỏng là hỏng vĩnh viễn.
 // Giờ mỗi lần dùng vùng đều hỏi kernel "còn map không" bằng vm_region_recurse
@@ -207,8 +244,8 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
     // Trước kernrw72 code khai báo thêm object_name/object_nameCnt/... nên các
     // tham số bị lệch: kernel đọc infoCnt từ &objName (thường = 0) và trả
     // KERN_INVALID_ARGUMENT (kr=4). Vì vậy check mapping chết chưa bao giờ chạy;
-    // một vùng bị game free có thể bị memcpy -> SIGSEGV/panic. Giữ đúng ABI ở
-    // đây là điều kiện sống còn của region-map.
+    // một vùng bị game free có thể bị copy -> SIGSEGV/panic. Giữ đúng ABI ở
+    // đây là điều kiện sống còn của region-map (kernrw80 vẫn copy an toàn).
     natural_t nestingDepth = 0;
     kern_return_t kr = mach_vm_region_recurse(mach_task_self_, &regionAddr, &regionSize,
                                                &nestingDepth,
@@ -243,7 +280,7 @@ static int ESPLocalRangeCheck(uint64_t local, uint64_t span) {
         return -1;
     }
     // local phải nằm trong đúng vùng kernel trả về, và vùng phải phủ đủ span.
-    // Nếu game đã co/unmap phần đuôi, coi như chết để map lại thay vì memcpy
+    // Nếu game đã co/unmap phần đuôi, coi như chết để map lại thay vì copy
     // qua lỗ hổng.
     uint64_t regionEnd = (uint64_t)regionAddr + (uint64_t)regionSize;
     if ((uint64_t)regionAddr > (uint64_t)local || regionEnd < (uint64_t)local) return 0;
@@ -372,7 +409,7 @@ static uint64_t ESPRegionAvoidOverlap(uint64_t base, uint64_t pageStart) {
     return base;
 }
 
-// Lấy mapping live cho pageStart: hit thì memcpy, miss thì map CẢ VÙNG 1 lần
+// Lấy mapping live cho pageStart: hit thì copy an toàn, miss thì map CẢ VÙNG 1 lần
 // rồi giữ vĩnh viễn. KHÔNG lock — caller giữ mutex.
 static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *outLocal) {
     // vmMap stale (game restart -> map freed, UAF): walk vào kernel rác =
@@ -492,7 +529,7 @@ static BOOL ESPRegionGetLocked(uint64_t vmMap, uint64_t pageStart, uint64_t *out
     return YES;
 }
 
-// Fast path SHARED (caller giữ shared_lock): chỉ memcpy từ vùng đã map,
+// Fast path SHARED (caller giữ shared_lock): chỉ copy từ vùng đã map,
 // không map vùng mới. Miss page nào -> NO để caller đi đường độc quyền.
 // Đây là đường refresh 40Hz đi mỗi tick: không bao giờ bị scan nền chặn.
 static BOOL ESPReadSharedLocked(uint64_t remoteAddr, void *buf, uint64_t len) {
@@ -515,9 +552,13 @@ static BOOL ESPReadSharedLocked(uint64_t remoteAddr, void *buf, uint64_t len) {
         // 0x11813b000, còn world-chain đi đường này đọc CÙNG địa chỉ ra
         // 0x10f002740 -> engine là object giả -> viewport/GameInstance = 0
         // -> scan world FAIL step=4 -> không có box.
-        memcpy(out + off,
-               (void *)(uintptr_t)(r->localAddress + (pageStart - r->base) + pageOff),
-               (size_t)chunk);
+        // Không dùng memcpy: mapping có thể bị kernel huỷ ngay sau check.
+        // Copy bằng syscall self để lỗi trả về KERN_INVALID_ADDRESS thay vì SIGSEGV.
+        if (!ESPSafeCopyFromLocal(r->localAddress + (pageStart - r->base) + pageOff,
+                                  out + off, (size_t)chunk)) {
+            ESPRegionMarkDead(r);
+            return NO;
+        }
         off += chunk;
     }
     return YES;
@@ -553,7 +594,7 @@ BOOL ESPMemoryFlushPageCacheIfIdle(void) {
 }
 
 // ĐƯỜNG ĐỌC CHÍNH khi không có task port: mọi page đi qua region map. Lần đầu
-// chạm vùng nào thì map 1 lần cả vùng (bulk) rồi giữ; các lần sau memcpy.
+// chạm vùng nào thì map 1 lần cả vùng (bulk) rồi giữ; các lần sau copy an toàn.
 // KHÔNG lock — caller giữ s_espReadMutex.
 static BOOL ESPReadCachedLocked(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len) {
     uint64_t off = 0;
@@ -566,7 +607,12 @@ static BOOL ESPReadCachedLocked(uint64_t vmMap, uint64_t remoteAddr, void *buf, 
         if (!ESPRegionGetLocked(vmMap, pageStart, &local)) return NO;
         uint64_t chunk = len - off;
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
-        memcpy(out + off, (void *)(uintptr_t)(local + pageOff), (size_t)chunk);
+        if (!ESPSafeCopyFromLocal(local + pageOff, out + off, (size_t)chunk)) {
+            // Tìm lại region vừa lấy (không check syscall) để đánh dấu chết ngay.
+            ESPRegion *dead = ESPRegionFind(pageStart, NULL);
+            ESPRegionMarkDead(dead);
+            return NO;
+        }
         // Mapping là LIVE (share vm_object game) nên giữ trong vùng không làm
         // dữ liệu cũ — game ghi gì mình đọc thấy ngay.
         off += chunk;
@@ -602,9 +648,12 @@ BOOL ESPMemoryReadCached(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_
         if (chunk > PAGE_SIZE - pageOff) chunk = PAGE_SIZE - pageOff;
         // Cùng lỗi offset như ESPReadSharedLocked: localAddress = đầu vùng,
         // phải cộng (pageStart - r->base) mới ra đúng trang.
-        memcpy(out + off,
-               (void *)(uintptr_t)(r->localAddress + (pageStart - r->base) + pageOff),
-               (size_t)chunk);
+        // Copy bằng syscall self để mapping chết không làm SIGSEGV.
+        if (!ESPSafeCopyFromLocal(r->localAddress + (pageStart - r->base) + pageOff,
+                                  out + off, (size_t)chunk)) {
+            ESPRegionMarkDead(r);
+            return NO;
+        }
         off += chunk;
     }
     return YES;
@@ -634,7 +683,7 @@ BOOL ESPMemoryRead(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     }
     // Kernel region-map là đường fallback (Esign mobile thường).
     s_kernelReads++;
-    // Vòng 1 (shared): vùng đã map thì memcpy, không chặn reader khác —
+    // Vòng 1 (shared): vùng đã map thì copy an toàn, không chặn reader khác —
     // đường refresh 40Hz đi đây mỗi tick.
     {
         std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
@@ -666,7 +715,7 @@ BOOL ESPReadWindow(uint64_t vmMap, uint64_t remoteAddr, void *buf, uint64_t len)
     s_kernelReads++;
     // Không có task port: đi region map (1 lần/vùng). Cửa sổ 0xF00 của actor
     // trước đây map/lại mỗi lượt quét (~37ms/actor) — giờ lần đầu map cả vùng,
-    // các lượt sau là memcpy thuần.
+    // các lượt sau chỉ còn copy an toàn.
     {
         std::shared_lock<std::shared_mutex> readLock(s_espReadMutex);
         if (ESPReadSharedLocked(remoteAddr, buf, len)) {
@@ -728,7 +777,11 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
                 std::unique_lock<std::shared_mutex> writeLock(s_espReadMutex);
                 if (!ESPRegionGetLocked(map, pageStart, &local)) return;
             }
-            uint32_t magic = *(volatile uint32_t *)(uintptr_t)(local + (start - pageStart));
+            uint32_t magic = 0;
+            if (!ESPSafeCopyFromLocal(local + (start - pageStart), &magic, sizeof(magic))) {
+                // Mapping died between ESPRegionGetLocked and the read.
+                return;
+            }
             if (magic != MH_MAGIC_64) return;
             if (pass == 0) {
                 // Đúng binary chính thì GEngine static (RVA từ dump) phải là
@@ -740,7 +793,10 @@ uint64_t ESPGameBaseViaKernel(uint64_t proc) {
                     std::unique_lock<std::shared_mutex> wl2(s_espReadMutex);
                     if (!ESPRegionGetLocked(map, gePage, &geLocal)) return;
                 }
-                uint64_t ge = *(volatile uint64_t *)(uintptr_t)(geLocal + (geAddr - gePage));
+                uint64_t ge = 0;
+                if (!ESPSafeCopyFromLocal(geLocal + (geAddr - gePage), &ge, sizeof(ge))) {
+                    return;
+                }
                 if (!ESPRemoteAddrUsable(ge)) return;
                 foundGe = ge;
             }
