@@ -2833,10 +2833,15 @@ static uint64_t g_qblBlackColor = 0;   // +blackColor (shadow + HP nền)
 static uint64_t g_qblRedColor = 0;     // +redColor
 static uint64_t g_qblGreenColor = 0;   // +greenColor
 static uint64_t g_qblNoAnimActions = 0; // actions dict [NSNull null] để triệt tiêu mọi CABasicAnimation
+static uint64_t g_qblNullObj = 0;      // NSNull singleton dùng khi dựng actions dict theo bước
+static uint64_t g_qblActionsDict = 0;  // NSMutableDictionary retain, dựng dần theo bước
 static uint64_t g_qblFontMain = 0;     // font riêng 13pt (retained)
 static uint64_t g_qblFontSmall = 0;
 static BOOL g_qblStyleOK = NO;
 static uint8_t g_qblStyleFails = 0;    // fail liên tiếp -> tắt QBL, tránh giết session
+static uint8_t g_qblActionFails = 0;   // fail liên tiếp khi dựng actions dict
+static int g_qblStyleStage = 0;        // 0=chưa bắt đầu, 1..16=tiến độ style
+static int g_qblActionKeys = 0;        // số key actions đã đặt thành công
 static BOOL g_qblDead = NO;            // đường vẽ QBL đã bị bỏ trong session này
 // Đếm số lần tạo fail để không kẹt vòng "missing -> present mãi".
 static uint8_t g_qblShapeFail[kQBLBucketCount];
@@ -2844,10 +2849,15 @@ static uint8_t g_qblLabelFail[kQBLLabelCount];
 // Lazy creation: mỗi tick tối đa N object mới (tránh dồn ~180 remote call).
 // qblpack: hạ 2 -> 1. Mỗi object là 8-10 RemoteCall (alloc/init/set...); tạo
 // 2 shape + 2 label trong 1 tick từng làm present đầu mất 2.8s, dễ watchdog.
+// kernrw81: thêm budget CHUNG 1 object/tick cho cả shape lẫn label. Trước đây
+// 1 shape + 1 label có thể cùng chạy trong một tick, vẫn dồn ~20 RemoteCall
+// lên SpringBoard main thread ngay sau khi style xong.
 #define kQBLShapeBudgetPerTick 1
 #define kQBLLabelBudgetPerTick 1
+#define kQBLObjectBudgetPerTick 1
 static int s_qblShapeBudget = 0;
 static int s_qblLabelBudget = 0;
+static int s_qblObjectBudget = 0;
 
 // --- per-frame accumulators (mapped sang portrait) ---
 static CGRect s_qblRects[kQBLBucketCount][DS_QBL_MAX_RECTS];
@@ -2890,15 +2900,21 @@ static void ds_qbl_reset_remote(void) {
     g_qblRedColor = 0;
     g_qblGreenColor = 0;
     g_qblNoAnimActions = 0;
+    g_qblNullObj = 0;
+    g_qblActionsDict = 0;
     g_qblFontMain = 0;
     g_qblFontSmall = 0;
     g_qblStyleOK = NO;
     g_qblStyleFails = 0;
+    g_qblActionFails = 0;
+    g_qblStyleStage = 0;
+    g_qblActionKeys = 0;
     g_qblDead = NO;
     memset(g_qblShapeFail, 0, sizeof(g_qblShapeFail));
     memset(g_qblLabelFail, 0, sizeof(g_qblLabelFail));
     s_qblShapeBudget = 0;
     s_qblLabelBudget = 0;
+    s_qblObjectBudget = 0;
     s_qblTextCount = 0;
 }
 
@@ -2968,83 +2984,175 @@ static BOOL ds_qbl_set_path(RemoteCall *process, int bucket, uint64_t path) {
     return YES;
 }
 
-// --- style dùng chung: tạo 1 lần/session ---
+// --- style dùng chung: tạo 1 lần/session, chia thành nhiều bước nhỏ ---
 // Dùng màu retain trong SpringBoard để không bị autorelease pool drain giải phóng
 // dẫn đến crash use-after-free khi render shape hoặc setTextColor.
+//
+// kernrw81: log kernrw77 cho thấy present đầu tiên có pMax=641.8ms ngay khi
+// style/shape/label đầu được tạo. Mỗi bước style cũ dồn 6 màu + 2 font +
+// dictionary 9 action key (~30 RemoteCall) vào một present. Giờ mỗi lần gọi chỉ
+// làm 1-2 RemoteCall rồi trả NO; các present sau làm tiếp. Nhờ vậy không còn
+// một cú burst dài trên main thread SpringBoard lúc HUD vừa hiện.
 static BOOL ds_qbl_style_ready(RemoteCall *process) {
     if (g_qblStyleOK) return YES;
     if (!process || !process.trojanMem) return NO;
-    uint64_t colorClass = ds_remote_class(process, "UIColor");
-    if (!colorClass) return NO;
 
-    if (!g_qblClearColor) g_qblClearColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor");
-    if (!g_qblWhiteColor) g_qblWhiteColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "whiteColor");
-    if (!g_qblClearColor || !g_qblWhiteColor) {
-        const char *err = process.lastError.UTF8String;
-        ESPLog("qbl style fail clear=0x%llx white=0x%llx err=%s",
-               (unsigned long long)g_qblClearColor,
-               (unsigned long long)g_qblWhiteColor, err ? err : "-");
-        if (g_qblStyleFails < 255) g_qblStyleFails++;
-        return NO;
+    if (g_qblStyleStage == 0) {
+        g_qblStyleStage = 1;
+        ESPLog("qbl phase: style (staged)");
     }
-    if (!g_qblAIColor)    g_qblAIColor    = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "yellowColor");
-    if (!g_qblBlackColor) g_qblBlackColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "blackColor");
-    if (!g_qblRedColor)   g_qblRedColor   = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "redColor");
-    if (!g_qblGreenColor) g_qblGreenColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "greenColor");
-    if (!g_qblAIColor)    g_qblAIColor    = g_qblWhiteColor;
-    if (!g_qblBlackColor) g_qblBlackColor = g_qblWhiteColor;
-    if (!g_qblRedColor)   g_qblRedColor   = g_qblWhiteColor;
-    if (!g_qblGreenColor) g_qblGreenColor = g_qblWhiteColor;
 
-    // qblpack FONT: KHÔNG mượn font HUD. HUD mặc định 24pt (custom 14..40)
-    // trong khi rect QBL thiết kế cho 13pt (tên+mét, 180x32) và 11pt
-    // (TeamID, 84x15) -> chữ tràn/che box. UIFont là object cache/immortal
-    // nên retain-after-sync an toàn (không dính race như UIColor factory).
-    if (!g_qblFontMain)  g_qblFontMain  = ds_remote_font(process, 13.0, NO);
-    if (!g_qblFontSmall) g_qblFontSmall = ds_remote_font(process, 11.0, NO);
-    if (!g_qblFontMain && g_remoteLabel && g_remoteWindowPid == (pid_t)process.pid) {
-        // Fallback duy nhất: font HUD (chữ vẫn hiện, chỉ to hơn thiết kế).
-        g_qblFontMain = ds_remote_get_retained_object_noarg_on_main(process, g_remoteLabel, "font");
-    }
-    if (!g_qblFontSmall) g_qblFontSmall = g_qblFontMain;
-
-    // Tạo dictionary actions chứa [NSNull null] để tắt sạch mọi CABasicAnimation
-    // của CoreAnimation trên CAShapeLayer và UILabel, triệt tiêu nguy cơ crash render server.
-    if (!g_qblNoAnimActions) {
-        uint64_t nullClass = ds_remote_class(process, "NSNull");
-        uint64_t nullObj = ds_remote_get_retained_object_noarg_on_main(process, nullClass, "null");
-        uint64_t dictClass = ds_remote_class(process, "NSMutableDictionary");
-        uint64_t dict = remote_msg(process, dictClass, ds_remote_sel(process, "dictionary"), 0, 0, 0, 0);
-        if (dict && nullObj) {
-            remote_msg(process, dict, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
-            const char *keys[] = { "path", "bounds", "position", "frame", "contents", "hidden", "fillColor", "strokeColor", "lineWidth" };
-            uint64_t setObjSel = ds_remote_sel(process, "setObject:forKey:");
-            for (int i = 0; i < 9; i++) {
-                uint64_t keyStr = ds_remote_create_string(process, [NSString stringWithUTF8String:keys[i]]);
-                if (keyStr) {
-                    remote_msg(process, dict, setObjSel, nullObj, keyStr, 0, 0);
-                    remote_msg(process, keyStr, ds_remote_sel(process, "release"), 0, 0, 0, 0);
-                }
-            }
-            g_qblNoAnimActions = dict;
+    // Stage 1-3 cần UIColor; các stage sau không tra lại class này.
+    uint64_t colorClass = 0;
+    if (g_qblStyleStage <= 3) {
+        colorClass = ds_remote_class(process, "UIColor");
+        if (!colorClass) {
+            if (g_qblStyleFails < 255) g_qblStyleFails++;
+            ESPLog("qbl style fail: UIColor class");
+            return NO;
         }
     }
+
+    if (g_qblStyleStage == 1) {
+        if (!g_qblClearColor) g_qblClearColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "clearColor");
+        if (!g_qblWhiteColor) g_qblWhiteColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "whiteColor");
+        if (!g_qblClearColor || !g_qblWhiteColor) {
+            const char *err = process.lastError.UTF8String;
+            ESPLog("qbl style fail clear=0x%llx white=0x%llx err=%s",
+                   (unsigned long long)g_qblClearColor,
+                   (unsigned long long)g_qblWhiteColor, err ? err : "-");
+            if (g_qblStyleFails < 255) g_qblStyleFails++;
+            return NO;
+        }
+        g_qblStyleFails = 0;
+        g_qblStyleStage = 2;
+        return NO;
+    }
+
+    if (g_qblStyleStage == 2) {
+        if (!g_qblAIColor)    g_qblAIColor    = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "yellowColor");
+        if (!g_qblBlackColor) g_qblBlackColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "blackColor");
+        g_qblStyleFails = 0;
+        g_qblStyleStage = 3;
+        return NO;
+    }
+
+    if (g_qblStyleStage == 3) {
+        if (!g_qblRedColor)   g_qblRedColor   = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "redColor");
+        if (!g_qblGreenColor) g_qblGreenColor = ds_remote_get_retained_object_noarg_on_main(process, colorClass, "greenColor");
+        if (!g_qblAIColor)    g_qblAIColor    = g_qblWhiteColor;
+        if (!g_qblBlackColor) g_qblBlackColor = g_qblWhiteColor;
+        if (!g_qblRedColor)   g_qblRedColor   = g_qblWhiteColor;
+        if (!g_qblGreenColor) g_qblGreenColor = g_qblWhiteColor;
+        g_qblStyleFails = 0;
+        g_qblStyleStage = 4;
+        return NO;
+    }
+
+    if (g_qblStyleStage == 4) {
+        // qblpack FONT: KHÔNG mượn font HUD. HUD mặc định 24pt (custom 14..40)
+        // trong khi rect QBL thiết kế cho 13pt (tên+mét, 180x32) và 11pt
+        // (TeamID, 84x15) -> chữ tràn/che box. UIFont là object cache/immortal
+        // nên retain-after-sync an toàn (không dính race như UIColor factory).
+        if (!g_qblFontMain) g_qblFontMain = ds_remote_font(process, 13.0, NO);
+        g_qblStyleFails = 0;
+        g_qblStyleStage = 5;
+        return NO;
+    }
+
+    if (g_qblStyleStage == 5) {
+        if (!g_qblFontSmall) g_qblFontSmall = ds_remote_font(process, 11.0, NO);
+        if (!g_qblFontMain && g_remoteLabel && g_remoteWindowPid == (pid_t)process.pid) {
+            // Fallback duy nhất: font HUD (chữ vẫn hiện, chỉ to hơn thiết kế).
+            g_qblFontMain = ds_remote_get_retained_object_noarg_on_main(process, g_remoteLabel, "font");
+        }
+        if (!g_qblFontSmall) g_qblFontSmall = g_qblFontMain;
+        g_qblStyleFails = 0;
+        g_qblStyleStage = 6;
+        return NO;
+    }
+
+    if (g_qblStyleStage == 6) {
+        // Dictionary actions chứa [NSNull null] để tắt CABasicAnimation trên
+        // CAShapeLayer/UILabel. Chỉ tạo null + dict ở bước này; 9 key được đặt
+        // dần ở các present sau, mỗi lần 1 key.
+        if (!g_qblNullObj) {
+            uint64_t nullClass = ds_remote_class(process, "NSNull");
+            if (nullClass) {
+                g_qblNullObj = ds_remote_get_retained_object_noarg_on_main(process, nullClass, "null");
+            }
+        }
+        if (!g_qblActionsDict) {
+            uint64_t dictClass = ds_remote_class(process, "NSMutableDictionary");
+            if (dictClass) {
+                uint64_t dict = remote_msg(process, dictClass, ds_remote_sel(process, "dictionary"), 0, 0, 0, 0);
+                if (dict) {
+                    remote_msg(process, dict, ds_remote_sel(process, "retain"), 0, 0, 0, 0);
+                    g_qblActionsDict = dict;
+                }
+            }
+        }
+        if (!g_qblNullObj || !g_qblActionsDict) {
+            if (g_qblActionFails < 255) g_qblActionFails++;
+            if (g_qblActionFails >= 3) {
+                // Không có actions vẫn phải vẽ được; bỏ noAnim thay vì chặn QBL.
+                g_qblStyleStage = 16;
+                ESPLog("qbl style: actions unavailable -> continue without noAnim");
+            }
+            return NO;
+        }
+        g_qblActionFails = 0;
+        g_qblStyleStage = 7;
+        return NO;
+    }
+
+    if (g_qblStyleStage >= 7 && g_qblStyleStage <= 15) {
+        static const char *keys[] = {
+            "path", "bounds", "position", "frame", "contents",
+            "hidden", "fillColor", "strokeColor", "lineWidth"
+        };
+        int idx = g_qblStyleStage - 7;
+        uint64_t keyStr = ds_remote_create_string(process, [NSString stringWithUTF8String:keys[idx]]);
+        if (keyStr) {
+            uint64_t setObjSel = ds_remote_sel(process, "setObject:forKey:");
+            if (setObjSel) {
+                remote_msg(process, g_qblActionsDict, setObjSel, g_qblNullObj, keyStr, 0, 0);
+            }
+            remote_msg(process, keyStr, ds_remote_sel(process, "release"), 0, 0, 0, 0);
+            g_qblActionKeys++;
+            g_qblActionFails = 0;
+            g_qblStyleStage++;
+        } else {
+            if (g_qblActionFails < 255) g_qblActionFails++;
+            if (g_qblActionFails >= 3) {
+                g_qblStyleStage = 16;
+                ESPLog("qbl style: action key fail 3x -> partial noAnim");
+            }
+        }
+        return NO;
+    }
+
+    // Stage 16: chốt style. Chỉ dùng actions dict nếu đã đặt được ít nhất 1 key;
+    // dict rỗng không có tác dụng tắt animation.
+    g_qblNoAnimActions = (g_qblActionKeys > 0) ? g_qblActionsDict : 0;
     g_qblStyleOK = YES;
     g_qblStyleFails = 0;
-    ESPLog("qbl style ok noAnim=%d font=%d small=%d ai=%d green=%d red=%d",
-           g_qblNoAnimActions ? 1 : 0, g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0,
+    ESPLog("qbl style ok noAnim=%d keys=%d font=%d small=%d ai=%d green=%d red=%d",
+           g_qblNoAnimActions ? 1 : 0, g_qblActionKeys,
+           g_qblFontMain ? 1 : 0, g_qblFontSmall ? 1 : 0,
            g_qblAIColor ? 1 : 0, g_qblGreenColor ? 1 : 0, g_qblRedColor ? 1 : 0);
     return YES;
 }
 
-// Tạo CAShapeLayer theo nhu cầu, tối đa kQBLShapeBudgetPerTick object/tick.
-// Budget là hàng rào chống dồn hàng trăm remote call trong 1 tick (mỗi remote
-// call timeout = RemoteCall tự destroy -> HUD đứng, ESP mất).
+// Tạo CAShapeLayer theo nhu cầu, tối đa kQBLShapeBudgetPerTick object/tick và
+// chia budget chung kQBLObjectBudgetPerTick với label. Budget là hàng rào chống
+// dồn hàng trăm remote call trong 1 tick (mỗi remote call timeout = RemoteCall
+// tự destroy -> HUD đứng, ESP mất).
 static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
     if (bucket < 0 || bucket >= kQBLBucketCount) return 0;
     if (g_qblShape[bucket]) return g_qblShape[bucket];
     if (!process || !process.trojanMem || !g_qblRootLayer) return 0;
-    if (s_qblShapeBudget <= 0) return 0;
+    if (s_qblShapeBudget <= 0 || s_qblObjectBudget <= 0) return 0;
     uint64_t shapeClass = ds_remote_class(process, "CAShapeLayer");
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t addSublayer = ds_remote_sel(process, "addSublayer:");
@@ -3086,9 +3194,10 @@ static uint64_t ds_qbl_shape_for(RemoteCall *process, int bucket) {
         return 0;
     }
     s_qblShapeBudget--;
+    s_qblObjectBudget--;
     g_qblShape[bucket] = layer;
     g_qblShapeHash[bucket] = 0;
-    ESPLog("qbl shape %d created (budget %d)", bucket, s_qblShapeBudget);
+    ESPLog("qbl shape %d created (budget %d obj %d)", bucket, s_qblShapeBudget, s_qblObjectBudget);
     return layer;
 }
 
@@ -3103,7 +3212,7 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
         if (g_qblLabelFail[slot] < 255) g_qblLabelFail[slot]++;
         return 0;
     }
-    if (s_qblLabelBudget <= 0) return 0;
+    if (s_qblLabelBudget <= 0 || s_qblObjectBudget <= 0) return 0;
     uint64_t labelClass = ds_remote_class(process, "UILabel");
     uint64_t alloc = ds_remote_sel(process, "alloc");
     uint64_t addSubview = ds_remote_sel(process, "addSubview:");
@@ -3151,6 +3260,7 @@ static uint64_t ds_qbl_label_for(RemoteCall *process, int slot, CGRect frame) {
         return 0;
     }
     s_qblLabelBudget--;
+    s_qblObjectBudget--;
     g_qblLabel[slot] = lb;
     g_qblLabelColor[slot] = 0xFFFFFFFFu;
     g_qblLabelText[slot][0] = '\0';
@@ -3684,7 +3794,6 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         return;
     }
     if (!g_qblStyleOK) {
-        ESPLog("qbl phase: style");
         if (!ds_qbl_style_ready(process)) {
             if (g_qblStyleFails >= 3) {
                 g_qblDead = YES;
@@ -3699,10 +3808,12 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         g_qblWindowFrame = portraitBounds;
     }
 
-    // Budget tạo object mới: tối đa 1 shape + 1 label/tick (xem chú thích ở
-    // kQBLShapeBudgetPerTick). Object dư sẽ được tạo ở các tick sau.
+    // Budget tạo object mới: tối đa 1 object/tick cho CẢ shape lẫn label
+    // (kQBLObjectBudgetPerTick), thay vì 1 shape + 1 label cùng tick. Object dư
+    // sẽ được tạo ở các tick sau; tránh dồn ~20 RemoteCall ngay sau style.
     s_qblShapeBudget = kQBLShapeBudgetPerTick;
     s_qblLabelBudget = kQBLLabelBudgetPerTick;
+    s_qblObjectBudget = kQBLObjectBudgetPerTick;
 
     ds_qbl_build_frame(boxes, count, portraitBounds, orientation, &s_feat);
     ESPDrawFrameEnd();
@@ -4597,7 +4708,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw80-saferead-30hz-watchdog"
+#define DS_ESP_BUILD_TAG "kernrw81-staged-style-budget"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),

@@ -251,6 +251,34 @@ thể thấy `esp present overload` thay vì respring. 30Hz là mức an toàn �
 ổn định; sau khi có log mới xác nhận không còn crash mới cân nhắc nâng lại
 geometry 60Hz.
 
+#### Ổn định lần 6 (startup burst) — kernrw81
+
+Log kernrw77 ngày 2026-10-22 (bản **trước** kernrw80) có
+`present hb: n=12 pAvg=80.1 pMax=641.8ms` ngay sau khi HUD hiện. Đây là burst
+tạo QBL đầu tiên: style cũ dồn 6 màu + 2 font + dictionary 9 action key
+(~30 RemoteCall) vào một present; ngay sau đó shape và label đầu tiên có thể
+tạo thêm ~20 call trong cùng tick. 30Hz chỉ giảm tần suất về sau, **không chia**
+burst khởi tạo này.
+
+- **Style theo bước:** `ds_qbl_style_ready()` giờ là state machine 16 bước,
+  mỗi present chỉ làm 1-2 RemoteCall (2 màu, 1 font, hoặc 1 action key) rồi
+  trả `NO`. QBL chỉ bắt đầu tạo shape/label khi style chốt xong; log có
+  `qbl phase: style (staged)` và `qbl style ok ... keys=N`.
+- **Budget chung:** thêm `kQBLObjectBudgetPerTick = 1` cho **cả** shape và
+  label. Trước đây mỗi tick có thể tạo 1 shape + 1 label; giờ chỉ một object
+  mỗi tick, các object còn lại sang tick sau. Không thay đổi 10 bucket, màu
+  QBL, hay budget tổng theo thời gian.
+- **Không đổi:** geometry/label 30Hz, backoff 8ms, safe region-map, snapline
+  gộp một polyline, và điều kiện `kind == 1`.
+- **Build tag:** `kernrw81-staged-style-budget`.
+
+Thay đổi này **chưa được build/chạy thử trên máy** (môi trường hiện tại không
+có Xcode/Apple SDK và không kết nối thiết bị). Khi có log mới, cần thấy tag
+`kernrw81-staged-style-budget`, `pMax` của present
+đầu giảm rõ rệt, và không có `ESP present failed`/respring. Nếu vẫn còn spike,
+log `qbl style ok` + các dòng `qbl phase: shape/label` sẽ cho biết burst còn ở
+giai đoạn nào.
+
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).
