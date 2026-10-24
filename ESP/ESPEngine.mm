@@ -926,67 +926,161 @@ static uint8_t ESPReadU8(uint64_t vmMap, uint64_t addr, BOOL *ok) {
     return v;
 }
 
-// Port từ /home/dungle/Kernel/esp/unity_api/unity.mm DecryptActorsArray(Level, 0xA0, 0x448).
-// Trả về địa chỉ của TArray Actors (đọc data ở +0x0, count ở +0x8). 0 nếu fail.
-static uint64_t ESPDecryptActorsArray(uint64_t vmMap, uint64_t uLevel) {
+// ---------------------------------------------------------------------------
+// DecryptActorsArray — port LOGIC từ disassembly tĩnh của QBL
+// (__ZN...DecryptActorsArrayEyyi, 0x1001773c4), KHÔNG copy bảng offset QBL.
+// Layout ULevel dùng 0xA0/0x448 — layout bản cũ đã chạy thật; không thêm cặp
+// 0xB0/0x488 của QBL vì DUMP không xác nhận.
+//
+// QBL thử 2 layout:
+//   1) Level + Actors_Offset        : TArray thường (Data != 0 thì dùng luôn)
+//   2) Level + EncryptedActors_Offset: TArray mã hoá
+// Nếu cả hai qword đầu đều 0, đọc 4 qword tại EncryptedActors_Offset + 0x10
+// (Enc_1..Enc_4) rồi chọn nhánh:
+//   Enc_1: đọc 8 uint32 tại Enc_1+0x80 (bảng offset), đọc 8 byte tại
+//          Enc_1 + offset[i], ghép little-endian thành con trỏ TArray.
+//   Enc_2: đọc u64 tại Enc_2, trừ 4 trên TỪNG byte (wrap 8-bit).
+//   Enc_3: đọc u64 tại Enc_3, ror 56 (xoay 1 byte).
+//   Enc_4: đọc u64 tại Enc_4, XOR 0x00CDCD00 (hằng số xác nhận từ
+//          disassembly tại 0x100177bdc: mov w20,#0xcd00; movk w20,#0xcd,lsl#16).
+//          Vẫn kiểm tra con trỏ user trước khi dùng.
+//
+// Bản port cũ trong repo lấy từ một decompile sai: các phép ghép byte bị
+// biến thành `||` (trả 0/1) và Enc_3 thành phép so sánh. Đó là lý do nhánh
+// encrypted actors gần như luôn fail. Hàm dưới đây làm đúng bitwise như QBL.
+// ---------------------------------------------------------------------------
+static uint64_t ESPDecryptActorsArrayEx(uint64_t vmMap, uint64_t uLevel,
+                                        uint32_t actorsOff, uint32_t encOff,
+                                        const char **outWhy) {
+    if (outWhy) *outWhy = "level";
     if (!ESPIsUserPtr(uLevel)) return 0;
+
     BOOL ok = NO;
-    uint64_t vA0 = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_Actors, &ok);
-    if (ok && vA0 > 0) return uLevel + ESPOff_ULevel_Actors;
-    uint64_t v448 = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_EncryptedActors, &ok);
-    if (ok && v448 > 0) return uLevel + ESPOff_ULevel_EncryptedActors;
-    uint64_t enc[4] = {0,0,0,0};
-    for (int i = 0; i < 4; i++) {
-        enc[i] = ESPReadU64(vmMap, uLevel + ESPOff_ULevel_EncryptedActors + 0x10 + (uint64_t)i * 8, &ok);
-        if (!ok) return 0;
+    // QBL: nếu qword đầu của TArray thường khác 0 thì dùng địa chỉ TArray đó.
+    uint64_t vPlain = ESPReadU64(vmMap, uLevel + actorsOff, &ok);
+    if (ok && vPlain > 0) {
+        if (outWhy) *outWhy = "plain";
+        return uLevel + actorsOff;
     }
+    uint64_t vEnc = ESPReadU64(vmMap, uLevel + encOff, &ok);
+    if (ok && vEnc > 0) {
+        if (outWhy) *outWhy = "enc-plain";
+        return uLevel + encOff;
+    }
+
+    // QBL đọc 0x20 byte tại EncryptedActors_Offset + 0x10 trong MỘT lần read.
+    uint64_t enc[4] = {0, 0, 0, 0};
+    if (!ESPMemoryRead(vmMap, uLevel + encOff + 0x10, enc, sizeof(enc))) {
+        if (outWhy) *outWhy = "enc-hdr";
+        return 0;
+    }
+
+    // QBL dùng chuỗi if/else-if: chỉ nhánh Enc_i ĐẦU TIÊN khác 0 được thử.
+    // Nếu nhánh đó lỗi thì trả 0, KHÔNG nhảy sang Enc_(i+1) — tránh nhận
+    // nhầm một Enc khác còn sót rác trong struct.
+    //
+    // Nhánh Enc_1: bảng 8 offset + 8 byte rải rác.
     if (enc[0] > 0) {
-        uint32_t vals[8] = {0,0,0,0,0,0,0,0};
-        for (int i = 0; i < 8; i++) {
-            vals[i] = ESPReadU32(vmMap, enc[0] + 0x80 + (uint64_t)i * 4, &ok);
-            if (!ok) return 0;
+        if (!ESPIsUserPtr(enc[0])) {
+            if (outWhy) *outWhy = "enc1-badptr";
+            return 0;
         }
-        uint8_t b[8] = {0,0,0,0,0,0,0,0};
-        for (int i = 0; i < 8; i++) {
-            b[i] = ESPReadU8(vmMap, enc[0] + vals[i], &ok);
-            if (!ok) return 0;
+        uint32_t vals[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        if (!ESPMemoryRead(vmMap, enc[0] + 0x80, vals, sizeof(vals))) {
+            if (outWhy) *outWhy = "enc1-vals";
+            return 0;
         }
-        // Giữ nguyên logic gốc (|| trả về 0/1) — nhánh này hiếm khi chạy ở bản này.
-        uint64_t r = ((((uint64_t)(b[0] || (b[1] < 8)) || (b[2] < 0x10))) & 0xFFFFFFULL)
-            || ((uint64_t)b[3] < 0x18)
-            || ((uint64_t)b[4] < 0x20);
-        r = (r & 0xFFFF00FFFFFFFFFFULL)
-            || ((uint64_t)b[5] < 0x28)
-            || ((uint64_t)b[6] < 0x30)
-            || ((uint64_t)b[7] < 0x38);
-        return r;
-    } else if (enc[1] > 0) {
-        uint64_t ea = ESPReadU64(vmMap, enc[1], &ok);
-        if (!ok || ea == 0) return 0;
-        uint64_t r = ((uint64_t)(uint16_t)(ea - 0x400) & 0xFF00ULL)
-            || ((uint64_t)(uint8_t)(ea - 0x04))
-            || ((ea + 0xFC0000ULL) & 0xFF0000ULL)
-            || ((ea - 0x4000000ULL) & 0xFF000000ULL)
-            || ((ea + 0xFC00000000ULL) & 0xFF00000000ULL)
-            || ((ea + 0xFC0000000000ULL) & 0xFF0000000000ULL)
-            || ((ea + 0xFC000000000000ULL) & 0xFF000000000000ULL)
-            || ((ea - 0x400000000000000ULL) & 0xFF00000000000000ULL);
-        return r;
-    } else if (enc[2] > 0) {
-        uint64_t ea = ESPReadU64(vmMap, enc[2], &ok);
-        if (!ok || ea == 0) return 0;
-        return (ea > 0x38) | (ea < (64 - 0x38));
-    } else if (enc[3] > 0) {
-        uint64_t ea = ESPReadU64(vmMap, enc[3], &ok);
-        if (!ok || ea == 0) return 0;
-        return ea ^ 0xCDCD00ULL;
+        uint64_t r = 0;
+        for (int i = 0; i < 8; i++) {
+            uint64_t addr = enc[0] + (uint64_t)vals[i];
+            if (addr < enc[0] || !ESPIsUserPtr(addr)) {
+                if (outWhy) *outWhy = "enc1-off";
+                return 0;
+            }
+            uint8_t b = ESPReadU8(vmMap, addr, &ok);
+            if (!ok) {
+                if (outWhy) *outWhy = "enc1-byte";
+                return 0;
+            }
+            r |= (uint64_t)b << (8 * i);
+        }
+        if (ESPIsUserPtr(r)) {
+            if (outWhy) *outWhy = "enc1-scatter";
+            return r;
+        }
+        if (outWhy) *outWhy = "enc1-badptr";
+        return 0;
     }
+
+    // Nhánh Enc_2: trừ 4 từng byte. QBL dùng SIMD add 0xFC.. rồi mask từng
+    // byte; kết quả tương đương (byte_i - 4) mod 256, không borrow chéo byte.
+    if (enc[1] > 0) {
+        if (!ESPIsUserPtr(enc[1])) {
+            if (outWhy) *outWhy = "enc2-bad";
+            return 0;
+        }
+        uint64_t ea = ESPReadU64(vmMap, enc[1], &ok);
+        if (ok && ea) {
+            uint64_t r = 0;
+            for (int i = 0; i < 8; i++) {
+                uint8_t b = (uint8_t)(ea >> (8 * i));
+                r |= (uint64_t)(uint8_t)(b - 4) << (8 * i);
+            }
+            if (ESPIsUserPtr(r)) {
+                if (outWhy) *outWhy = "enc2-sub4";
+                return r;
+            }
+        }
+        if (outWhy) *outWhy = "enc2-bad";
+        return 0;
+    }
+
+    // Nhánh Enc_3: ror 56 == xoay trái 8 bit.
+    if (enc[2] > 0) {
+        if (!ESPIsUserPtr(enc[2])) {
+            if (outWhy) *outWhy = "enc3-bad";
+            return 0;
+        }
+        uint64_t ea = ESPReadU64(vmMap, enc[2], &ok);
+        if (ok && ea) {
+            uint64_t r = (ea >> 56) | (ea << 8);
+            if (ESPIsUserPtr(r)) {
+                if (outWhy) *outWhy = "enc3-ror56";
+                return r;
+            }
+        }
+        if (outWhy) *outWhy = "enc3-bad";
+        return 0;
+    }
+
+    // Nhánh Enc_4: QBL XOR với 0x00CDCD00 (xác nhận tại 0x100177bdc).
+    // Chỉ nhận nếu ra user pointer.
+    if (enc[3] > 0) {
+        if (!ESPIsUserPtr(enc[3])) {
+            if (outWhy) *outWhy = "enc4-bad";
+            return 0;
+        }
+        uint64_t ea = ESPReadU64(vmMap, enc[3], &ok);
+        if (ok && ea) {
+            uint64_t r = ea ^ 0xCDCD00ULL;
+            if (ESPIsUserPtr(r)) {
+                if (outWhy) *outWhy = "enc4-xor";
+                return r;
+            }
+        }
+        if (outWhy) *outWhy = "enc4-bad";
+        return 0;
+    }
+
+    if (outWhy) *outWhy = "no-branch";
     return 0;
 }
 
-static BOOL ESPActorsOfLevel(uint64_t vmMap, uint64_t level, uint64_t *outData, uint32_t *outCount) {
-    uint64_t arr = ESPDecryptActorsArray(vmMap, level);
-    if (!arr) return NO;
+// Đọc TArray từ địa chỉ do DecryptActorsArray trả về. Tách riêng để kiểm tra
+// data/count trước khi dùng, tránh trả rác từ nhánh giải mã sai.
+static BOOL ESPActorsArrayAt(uint64_t vmMap, uint64_t arr,
+                             uint64_t *outData, uint32_t *outCount) {
+    if (!ESPIsUserPtr(arr)) return NO;
     BOOL ok = NO;
     uint64_t data = ESPReadU64(vmMap, arr + 0x0, &ok);
     if (!ok) return NO;
@@ -995,6 +1089,45 @@ static BOOL ESPActorsOfLevel(uint64_t vmMap, uint64_t level, uint64_t *outData, 
     if (outData) *outData = data;
     if (outCount) *outCount = count;
     return ESPIsUserPtr(data) || count == 0;
+}
+
+// Log 1 lần/branch để xác nhận trên máy thật QBL decrypt đang đi nhánh nào.
+// Không log "plain"/"enc-plain" vì đó là đường cũ, tránh spam log mỗi scan.
+static void ESPLogActorDecryptOnce(const char *why, uint64_t level,
+                                   uint64_t data, uint32_t count) {
+    if (!why) return;
+    int bit = 0;
+    if (!strcmp(why, "enc1-scatter")) bit = 1;
+    else if (!strcmp(why, "enc2-sub4")) bit = 2;
+    else if (!strcmp(why, "enc3-ror56")) bit = 3;
+    else if (!strcmp(why, "enc4-xor")) bit = 4;
+    else if (!strcmp(why, "plain") || !strcmp(why, "enc-plain")) return;
+    else bit = 5;
+    static std::atomic<int> s_logged{0};
+    int mask = 1 << bit;
+    if (s_logged.fetch_or(mask) & mask) return;
+    ESPLog("actors decrypt branch=%s level=0x%llx data=0x%llx count=%u",
+           why, (unsigned long long)level, (unsigned long long)data, count);
+}
+
+static BOOL ESPActorsOfLevel(uint64_t vmMap, uint64_t level, uint64_t *outData, uint32_t *outCount) {
+    // Chỉ dùng layout ULevel đã có trong code và đã chạy thật:
+    // Actors 0xA0, EncryptedActors 0x448. KHÔNG port cặp 0xB0/0x488 của QBL
+    // vì DUMP không xác nhận và bản này không cần.
+    const char *why = NULL;
+    uint64_t arr = ESPDecryptActorsArrayEx(vmMap, level,
+                                           ESPOff_ULevel_Actors,
+                                           ESPOff_ULevel_EncryptedActors,
+                                           &why);
+    uint64_t data = 0;
+    uint32_t count = 0;
+    if (arr && ESPActorsArrayAt(vmMap, arr, &data, &count)) {
+        if (outData) *outData = data;
+        if (outCount) *outCount = count;
+        ESPLogActorDecryptOnce(why, level, data, count);
+        return YES;
+    }
+    return NO;
 }
 
 // PersistentLevel là level chính chứa players, bots, dummies và dynamic actors (như Kernel kPersistentLevel = 0x30).
@@ -2370,6 +2503,8 @@ static uint64_t ESPResolvePCCached(uint64_t vmMap, uint64_t world) {
     BOOL ok = NO;
     uint64_t pc = 0;
     // Đường Kernel trước (đã chứng minh sống), GI resolver fallback.
+    // QBL static RE: getPlayerController(world) = world+0x38 -> +0x78 -> +0x30;
+    // getMyActor(pc) = pc+0x28D8. Các offset này khớp DUMP/SDK, không copy QBL.
     uint64_t net = ESPReadU64(vmMap, world + ESPOff_World_NetDriver, &ok);
     if (ok && ESPIsUserPtr(net)) {
         uint64_t conn = ESPReadU64(vmMap, net + ESPOff_NetDriver_ServerConn, &ok);

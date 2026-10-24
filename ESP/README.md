@@ -279,6 +279,51 @@ có Xcode/Apple SDK và không kết nối thiết bị). Khi có log mới, c�
 log `qbl style ok` + các dòng `qbl phase: shape/label` sẽ cho biết burst còn ở
 giai đoạn nào.
 
+#### Resolver actors/world theo QBL — kernrw82
+
+QBL được phân tích **tĩnh** (Mach-O + Capstone, không chạy dylib). Không copy
+bảng offset của QBL vào code; layout `ULevel` giữ nguyên `0xA0/0x448` mà bản
+cũ đã chạy thật, không thêm cặp `0xB0/0x488` vì `DUMP/` không xác nhận.
+
+- **Actor array:** `DecryptActorsArray(Level, 0xA0, 0x448)` của QBL thử
+  `TArray` thường trước, rồi `TArray` mã hoá; nếu cả hai qword đầu đều 0 thì
+  đọc 4 qword `Enc_1..Enc_4` tại `Level + EncryptedActors + 0x10`:
+  - `Enc_1`: đọc 8 `uint32` tại `Enc_1 + 0x80`, đọc 8 byte tại
+    `Enc_1 + offset[i]`, ghép **little-endian** thành con trỏ `TArray`.
+  - `Enc_2`: trừ 4 trên **từng byte** (wrap 8-bit), không phải trừ 64-bit.
+  - `Enc_3`: `ror 56` (xoay 1 byte).
+  - `Enc_4`: XOR `0x00CDCD00`; hằng số này đã xác nhận từ disassembly
+    (`mov w20,#0xcd00; movk w20,#0xcd,lsl#16` tại `0x100177bdc`), không phải
+    key runtime như giả định ban đầu. Vẫn kiểm tra con trỏ user trước khi dùng.
+- **Vì sao phải sửa:** bản port cũ lấy từ decompile sai, biến phép ghép byte
+  thành `||` (trả 0/1), `Enc_3` thành phép so sánh, và `Enc_2` thành chuỗi
+  `||`. Nhánh encrypted gần như luôn trả 0/1 thay vì con trỏ.
+- **Không port layout phụ:** QBL còn thử `(Level, 0xB0, 0x488)` trên một số
+  build, nhưng DUMP không xác nhận cặp này và bản đang chạy đã dùng
+  `(0xA0, 0x448)` (log cũ có box). Vì yêu cầu “DUMP là nguồn offset duy
+  nhất”, code **không** thêm `0xB0/0x488`; nếu sau này đổi build thì cập nhật
+  DUMP trước.
+- **World/local player:** QBL dùng đúng chain NetDriver của mình:
+  `World + 0x38 -> +0x78 -> +0x30` (PlayerController), rồi
+  `PlayerController + 0x28D8` (local pawn). Chain này đã có sẵn trong
+  `ESPResolvePCCached`/`ESPMyTeamAndPawn`; không đổi offset.
+- **Nguồn world:** QBL không lấy world bằng một offset tĩnh đơn giản.
+  `GetGWorld` (`0x100176610`) bị obfuscate, không thấy call site trực tiếp
+  trong `__text` (chỉ có trong `__unwind_info`); `StaticScanThreadEntry` chủ
+  yếu là anti-debug/thread setup; `QBLRoot::ReadProcessSnapshot` là dispatcher
+  snapshot. Vì vậy **không port** các đường này: ESP giữ
+  `GEngine -> Viewport -> World` (đã chạy thật) và chỉ dùng chain NetDriver
+  của QBL để lấy PC/pawn, tránh thêm scan/IPC nặng dễ gây respring.
+- **Log xác nhận:** chỉ log **một lần/branch** (`actors decrypt branch=...`),
+  không log mỗi scan.
+- **Build tag:** `kernrw82-qbl-actors-decrypt`.
+
+Phần này **chưa build/chạy thử trên máy** (không có Xcode/Apple SDK, không có
+thiết bị). Khi có log, cần thấy tag mới; nếu actors đi nhánh encrypted, log
+`actors decrypt branch=enc1-scatter|enc2-sub4|enc3-ror56|enc4-xor` sẽ xác nhận.
+Nếu `Enc_4` xuất hiện mà box vẫn không lên, kiểm tra tiếp `ESPIsUserPtr` và
+TArray đọc được; key `0x00CDCD00` đã lấy trực tiếp từ QBL, không còn ẩn số.
+
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`
 (code cũ vẫn còn nguyên, chỉ bị compile-out ở nhánh `#if`).
