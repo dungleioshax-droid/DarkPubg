@@ -20,6 +20,13 @@
 #include <math.h>
 #include <string.h>
 
+// Header này dùng toán tử ImVec2 -> phải có operators. ImGui yêu cầu define
+// TRƯỚC khi imgui.h được include lần đầu trong mỗi TU (imgui_internal.h sẽ
+// #error nếu thiếu). imguirender/DSEspImGui.mm cũng define lại ở đầu file
+// trước mọi include; ở đây để header tự đủ khi được dùng riêng (test).
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
+#define IMGUI_DEFINE_MATH_OPERATORS 1
+#endif
 #include "../Vendor/imgui/imgui.h"
 #include "ESPRenderShm.h"
 
@@ -127,7 +134,7 @@ static inline ESPRsDrawStats ESPImGuiAppendFrame(ImDrawList *dl, const ESPRsFram
                 break;
             }
             case ESPRsPrimPolyline: {
-                if (!f->points || c->pointCount < 2 || c->pointCount > 128) {
+                if (c->pointCount < 2 || c->pointCount > 128) {
                     st.skipped++;
                     continue;
                 }
