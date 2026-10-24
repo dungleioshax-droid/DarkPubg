@@ -46,6 +46,9 @@ static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowHeadDot = @"espShowHead
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowAIMark = @"espShowAIMark";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPShowBones = @"espShowBones";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyESPESPScale = @"espESPScale";
+/// Renderer ESP: YES = Dear ImGui + Metal trong process overlay riêng,
+/// NO = renderer QBL cũ (RemoteCall dựng CAShapeLayer trong SpringBoard).
+static HUDUserDefaultsKey const HUDUserDefaultsKeyESPImGui = @"espImGui";
 
 static HUDUserDefaultsKey const HUDUserDefaultsKeyUsesCustomFontSize = @"usesCustomFontSize";
 static HUDUserDefaultsKey const HUDUserDefaultsKeyRealCustomFontSize = @"realCustomFontSize";

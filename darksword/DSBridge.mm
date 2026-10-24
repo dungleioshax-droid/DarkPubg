@@ -23,11 +23,26 @@
 #include <mutex>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include <mach-o/dyld.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+
+#include "../ESP/ESPRenderShm.h"
+
+extern "C" char **environ;
+// Persona spawn (TrollStore): chạy tiến trình con như root, giống HUDHelper.
+extern "C" int posix_spawnattr_set_persona_np(const posix_spawnattr_t *__restrict, uid_t, uint32_t);
+extern "C" int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *__restrict, uid_t);
+extern "C" int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *__restrict, uid_t);
 
 extern "C" CFIndex CARenderServerGetDirtyFrameCount(void *);
 
@@ -3745,18 +3760,16 @@ static void ds_qbl_label_pass(RemoteCall *process, CFAbsoluteTime nowP) {
     }
 }
 
-static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
-                           CGRect portraitBounds, int orientation) {
-    if (!process || !process.trojanMem) return;
-    if (g_qblDead) return;
-    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
-    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
-
-    // ---- prefs 1Hz (đọc NSUserDefaults như bản cũ) ----
+// Đọc toggle ESP từ prefs, cache 1Hz — dùng chung cho renderer QBL
+// (RemoteCall sang SpringBoard) và renderer ImGui (process overlay riêng).
+// Hai renderer phải nhận cùng một bộ cờ; đọc prefs riêng mỗi bên sẽ làm
+// box/line/xương lệch trạng thái khi user vừa đổi toggle.
+static DSQBLFeat ds_qbl_feat_now(void) {
     static CFAbsoluteTime s_prefAt = 0;
     static DSQBLFeat s_feat = {
         YES, YES, YES, YES, YES, YES, YES, YES, NO, 1.0f
     };
+    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
     if (nowP - s_prefAt > 1.0) {
         s_prefAt = nowP;
         NSDictionary *p = nil;
@@ -3777,6 +3790,17 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
         // Engine chỉ đọc xương khi được bật (mặc định OFF để không thêm chi phí).
         ESPEngineSetBonesEnabled(s_feat.bones);
     }
+    return s_feat;
+}
+
+static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
+                           CGRect portraitBounds, int orientation) {
+    if (!process || !process.trojanMem) return;
+    if (g_qblDead) return;
+    std::lock_guard<std::recursive_mutex> _rc(s_rcBatchMutex);
+    CFAbsoluteTime nowP = CFAbsoluteTimeGetCurrent();
+
+    DSQBLFeat s_feat = ds_qbl_feat_now();
 
     // ---- show/hide window (1 call) ----
     BOOL wasHidden = g_espWindowHiddenCache;
@@ -4080,6 +4104,211 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
     ds_qbl_label_pass(process, nowP);
     if (g_qblRoot && g_qblRootHidden) g_qblRootHidden = NO;
     ESPDrawFrameReset();
+}
+
+// ---------------------------------------------------------------------------
+// Renderer ImGui (process overlay riêng: `DarkSpeed -espgui <shmPath>`)
+//
+// Vì sao ghi vào shared memory thay vì RemoteCall: renderer cũ phải gọi
+// setPath/setFrame/setText vào SpringBoard mỗi frame -> main thread của
+// SpringBoard gánh hàng chục remote call/frame (nguồn 0x8badf00d/respring).
+// Ở đây mỗi frame chỉ là 1 memcpy 41KB vào file mmap chung; process overlay
+// đọc và vẽ bằng Metal trong process của chính nó.
+//
+// Fail hết (spawn/mmaps lỗi, pref tắt) thì ds_espgui_publish trả NO để tick
+// rơi về renderer QBL cũ — ESP vẫn chạy, chỉ chậm hơn.
+// ---------------------------------------------------------------------------
+#define DS_ESPGUI_SHM_NAME "ds-esp-imgui.shm"
+#define DS_ESPGUI_MAX_FAILS 3
+
+static pid_t g_espguiPid = 0;
+static ESPRsShm *g_espguiShm = NULL;
+static char g_espguiShmPath[PATH_MAX] = {0};
+static uint64_t g_espguiFrameId = 0;
+static unsigned long g_espguiFrames = 0;
+static unsigned long g_espguiDrops = 0;
+static int g_espguiFails = 0;
+static CFAbsoluteTime g_espguiPrefAt = 0;
+static BOOL g_espguiPrefOn = YES;
+static BOOL g_espguiLogged = NO;
+// Frame 41KB: static (không lên stack của queue 60Hz).
+static ESPRsFrame s_espguiFrame; 
+
+static BOOL ds_espgui_enabled(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_espguiPrefAt > 1.0) {
+        g_espguiPrefAt = now;
+        NSDictionary *p = nil;
+        @try { p = ds_hud_preferences(); } @catch (__unused NSException *e) {}
+        g_espguiPrefOn = ds_esp_feature_pref_default(p, HUDUserDefaultsKeyESPImGui, YES);
+    }
+    return g_espguiPrefOn;
+}
+
+static BOOL ds_espgui_child_alive(void) {
+    if (g_espguiPid <= 0) return NO;
+    if (kill(g_espguiPid, 0) == 0) return YES;
+    g_espguiPid = 0; // chết (tự thoát do stale/app tắt) -> lần sau spawn lại
+    return NO;
+}
+
+static BOOL ds_espgui_active(void) {
+    return g_espguiShm != NULL && ds_espgui_child_alive();
+}
+
+// Spawn chính binary này với `-espgui <shm>` (persona root giống HUDHelper,
+// vì process overlay cần quyền tạo cửa sổ hệ thống + Metal).
+static BOOL ds_espgui_spawn(const char *shmPath) {
+    char exe[PATH_MAX] = {0};
+    uint32_t exeSize = (uint32_t)sizeof(exe);
+    if (_NSGetExecutablePath(exe, &exeSize) != 0 || !exe[0]) {
+        ESPLog("espgui: _NSGetExecutablePath failed");
+        return NO;
+    }
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+#if !TARGET_OS_SIMULATOR
+    posix_spawnattr_set_persona_np(&attr, 99, 1);
+    posix_spawnattr_set_persona_uid_np(&attr, 0);
+    posix_spawnattr_set_persona_gid_np(&attr, 0);
+#endif
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    pid_t pid = 0;
+    const char *argv[] = { exe, "-espgui", shmPath, NULL };
+    int rc = posix_spawn(&pid, exe, NULL, &attr, (char **)argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (rc != 0) {
+        ESPLog("espgui: posix_spawn rc=%d (%s)", rc, strerror(rc));
+        return NO;
+    }
+    g_espguiPid = pid;
+    ESPLog("espgui: spawn ok pid=%d shm=%s", (int)pid, shmPath);
+    return YES;
+}
+
+static BOOL ds_espgui_start(void) {
+    if (ds_espgui_active()) return YES;
+    if (g_espguiFails >= DS_ESPGUI_MAX_FAILS) return NO;
+    if (!g_espguiShmPath[0]) {
+        NSString *dir = NSTemporaryDirectory();
+        if (!dir.length) dir = @"/tmp";
+        NSString *path = [dir stringByAppendingPathComponent:@DS_ESPGUI_SHM_NAME];
+        if (!path.length) return NO;
+        strncpy(g_espguiShmPath, path.fileSystemRepresentation, sizeof(g_espguiShmPath) - 1);
+    }
+    if (!g_espguiShm) {
+        g_espguiShm = ESPRsShmOpen(g_espguiShmPath);
+        if (!g_espguiShm) {
+            g_espguiFails++;
+            if (!g_espguiLogged) {
+                g_espguiLogged = YES;
+                ESPLog("espgui: mmap %s failed -> fallback QBL", g_espguiShmPath);
+            }
+            return NO;
+        }
+    }
+    if (ds_espgui_child_alive()) return YES;
+    if (!ds_espgui_spawn(g_espguiShmPath)) {
+        g_espguiFails++;
+        return NO;
+    }
+    return YES;
+}
+
+// Gửi frame rỗng để overlay xoá hình ngay (trước khi kill), rồi (tuỳ chọn)
+// kill process overlay.
+static void ds_espgui_stop(BOOL killChild) {
+    if (g_espguiShm) {
+        ESPRsFrame *f = &s_espguiFrame;
+        ESPRsFrameReset(f);
+        f->flags = 0;
+        f->frameId = ++g_espguiFrameId;
+        f->publishTime = CFAbsoluteTimeGetCurrent();
+        ESPRsShmPublish(g_espguiShm, f);
+    }
+    if (killChild && g_espguiPid > 0) {
+        kill(g_espguiPid, SIGKILL);
+        ESPLog("espgui: killed pid=%d", (int)g_espguiPid);
+        g_espguiPid = 0;
+    }
+}
+
+// Build draw list (dùng chung builder QBL) -> 1 frame trong shared memory.
+// Trả NO khi không dùng được ImGui (pref tắt / spawn/mmap lỗi).
+static BOOL ds_espgui_publish(ESPBox2D *boxes, int count, CGRect portraitBounds,
+                              int orientation) {
+    if (!ds_espgui_enabled()) return NO;
+    if (!ds_espgui_start()) return NO;
+
+    DSQBLFeat feat = ds_qbl_feat_now();
+    ds_qbl_build_frame(boxes, count, portraitBounds, orientation, &feat);
+    ESPDrawFrameEnd();
+
+    ESPRsFrame *f = &s_espguiFrame;
+    ESPRsFrameReset(f);
+    CGSize vp = ESPDrawFrameViewport();
+    f->viewportW = (float)vp.width;
+    f->viewportH = (float)vp.height;
+    f->orientation = orientation;
+    f->flags = (count > 0) ? ESP_RSHM_FLAG_VISIBLE : 0;
+    f->frameId = ++g_espguiFrameId;
+    f->publishTime = CFAbsoluteTimeGetCurrent();
+
+    const CGPoint *pts = ESPDrawFramePoints();
+    int ptCount = ESPDrawFramePointCount();
+    if (pts && ptCount > 0) {
+        if (ptCount > ESP_RSHM_MAX_POINTS) ptCount = ESP_RSHM_MAX_POINTS;
+        for (int i = 0; i < ptCount; i++) {
+            f->points[i].x = (float)pts[i].x;
+            f->points[i].y = (float)pts[i].y;
+        }
+        f->pointCount = (uint32_t)ptCount;
+    }
+
+    const ESPDrawCommand *cmds = ESPDrawFrameCommands();
+    int cmdCount = ESPDrawFrameCount();
+    int copied = 0;
+    if (cmds) {
+        for (int i = 0; i < cmdCount && copied < ESP_RSHM_MAX_CMDS; i++) {
+            const ESPDrawCommand *c = &cmds[i];
+            if (c->prim == ESPDrawPrimPolyline &&
+                ((int)c->pointStart + (int)c->pointCount) > (int)f->pointCount) {
+                g_espguiDrops++;
+                continue;
+            }
+            ESPRsCmd *rc = &f->cmds[copied++];
+            memset(rc, 0, sizeof(*rc));
+            rc->prim = c->prim;
+            rc->filled = c->filled;
+            rc->outlined = c->outlined;
+            rc->align = c->align;
+            rc->bucket = c->bucket;
+            rc->color = c->color;
+            rc->width = c->width;
+            rc->radius = c->radius;
+            rc->rx = (float)c->rect.origin.x;
+            rc->ry = (float)c->rect.origin.y;
+            rc->rw = (float)c->rect.size.width;
+            rc->rh = (float)c->rect.size.height;
+            rc->pointStart = c->pointStart;
+            rc->pointCount = c->pointCount;
+            rc->fontSize = c->fontSize;
+            rc->tx = c->tx;
+            rc->ty = c->ty;
+            strncpy(rc->text, c->text, sizeof(rc->text) - 1);
+        }
+    }
+    f->cmdCount = (uint32_t)copied;
+    ESPRsShmPublish(g_espguiShm, f);
+    g_espguiFrames++;
+    ESPDrawFrameReset();
+
+    if (!g_espguiLogged) {
+        g_espguiLogged = YES;
+        ESPLog("espgui: publishing cmds=%d pts=%u pid=%d", copied, f->pointCount, (int)g_espguiPid);
+    }
+    return YES;
 }
 
 static void __attribute__((unused))
@@ -4708,7 +4937,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw82-qbl-actors-decrypt"
+#define DS_ESP_BUILD_TAG "kernrw83-imgui-metal"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
@@ -4818,7 +5047,16 @@ static void ds_esp_present_single(DSESPFrame *frame) {
         }
         if (frame->count < 0) {
             // Lệnh hide từ worker.
+            ds_espgui_stop(NO); // frame rỗng -> overlay ImGui xoá hình
             if (g_espWindow) ds_esp_overlay_hide(g_springBoard);
+        } else if (ds_espgui_publish(frame->boxes, frame->count,
+                                     frame->bounds, frame->orient)) {
+            // ImGui overlay đã vẽ: tick này KHÔNG có remote call nào sang
+            // SpringBoard. Overlay QBL cũ (nếu còn từ lần chạy trước) ẩn đi
+            // một lần để không vẽ trùng 2 lớp.
+            if (g_espWindow && !g_espWindowHiddenCache) {
+                ds_esp_overlay_hide(g_springBoard);
+            }
         } else if ((!g_espWindow || !g_espContainer) &&
                    !ds_esp_overlay_ensure(g_springBoard, frame->bounds)) {
             // Ensure fail đã log bên worker, bỏ tick này.
@@ -5519,6 +5757,9 @@ static void ds_finish_disable(void) {
     ds_set_stage(ds_localized(@"Closing HUD"));
     ds_unregister_hud_notifications();
     ds_stop_rate_timer();
+    // Overlay ImGui (process riêng) phải chết cùng session, nếu không nó sẽ
+    // nằm trên game với frame cuối cùng.
+    ds_espgui_stop(YES);
     RemoteCall *process = g_springBoard;
     ESPLog("disable: session=%d hudWin=0x%llx hudPid=%d espWin=0x%llx espPid=%d",
            process ? (process.trojanMem ? 1 : -1) : -2,

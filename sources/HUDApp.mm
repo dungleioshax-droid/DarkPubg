@@ -13,6 +13,7 @@
 #import "IOKit+SPI.h"
 #import "HUDHelper.h"
 #import "DSBridge.h"
+#import "../imguirender/DSEspImGui.h"
 #import "TSEventFetcher.h"
 #import "BackboardServices.h"
 #import "AXEventRepresentation.h"
@@ -169,6 +170,41 @@ int main(int argc, char *argv[])
                 // Exit the current instance of HUD.
                 kill(pid, SIGKILL);
             });
+
+            CFRunLoopRun();
+            return EXIT_SUCCESS;
+        }
+        else if (strcmp(argv[1], "-espgui") == 0)
+        {
+            // Overlay ESP bằng Dear ImGui + Metal (xem imguirender/DSEspImGui.mm).
+            // Khác nhánh -hud: không có HUD/backdrop, chỉ một cửa sổ trong suốt
+            // level 10000010 chứa CAMetalLayer do ImGui vẽ.
+            NSString *shmPath = (argc > 2) ? [NSString stringWithUTF8String:argv[2]] : nil;
+            log_debug(OS_LOG_DEFAULT, "ESP ImGui overlay launching shm=%{public}@", shmPath);
+
+            [UIScreen initialize];
+            CFRunLoopGetCurrent();
+
+            GSInitialize();
+            BKSDisplayServicesStart();
+            UIApplicationInitialize();
+
+            UIApplicationInstantiateSingleton(objc_getClass("HUDMainApplication"));
+            static DSEspGuiAppDelegate *espDelegate = nil;
+            espDelegate = [[DSEspGuiAppDelegate alloc] init];
+            espDelegate.shmPath = shmPath;
+            [UIApplication.sharedApplication setDelegate:espDelegate];
+            [UIApplication.sharedApplication _accessibilityInit];
+
+            [NSRunLoop currentRunLoop];
+            BKSHIDEventRegisterEventCallback(_HUDEventCallback);
+
+            if (@available(iOS 15.0, *)) {
+                GSEventInitialize(0);
+                GSEventPushRunLoopMode(kCFRunLoopDefaultMode);
+            }
+
+            [UIApplication.sharedApplication __completeAndRunAsPlugin];
 
             CFRunLoopRun();
             return EXIT_SUCCESS;
