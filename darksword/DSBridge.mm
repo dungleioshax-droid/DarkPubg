@@ -4133,7 +4133,6 @@ static int g_espguiFails = 0;
 static BOOL g_espguiWasLive = NO; // đã publish visible frame tối thiểu 1 lần
 static CFAbsoluteTime g_espguiPrefAt = 0;
 static BOOL g_espguiPrefOn = YES;
-static BOOL g_espguiDisabledLogged = NO;
 static BOOL g_espguiLogged = NO;
 // Frame 41KB: static (không lên stack của queue 60Hz).
 static ESPRsFrame s_espguiFrame; 
@@ -4247,16 +4246,7 @@ static BOOL ds_espgui_spawn(const char *shmPath) {
 
 static BOOL ds_espgui_start(void) {
     if (ds_espgui_active()) return YES;
-    if (g_espguiFails >= DS_ESPGUI_MAX_FAILS) {
-        if (!g_espguiDisabledLogged) {
-            // Log một lần: spawn bị chặn (sandbox/euid không được phép) — session
-            // này chỉ dùng renderer QBL, khỏi spam EPERM nữa (kernrw85).
-            g_espguiDisabledLogged = YES;
-            ESPLog("espgui: spawn bị chặn %d lần (euid=%d) -> dùng QBL renderer cả session",
-                   DS_ESPGUI_MAX_FAILS, (int)geteuid());
-        }
-        return NO;
-    }
+    if (g_espguiFails >= DS_ESPGUI_MAX_FAILS) return NO;
     if (!g_espguiShmPath[0]) {
         NSString *dir = NSTemporaryDirectory();
         if (!dir.length) dir = @"/tmp";
@@ -5015,7 +5005,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw85-present30hz"
+#define DS_ESP_BUILD_TAG "kernrw84-espgui-plainspawn"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
