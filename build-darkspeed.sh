@@ -38,23 +38,8 @@ if [ ! -d "$application_path" ]; then
     exit 1
 fi
 
-mkdir -p "$temporary_dir/Payload"
+mkdir -p "$temporary_dir/Payload" "$package_dir"
 cp -R "$application_path" "$temporary_dir/Payload/DarkSpeed.app"
-
-# Kernrw86: nhúng entitlements (spawn root/persona + window hosting + Metal)
-# vào binary KHỞI THÀNH rồi mới pack IPA. Bước này tách khỏi code-signing
-# Xcode nên hoạt động cả khi build unsigned. Cần ldid trên runner: cài ở
-# workflow "Build Release".
-if [ -f supports/entitlements-darksword.plist ]; then
-    if command -v ldid >/dev/null 2>&1; then
-        echo "Embedding entitlements with ldid (persona-mgmt/stacked-hc/Metal/task_ports)"
-        ldid -S"$(pwd)/supports/entitlements-darksword.plist" \
-            "$temporary_dir/Payload/DarkSpeed.app/DarkSpeed"
-    else
-        echo "WARNING: ldid not found — entitlements NOT embedded; -espgui spawn sẽ bị chặn trên DarkSword" >&2
-    fi
-fi
-
 (cd "$temporary_dir" && /usr/bin/zip -qry "$package_path" Payload)
 
 if [ "${DARKSPEED_UNSIGNED:-0}" = "1" ]; then

@@ -28,13 +28,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install ldid (κειnh entitlements vào binary)
-        run: |
-          if ! command -v ldid >/dev/null 2>&1; then
-            brew install ldid
-          fi
-          ldid -V || true
-
       - name: Setup Xcode version
         uses: maxim-lobanov/setup-xcode@v1
         with:
