@@ -1100,42 +1100,13 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
     return number ? number.doubleValue : fallback;
 }
 
-static void ds_esp_ensure_orientation_observer(void); // forward decl
+static int ds_esp_game_orientation(void); // forward decl
 
 static UIInterfaceOrientation ds_interface_orientation(void) {
-    ds_esp_ensure_orientation_observer();
-
-    // 1. Kiểm tra cảm biến vật lý UIDevice
-    UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
-    if (dev == UIDeviceOrientationLandscapeLeft)  return UIInterfaceOrientationLandscapeRight;
-    if (dev == UIDeviceOrientationLandscapeRight) return UIInterfaceOrientationLandscapeLeft;
-
-    // 2. Kiểm tra FrontBoardServices orientation observer
-    if (g_espOrientationObserver) {
-        long long cur = [g_espOrientationObserver activeInterfaceOrientation];
-        if (cur == UIInterfaceOrientationLandscapeLeft || cur == UIInterfaceOrientationLandscapeRight) {
-            return (UIInterfaceOrientation)cur;
-        }
+    int o = ds_esp_game_orientation();
+    if (o == UIInterfaceOrientationLandscapeLeft || o == UIInterfaceOrientationLandscapeRight) {
+        return (UIInterfaceOrientation)o;
     }
-
-    // 3. Kiểm tra BackBoard hardware orientation
-    int bks = ds_bks_orientation();
-    if (bks == UIInterfaceOrientationLandscapeLeft || bks == UIInterfaceOrientationLandscapeRight) {
-        return (UIInterfaceOrientation)bks;
-    }
-
-    // 4. Foreground app orientation (chỉ nhận nếu là landscape)
-    int fg = g_foregroundOrientation.load();
-    if (fg == UIInterfaceOrientationLandscapeLeft || fg == UIInterfaceOrientationLandscapeRight) {
-        return (UIInterfaceOrientation)fg;
-    }
-
-    int remoteOrientation = g_remoteOrientation.load();
-    if (remoteOrientation == UIInterfaceOrientationLandscapeLeft || remoteOrientation == UIInterfaceOrientationLandscapeRight) {
-        return (UIInterfaceOrientation)remoteOrientation;
-    }
-
-    // Mặc định luôn là LandscapeRight (kiểu ngang cho game PUBG)
     return UIInterfaceOrientationLandscapeRight;
 }
 
@@ -1188,6 +1159,7 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
                                              NSString *text) {
     DSHUDPresentation presentation = {};
     UIInterfaceOrientation orientation = ds_interface_orientation();
+    (void)orientation;
     presentation.landscape = YES; // Luôn luôn là kiểu ngang cho game DarkPubg
 
     HUDUserDefaultsKey modeKey = HUDUserDefaultsKeySelectedModeLandscape;
