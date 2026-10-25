@@ -154,6 +154,24 @@ static NSAttributedString *formattedNSAttributedString(BOOL __unused isFocused)
 static const CACornerMask kCornerMaskBottom = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
 static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
 
+static inline CGFloat orientationAngle(UIInterfaceOrientation orientation)
+{
+    switch (orientation) {
+        case UIInterfaceOrientationLandscapeLeft:
+            return -M_PI_2;
+        case UIInterfaceOrientationLandscapeRight:
+        default:
+            return M_PI_2;
+    }
+}
+
+static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRect bounds)
+{
+    CGFloat w = MAX(bounds.size.width, bounds.size.height);
+    CGFloat h = MIN(bounds.size.width, bounds.size.height);
+    return CGRectMake(0, 0, w, h);
+}
+
 @implementation HUDRootViewController {
     NSMutableDictionary *_userDefaults;
     NSMutableArray <NSLayoutConstraint *> *_constraints;
@@ -927,24 +945,6 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 @end
 
 @implementation HUDRootViewController (Troll)
-
-static inline CGFloat orientationAngle(UIInterfaceOrientation orientation)
-{
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft:
-            return -M_PI_2;
-        case UIInterfaceOrientationLandscapeRight:
-        default:
-            return M_PI_2;
-    }
-}
-
-static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRect bounds)
-{
-    CGFloat w = MAX(bounds.size.width, bounds.size.height);
-    CGFloat h = MIN(bounds.size.width, bounds.size.height);
-    return CGRectMake(0, 0, w, h);
-}
 
 - (void)updateOrientation:(UIInterfaceOrientation)orientation animateWithDuration:(NSTimeInterval)duration
 {
