@@ -285,24 +285,21 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 
 - (BOOL)isLandscapeOrientation
 {
-    BOOL isLandscape;
-    if (_orientation == UIInterfaceOrientationUnknown) {
-        isLandscape = CGRectGetWidth(self.view.bounds) > CGRectGetHeight(self.view.bounds);
-    } else {
-        isLandscape = UIInterfaceOrientationIsLandscape(_orientation);
-    }
-    return isLandscape;
+    return YES;
 }
 
 - (HUDUserDefaultsKey)selectedModeKeyForCurrentOrientation
 {
-    return [self isLandscapeOrientation] ? HUDUserDefaultsKeySelectedModeLandscape : HUDUserDefaultsKeySelectedMode;
+    return HUDUserDefaultsKeySelectedModeLandscape;
 }
 
 - (HUDPresetPosition)selectedModeForCurrentOrientation
 {
     [self loadUserDefaults:NO];
-    NSNumber *mode = [_userDefaults objectForKey:[self selectedModeKeyForCurrentOrientation]];
+    NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeySelectedModeLandscape];
+    if (mode == nil) {
+        mode = [_userDefaults objectForKey:HUDUserDefaultsKeySelectedMode];
+    }
     return mode != nil ? (HUDPresetPosition)[mode integerValue] : HUDPresetPositionTopCenter;
 }
 
@@ -436,6 +433,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     self = [super init];
     if (self) {
         _constraints = [NSMutableArray array];
+        _orientation = UIInterfaceOrientationLandscapeRight;
         [self registerNotifications];
         _orientationObserver = [[objc_getClass("FBSOrientationObserver") alloc] init];
         __weak HUDRootViewController *weakSelf = self;
@@ -528,6 +526,12 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 
     [_contentView setUserInteractionEnabled:YES];
 
+    _orientation = UIInterfaceOrientationLandscapeRight;
+    CGRect initialBounds = orientationBounds(_orientation, [UIScreen mainScreen].bounds);
+    [self.view setBounds:initialBounds];
+    [self.view setTransform:CGAffineTransformMakeRotation(orientationAngle(_orientation))];
+    [self.view setHidden:NO];
+
     [self reloadUserDefaults];
 }
 
@@ -536,17 +540,14 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     [super viewDidAppear:animated];
     notify_post(NOTIFY_LAUNCHED_HUD);
 
-    // Query orientation hiện tại và apply ngay khi HUD xuất hiện.
-    // FBSOrientationObserver chỉ thông báo khi orientation *thay đổi*,
-    // nên nếu thiết bị đã ở landscape sẵn thì không có event nào fire.
-    // Phải chủ động query bằng activeInterfaceOrientation để HUD tự động
-    // hiển thị kiểu ngang ngay từ đầu.
     UIInterfaceOrientation currentOrientation = (UIInterfaceOrientation)[_orientationObserver activeInterfaceOrientation];
-    if (currentOrientation != UIInterfaceOrientationUnknown &&
-        currentOrientation != _orientation)
+    if (currentOrientation != UIInterfaceOrientationLandscapeLeft &&
+        currentOrientation != UIInterfaceOrientationLandscapeRight)
     {
-        [self updateOrientation:currentOrientation animateWithDuration:0];
+        currentOrientation = UIInterfaceOrientationLandscapeRight;
     }
+    [self updateOrientation:currentOrientation animateWithDuration:0];
+    [self.view setHidden:NO];
 }
 
 - (void)resetLoopTimer
@@ -574,12 +575,7 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
     [NSLayoutConstraint deactivateConstraints:_constraints];
     [_constraints removeAllObjects];
 
-    BOOL isLandscape;
-    if (_orientation == UIInterfaceOrientationUnknown) {
-        isLandscape = CGRectGetWidth(self.view.bounds) > CGRectGetHeight(self.view.bounds);
-    } else {
-        isLandscape = UIInterfaceOrientationIsLandscape(_orientation);
-    }
+    BOOL isLandscape = YES;
 
     HUDPresetPosition selectedMode = [self selectedModeForCurrentOrientation];
     BOOL isCentered = (selectedMode == HUDPresetPositionTopCenter || selectedMode == HUDPresetPositionTopCenterMost);
@@ -935,59 +931,59 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 static inline CGFloat orientationAngle(UIInterfaceOrientation orientation)
 {
     switch (orientation) {
-        case UIInterfaceOrientationPortraitUpsideDown:
-            return M_PI;
         case UIInterfaceOrientationLandscapeLeft:
             return -M_PI_2;
         case UIInterfaceOrientationLandscapeRight:
-            return M_PI_2;
         default:
-            return 0;
+            return M_PI_2;
     }
 }
 
 static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRect bounds)
 {
-    switch (orientation) {
-        case UIInterfaceOrientationLandscapeLeft:
-        case UIInterfaceOrientationLandscapeRight:
-            return CGRectMake(0, 0, bounds.size.height, bounds.size.width);
-        default:
-            return bounds;
-    }
+    CGFloat w = MAX(bounds.size.width, bounds.size.height);
+    CGFloat h = MIN(bounds.size.width, bounds.size.height);
+    return CGRectMake(0, 0, w, h);
 }
 
 - (void)updateOrientation:(UIInterfaceOrientation)orientation animateWithDuration:(NSTimeInterval)duration
 {
-    // Luôn xoay HUD theo hướng thiết bị (ngang/dọc) để HUD tự động
-    // hiển thị kiểu ngang khi xoay ngang, không bị ẩn.
+    // HUD DarkPubg luôn luôn là kiểu ngang (Landscape) cho game.
+    // Nếu thiết bị xoay sang LandscapeLeft thì xoay LandscapeLeft (-90°).
+    // Nếu thiết bị xoay sang LandscapeRight (hoặc Portrait/khác) thì giữ LandscapeRight (+90°).
+    UIInterfaceOrientation targetOrientation = orientation;
+    if (targetOrientation != UIInterfaceOrientationLandscapeLeft &&
+        targetOrientation != UIInterfaceOrientationLandscapeRight)
+    {
+        targetOrientation = UIInterfaceOrientationLandscapeRight;
+    }
 
-    if (orientation == _orientation) {
+    if (targetOrientation == _orientation && !self.view.hidden) {
         return;
     }
 
-    _orientation = orientation;
+    _orientation = targetOrientation;
     [self cancelPreviousPerformRequestsWithTarget:_contentView];
 
-    CGRect bounds = orientationBounds(orientation, [UIScreen mainScreen].bounds);
+    CGRect bounds = orientationBounds(targetOrientation, [UIScreen mainScreen].bounds);
     [self.view setNeedsUpdateConstraints];
-    [self.view setHidden:YES];
     [self.view setBounds:bounds];
 
     [self resetGestureRecognizers];
     [self onBlur:_contentView duration:duration];
 
     __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:duration animations:^{
-        [weakSelf.view setTransform:CGAffineTransformMakeRotation(orientationAngle(orientation))];
+    [UIView animateWithDuration:(duration > 0 ? duration : 0.2) animations:^{
+        [weakSelf.view setTransform:CGAffineTransformMakeRotation(orientationAngle(targetOrientation))];
     } completion:^(BOOL finished) {
         [weakSelf.view setHidden:NO];
     }];
+    [self.view setHidden:NO];
 }
 
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations
 {
-    return UIInterfaceOrientationMaskPortrait;
+    return UIInterfaceOrientationMaskLandscape;
 }
 
 @end

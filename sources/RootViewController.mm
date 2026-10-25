@@ -600,26 +600,26 @@ static const CGFloat _gAuthorLabelBottomConstraintConstantRegular = -80.f;
 
 - (HUDUserDefaultsKey)selectedModeKeyForCurrentOrientation
 {
-    return [self isLandscapeOrientation] ? HUDUserDefaultsKeySelectedModeLandscape : HUDUserDefaultsKeySelectedMode;
+    return HUDUserDefaultsKeySelectedModeLandscape;
 }
 
 - (HUDPresetPosition)selectedModeForCurrentOrientation
 {
     [self loadUserDefaults:NO];
-    NSNumber *mode = [_userDefaults objectForKey:[self selectedModeKeyForCurrentOrientation]];
+    NSNumber *mode = [_userDefaults objectForKey:HUDUserDefaultsKeySelectedModeLandscape];
+    if (mode == nil) {
+        mode = [_userDefaults objectForKey:HUDUserDefaultsKeySelectedMode];
+    }
     return mode != nil ? (HUDPresetPosition)[mode integerValue] : HUDPresetPositionTopCenter;
 }
 
 - (void)setSelectedModeForCurrentOrientation:(HUDPresetPosition)selectedMode
 {
     [self loadUserDefaults:NO];
-    // Remove some keys that are not persistent
-    if ([self isLandscapeOrientation]) {
-        [_userDefaults removeObjectForKey:HUDUserDefaultsKeyCurrentLandscapePositionY];
-    } else {
-        [_userDefaults removeObjectForKey:HUDUserDefaultsKeyCurrentPositionY];
-    }
-    [_userDefaults setObject:@(selectedMode) forKey:[self selectedModeKeyForCurrentOrientation]];
+    [_userDefaults removeObjectForKey:HUDUserDefaultsKeyCurrentLandscapePositionY];
+    [_userDefaults removeObjectForKey:HUDUserDefaultsKeyCurrentPositionY];
+    [_userDefaults setObject:@(selectedMode) forKey:HUDUserDefaultsKeySelectedMode];
+    [_userDefaults setObject:@(selectedMode) forKey:HUDUserDefaultsKeySelectedModeLandscape];
     [self saveUserDefaults];
 }
 

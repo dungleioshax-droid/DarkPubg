@@ -1103,44 +1103,40 @@ static CGFloat ds_pref_double(NSDictionary *preferences, HUDUserDefaultsKey key,
 static void ds_esp_ensure_orientation_observer(void); // forward decl
 
 static UIInterfaceOrientation ds_interface_orientation(void) {
-    // kernrw52j: đảm bảo observer orientation được khởi tạo (cho HUD text window).
     ds_esp_ensure_orientation_observer();
-    // Ưu tiên orientation của game (foreground) và thiết bị, không chỉ
-    // SpringBoard scene (kẹt portrait). Nếu không, HUD chỉ đúng khi xoay máy
-    // trước khi mở HUD — không tự xoay theo game.
+
+    // 1. Kiểm tra cảm biến vật lý UIDevice
+    UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
+    if (dev == UIDeviceOrientationLandscapeLeft)  return UIInterfaceOrientationLandscapeRight;
+    if (dev == UIDeviceOrientationLandscapeRight) return UIInterfaceOrientationLandscapeLeft;
+
+    // 2. Kiểm tra FrontBoardServices orientation observer
+    if (g_espOrientationObserver) {
+        long long cur = [g_espOrientationObserver activeInterfaceOrientation];
+        if (cur == UIInterfaceOrientationLandscapeLeft || cur == UIInterfaceOrientationLandscapeRight) {
+            return (UIInterfaceOrientation)cur;
+        }
+    }
+
+    // 3. Kiểm tra BackBoard hardware orientation
+    int bks = ds_bks_orientation();
+    if (bks == UIInterfaceOrientationLandscapeLeft || bks == UIInterfaceOrientationLandscapeRight) {
+        return (UIInterfaceOrientation)bks;
+    }
+
+    // 4. Foreground app orientation (chỉ nhận nếu là landscape)
     int fg = g_foregroundOrientation.load();
-    if (fg == UIInterfaceOrientationLandscapeLeft || fg == UIInterfaceOrientationLandscapeRight ||
-        fg == UIInterfaceOrientationPortrait || fg == UIInterfaceOrientationPortraitUpsideDown) {
+    if (fg == UIInterfaceOrientationLandscapeLeft || fg == UIInterfaceOrientationLandscapeRight) {
         return (UIInterfaceOrientation)fg;
     }
-    // Thiết bị vật lý
-    UIDeviceOrientation dev = UIDevice.currentDevice.orientation;
-    UIInterfaceOrientation mapped = UIInterfaceOrientationUnknown;
-    switch (dev) {
-        case UIDeviceOrientationLandscapeLeft:  mapped = UIInterfaceOrientationLandscapeRight; break;
-        case UIDeviceOrientationLandscapeRight: mapped = UIInterfaceOrientationLandscapeLeft; break;
-        case UIDeviceOrientationPortrait:       mapped = UIInterfaceOrientationPortrait; break;
-        case UIDeviceOrientationPortraitUpsideDown: mapped = UIInterfaceOrientationPortraitUpsideDown; break;
-        default: break;
+
+    int remoteOrientation = g_remoteOrientation.load();
+    if (remoteOrientation == UIInterfaceOrientationLandscapeLeft || remoteOrientation == UIInterfaceOrientationLandscapeRight) {
+        return (UIInterfaceOrientation)remoteOrientation;
     }
-    if (mapped != UIInterfaceOrientationUnknown) return mapped;
-    // SpringBoard scene (fallback)
-    UIInterfaceOrientation remoteOrientation =
-        (UIInterfaceOrientation)g_remoteOrientation.load();
-    if (remoteOrientation != UIInterfaceOrientationUnknown) {
-        return remoteOrientation;
-    }
-    __block UIInterfaceOrientation orientation = UIInterfaceOrientationPortrait;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (![scene isKindOfClass:UIWindowScene.class]) continue;
-            UIWindowScene *windowScene = (UIWindowScene *)scene;
-            if (windowScene.activationState == UISceneActivationStateUnattached) continue;
-            orientation = windowScene.interfaceOrientation;
-            break;
-        }
-    });
-    return orientation;
+
+    // Mặc định luôn là LandscapeRight (kiểu ngang cho game PUBG)
+    return UIInterfaceOrientationLandscapeRight;
 }
 
 static void ds_screen_geometry(CGRect *bounds, UIEdgeInsets *safeInsets) {
@@ -1192,12 +1188,13 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
                                              NSString *text) {
     DSHUDPresentation presentation = {};
     UIInterfaceOrientation orientation = ds_interface_orientation();
-    presentation.landscape = UIInterfaceOrientationIsLandscape(orientation);
+    presentation.landscape = YES; // Luôn luôn là kiểu ngang cho game DarkPubg
 
-    HUDUserDefaultsKey modeKey = presentation.landscape
-        ? HUDUserDefaultsKeySelectedModeLandscape
-        : HUDUserDefaultsKeySelectedMode;
+    HUDUserDefaultsKey modeKey = HUDUserDefaultsKeySelectedModeLandscape;
     NSNumber *storedMode = preferences[modeKey];
+    if (storedMode == nil) {
+        storedMode = preferences[HUDUserDefaultsKeySelectedMode];
+    }
     HUDPresetPosition mode = storedMode
         ? (HUDPresetPosition)storedMode.integerValue
         : HUDPresetPositionTopCenter;
@@ -1241,6 +1238,10 @@ static DSHUDPresentation ds_hud_presentation(NSDictionary *preferences,
     CGRect screenBounds;
     UIEdgeInsets safeInsets;
     ds_screen_geometry(&screenBounds, &safeInsets);
+    CGFloat sw = MAX(screenBounds.size.width, screenBounds.size.height);
+    CGFloat sh = MIN(screenBounds.size.width, screenBounds.size.height);
+    screenBounds = CGRectMake(0, 0, sw, sh);
+
     CGFloat realOffsetX = 0;
     CGFloat realOffsetY = 0;
     if (ds_pref_bool(preferences, HUDUserDefaultsKeyUsesCustomOffset)) {
