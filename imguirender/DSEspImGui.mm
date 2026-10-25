@@ -21,12 +21,6 @@
 //  SpringBoard mỗi frame — đó là nguồn watchdog 0x8badf00d/respring.
 //
 
-// PHẢI định nghĩa trước khi bất kỳ header ImGui nào được include: imgui.cpp
-// include imgui_internal.h và nó #error nếu imgui.h đã được include từ trước
-// mà thiếu define này (chính là lỗi build CI đầu tiên: "Please
-// '#define IMGUI_DEFINE_MATH_OPERATORS' _BEFORE_ including imgui.h").
-#define IMGUI_DEFINE_MATH_OPERATORS 1
-
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
