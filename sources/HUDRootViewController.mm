@@ -947,31 +947,8 @@ static inline CGRect orientationBounds(UIInterfaceOrientation orientation, CGRec
 
 - (void)updateOrientation:(UIInterfaceOrientation)orientation animateWithDuration:(NSTimeInterval)duration
 {
-    BOOL usesRotation = [self usesRotation];
-
-    if (!usesRotation)
-    {
-        [self onBlur:_contentView duration:0];
-
-        if (orientation == UIInterfaceOrientationPortrait)
-        {
-            __weak typeof(self) weakSelf = self;
-            [UIView animateWithDuration:duration animations:^{
-                __strong typeof(weakSelf) strongSelf = weakSelf;
-                strongSelf->_contentView.alpha = strongSelf->_isFocused ? 1.0 : HUD_INACTIVE_OPACITY;
-            }];
-        }
-        else
-        {
-            __weak typeof(self) weakSelf = self;
-            [UIView animateWithDuration:duration animations:^{
-                __strong typeof(weakSelf) strongSelf = weakSelf;
-                strongSelf->_contentView.alpha = 0.0;
-            }];
-        }
-
-        return;
-    }
+    // Luôn xoay HUD theo hướng thiết bị (ngang/dọc) để HUD tự động
+    // hiển thị kiểu ngang khi xoay ngang, không bị ẩn.
 
     if (orientation == _orientation) {
         return;
