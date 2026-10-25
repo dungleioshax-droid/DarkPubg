@@ -316,10 +316,6 @@ static const double kDSESPFadeSeconds = 0.25;
     self.window = window;
 
     // Đăng ký với SpringBoard để cửa sổ nổi trên game (giống HUD -hud).
-    // kernrw84: nếu đăng ký thất bại (không đủ quyền, ví dụ child được spawn
-    // không có persona root) thì exit ngay — cửa sổ nền không hiển thị được,
-    // process còn lại thì tick render cũng chạy mà không ai nhìn thấy.
-    BOOL hostingOk = NO;
     @try {
         Class hosting = objc_getClass("SBSAccessibilityWindowHostingController");
         if (hosting) {
@@ -333,18 +329,9 @@ static const double kDSESPFadeSeconds = 0.25;
             [inv setArgument:&contextId atIndex:2];
             [inv setArgument:&level atIndex:3];
             [inv invoke];
-            hostingOk = YES;
-        } else {
-            os_log_error(OS_LOG_DEFAULT, "[ESPImGui] SBSAccessibilityWindowHostingController not available");
         }
     } @catch (NSException *e) {
         os_log_error(OS_LOG_DEFAULT, "[ESPImGui] hosting register failed: %{public}@", e.reason);
-    }
-
-    if (!hostingOk) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ exit(0); });
-        return NO;
     }
 
     if (![_renderer start]) {

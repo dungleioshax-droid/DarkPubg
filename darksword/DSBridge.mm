@@ -4120,10 +4120,8 @@ static void ds_qbl_present(RemoteCall *process, ESPBox2D *boxes, int count,
 // ---------------------------------------------------------------------------
 #define DS_ESPGUI_SHM_NAME "ds-esp-imgui.shm"
 #define DS_ESPGUI_MAX_FAILS 3
-// kernrw84-espgui-plainspawn
 
 static pid_t g_espguiPid = 0;
-static CFAbsoluteTime g_espguiLastSpawnAt = 0;
 static ESPRsShm *g_espguiShm = NULL;
 static char g_espguiShmPath[PATH_MAX] = {0};
 static uint64_t g_espguiFrameId = 0;
@@ -4151,15 +4149,7 @@ static BOOL ds_espgui_enabled(void) {
 static BOOL ds_espgui_child_alive(void) {
     if (g_espguiPid <= 0) return NO;
     if (kill(g_espguiPid, 0) == 0) return YES;
-    // Chết quá nhanh sau spawn = child không chịu dựng cửa sổ (vd hosting bị
-    // chặn). Đếm là fail để hồi bộ 3 lần rồi fallback QBL, không respawn-loop
-    // vô hạn (kernrw84).
-    double since = CFAbsoluteTimeGetCurrent() - g_espguiLastSpawnAt;
-    g_espguiPid = 0;
-    if (g_espguiLastSpawnAt > 0.0 && since < 5.0) {
-        g_espguiFails++;
-        ESPLog("espgui: child died %.1fs after spawn -> fails=%d", since, g_espguiFails);
-    }
+    g_espguiPid = 0; // chết (tự thoát do stale/app tắt) -> lần sau spawn lại
     return NO;
 }
 
@@ -4167,49 +4157,8 @@ static BOOL ds_espgui_active(void) {
     return g_espguiShm != NULL && ds_espgui_child_alive();
 }
 
-// Spawn chính binary này với `-espgui <shmPath>`.
-// Ladder 2 variant (log `build` kernrw84-espgui-plainspawn):
-//   variant 0: persona uid 0 (quyền TrollStore/TrollSpeed). Trên DarkSword gửi
-//              thường thì kernel chặn (posix_spawn rc=1 Operation not permitted)
-//              nếu app không có entitlement persona.
-//   variant 1: spawn THUẦN — kế thừa uid/entitlement của app đang chạy. Trên
-//              DarkSword đây là con đường khả thi; nếu child không có quyền
-//              host window (SBSAccessibilityWindowHosting từ context của app)
-//              thì child tự exit -> fail counter -> fallback QBL như cũ.
-// Variant thắng được cache để các lần respawn sau không lặp ladder.
-static int g_espguiVariant = -1; // -1 khi chưa có variant nào succeed; 0/1 sau khi cache
-static const char *ds_espgui_variant_name(int v) {
-    return v == 0 ? "persona-root" : (v == 1 ? "plain-caller" : "?");
-}
-
-static BOOL ds_espgui_try_spawn(const char *exe, int variant, const char *shmPath,
-                                pid_t *outPid) {
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    if (variant == 0) {
-#if !TARGET_OS_SIMULATOR
-        posix_spawnattr_set_persona_np(&attr, 99, 1);
-        posix_spawnattr_set_persona_uid_np(&attr, 0);
-        posix_spawnattr_set_persona_gid_np(&attr, 0);
-#endif
-    }
-    else {
-        // variant 1: spawn THUẦN, không persona (kế thừa uid/entitlement của app).
-    }
-    posix_spawnattr_setpgroup(&attr, 0);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-    pid_t pid = 0;
-    const char *argv[] = { exe, "-espgui", shmPath, NULL };
-    int rc = posix_spawn(&pid, exe, NULL, &attr, (char **)argv, environ);
-    posix_spawnattr_destroy(&attr);
-    ESPLog("espgui: posix_spawn variant=%s rc=%d (%s) euid=%d",
-           ds_espgui_variant_name(variant), rc, rc == 0 ? "ok" : strerror(rc),
-           (int)geteuid());
-    if (rc != 0) return NO;
-    *outPid = pid;
-    return YES;
-}
-
+// Spawn chính binary này với `-espgui <shm>` (persona root giống HUDHelper,
+// vì process overlay cần quyền tạo cửa sổ hệ thống + Metal).
 static BOOL ds_espgui_spawn(const char *shmPath) {
     char exe[PATH_MAX] = {0};
     uint32_t exeSize = (uint32_t)sizeof(exe);
@@ -4217,31 +4166,26 @@ static BOOL ds_espgui_spawn(const char *shmPath) {
         ESPLog("espgui: _NSGetExecutablePath failed");
         return NO;
     }
-    // Ladder: variant cached -> thử trực tiếp; chưa có (bindValue -1) -> chạy
-    // đủ ladder và cache variant thắng.
-    if (g_espguiVariant == 0 || g_espguiVariant == 1) {
-        pid_t pid = 0;
-        if (ds_espgui_try_spawn(exe, g_espguiVariant, shmPath, &pid)) {
-            g_espguiPid = pid;
-            g_espguiLastSpawnAt = CFAbsoluteTimeGetCurrent();
-            ESPLog("espgui: spawn ok pid=%d variant=%s shm=%s",
-                   (int)pid, ds_espgui_variant_name(g_espguiVariant), shmPath);
-            return YES;
-        }
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+#if !TARGET_OS_SIMULATOR
+    posix_spawnattr_set_persona_np(&attr, 99, 1);
+    posix_spawnattr_set_persona_uid_np(&attr, 0);
+    posix_spawnattr_set_persona_gid_np(&attr, 0);
+#endif
+    posix_spawnattr_setpgroup(&attr, 0);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    pid_t pid = 0;
+    const char *argv[] = { exe, "-espgui", shmPath, NULL };
+    int rc = posix_spawn(&pid, exe, NULL, &attr, (char **)argv, environ);
+    posix_spawnattr_destroy(&attr);
+    if (rc != 0) {
+        ESPLog("espgui: posix_spawn rc=%d (%s)", rc, strerror(rc));
         return NO;
     }
-    for (int variant = 0; variant <= 1; variant++) {
-        pid_t pid = 0;
-        if (ds_espgui_try_spawn(exe, variant, shmPath, &pid)) {
-            g_espguiVariant = variant;
-            g_espguiPid = pid;
-            g_espguiLastSpawnAt = CFAbsoluteTimeGetCurrent();
-            ESPLog("espgui: spawn ok pid=%d variant=%s shm=%s",
-                   (int)pid, ds_espgui_variant_name(variant), shmPath);
-            return YES;
-        }
-    }
-    return NO;
+    g_espguiPid = pid;
+    ESPLog("espgui: spawn ok pid=%d shm=%s", (int)pid, shmPath);
+    return YES;
 }
 
 static BOOL ds_espgui_start(void) {
@@ -5005,7 +4949,7 @@ static void ds_update_rate(void) {
 
 // Tag build cho ESP overlay — ĐỔI mỗi lần sửa đường vẽ để log cho biết user
 // đang chạy bản nào (box tick in kèm tag).
-#define DS_ESP_BUILD_TAG "kernrw84-espgui-plainspawn"
+#define DS_ESP_BUILD_TAG "kernrw83-imgui-metal"
 
 // ESP Box thật trên SpringBoard (RemoteCall) 60Hz: chỉ chạy khi toggle ESP Box
 // ON. Vị trí refresh ESP_REFRESH_HZ lần/giây bằng ESPEngineRefreshBoxes (rẻ ~2ms),
