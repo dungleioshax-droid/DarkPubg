@@ -53,11 +53,12 @@
 // Nhịp cập nhật VỊ TRÍ label mét (Hz)
 #define ESP_OVERLAY_LABEL_HZ 30
 
-// Nhịp PRESENT lên SpringBoard: 60Hz cho nhịp tick, nhưng phần nặng
-// (dựng CGPath + setPath + setFrame label) chỉ chạy 30Hz bên dưới. Đây là
-// mức đã ổn định trước đó; 60Hz vector làm SpringBoard main thread bận
-// liên tục khi camera quay -> watchdog 0x8badf00d/respring.
-#define ESP_PRESENT_HZ 60
+// Nhịp PRESENT lên SpringBoard: 30Hz (kernrw87 — tái áp dụng fix kernrw85
+// sau khi revert về kernrw82). Log máy thật: present 60Hz với QBL batch ~15-20ms
+// làm main thread SpringBoard bận gần 90% duty -> watchdog 0x8badf00d/respring,
+// ngay cả khi renderer QBL thành công. 30Hz trùng nhịp geometry/label (30Hz)
+// nên nội dung không hồi quy, chỉ bớt một nửa số lượt present.
+#define ESP_PRESENT_HZ 30
 
 // Nhịp dựng lại hình học QBL (CGPath/setPath) và cập nhật label.
 // Tách khỏi ESP_PRESENT_HZ: vẫn present 60Hz khi frame không đổi, nhưng chỉ
