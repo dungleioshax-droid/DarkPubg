@@ -120,9 +120,6 @@ mặc định ON) để tắt về renderer QBL cũ.
 
 - `espImGui = NO`, hoặc spawn/mmap lỗi (`espgui: posix_spawn rc=…`, `espgui: mmap …`)
   → tick rơi về renderer QBL cũ nguyên vẹn (`ds_qbl_present`), ESP vẫn chạy.
-- Tắt `espImGui` **giữa session**: publish 1 frame rỗng ngay lúc pref đổi (log
-  `espgui: pref off -> clear, fallback QBL`) để overlay xoá hình trước khi QBL
-  vẽ tiếp; nếu không làm vậy overlay giữ frame cuối tới 8s và đè 2 lớp.
 - Overlay tự thoát khi app ngừng publish > 8s (app bị kill/tắt ESP) — không để lại
   cửa sổ ma trên game. `ds_finish_disable` cũng `SIGKILL` nó.
 - Log: `ESP.log` có `espgui: spawn ok pid=…`, `espgui: publishing cmds=… pts=…`.
@@ -322,14 +319,12 @@ burst khởi tạo này.
   gộp một polyline, và điều kiện `kind == 1`.
 - **Build tag:** `kernrw81-staged-style-budget`.
 
-Cập nhật 2026-10-25: các thay đổi kernrw81 đã được commit và đi kèm build tag
-`kernrw83-imgui-metal` (renderer ImGui). Vẫn **chưa có log máy thật** cho phần
-style staged (môi trường build không có Xcode/Apple SDK và không kết nối thiết
- bị). Khi có log mới, cần thấy tag `kernrw83-imgui-metal`; với renderer ImGui,
-không còn RemoteCall nên không còn burst hiện tượng này nữa — các ghi chú dưới
-đây chỉ còn ý nghĩa khi fallback sang renderer QBL (tắt `espImGui`). Nếu fallback đó
-vẫn còn spike, log `qbl style ok` + các dòng `qbl phase: shape/label` sẽ cho biết
-burst còn ở giai đoạn nào.
+Thay đổi này **chưa được build/chạy thử trên máy** (môi trường hiện tại không
+có Xcode/Apple SDK và không kết nối thiết bị). Khi có log mới, cần thấy tag
+`kernrw81-staged-style-budget`, `pMax` của present
+đầu giảm rõ rệt, và không có `ESP present failed`/respring. Nếu vẫn còn spike,
+log `qbl style ok` + các dòng `qbl phase: shape/label` sẽ cho biết burst còn ở
+giai đoạn nào.
 
 #### Resolver actors/world theo QBL — kernrw82
 
@@ -370,16 +365,11 @@ cũ đã chạy thật, không thêm cặp `0xB0/0x488` vì `DUMP/` không xác 
   không log mỗi scan.
 - **Build tag:** `kernrw82-qbl-actors-decrypt`.
 
-Cập nhật 2026-10-25: code kernrw82 (giải mã actors theo QBL) đã commit trong
-`7da8e9d` và đi kèm build `kernrw83-imgui-metal`; logic Enc_1..Enc_4 được đối
-chiếu bằng harness standalone ngay trên máy local (không vào repo). Vẫn **chưa
-có log máy thật**, nên hai giả định còn treo là:
-(1) thứ tự byte LE của `Enc_1` đúng theo decompile cũ, và (2) build game hiện
-tại thật sự không dùng layout `0xB0/0x488`. Khi có log, cần thấy tag
-`kernrw83-imgui-metal`; nếu actors đi nhánh encrypted, log
-`actors decrypt branch=enc1-scatter|enc2-sub4|enc3-ror56|enc4-xor` sẽ xác nhận
-nhánh. Nếu `Enc_4` xuất hiện mà box vẫn không lên, kiểm tra tiếp `ESPIsUserPtr`
-và TArray đọc được; key `0x00CDCD00` đã lấy trực tiếp từ QBL, không còn ẩn số.
+Phần này **chưa build/chạy thử trên máy** (không có Xcode/Apple SDK, không có
+thiết bị). Khi có log, cần thấy tag mới; nếu actors đi nhánh encrypted, log
+`actors decrypt branch=enc1-scatter|enc2-sub4|enc3-ror56|enc4-xor` sẽ xác nhận.
+Nếu `Enc_4` xuất hiện mà box vẫn không lên, kiểm tra tiếp `ESPIsUserPtr` và
+TArray đọc được; key `0x00CDCD00` đã lấy trực tiếp từ QBL, không còn ẩn số.
 
 Tắt xương/snapline/... chỉ đổi builder, presenter không đổi. Có thể quay lại
 renderer per-box cũ bằng `#define DS_ESP_RENDER_COMMANDLIST 0` trong `DSBridge.mm`

@@ -4128,7 +4128,6 @@ static uint64_t g_espguiFrameId = 0;
 static unsigned long g_espguiFrames = 0;
 static unsigned long g_espguiDrops = 0;
 static int g_espguiFails = 0;
-static BOOL g_espguiWasLive = NO; // đã publish visible frame tối thiểu 1 lần
 static CFAbsoluteTime g_espguiPrefAt = 0;
 static BOOL g_espguiPrefOn = YES;
 static BOOL g_espguiLogged = NO;
@@ -4239,17 +4238,7 @@ static void ds_espgui_stop(BOOL killChild) {
 // Trả NO khi không dùng được ImGui (pref tắt / spawn/mmap lỗi).
 static BOOL ds_espgui_publish(ESPBox2D *boxes, int count, CGRect portraitBounds,
                               int orientation) {
-    BOOL enabled = ds_espgui_enabled();
-    if (!enabled && g_espguiWasLive && g_espguiShm) {
-        // Tắt giữa session (Setting -> ESP ImGui OFF): publish 1 frame rỗng để
-        // overlay xoá hình NGAY, rồi tick này rơi xuống renderer QBL. Nếu không
-        // làm vậy, overlay giữ frame cuối tới khi tự stale-exit (8s) và đè lên
-        // vẽ của QBL hai lớp trong thời gian đó.
-        ds_espgui_stop(NO);
-        g_espguiWasLive = NO;
-        ESPLog("espgui: pref off -> clear, fallback QBL");
-    }
-    if (!enabled) return NO;
+    if (!ds_espgui_enabled()) return NO;
     if (!ds_espgui_start()) return NO;
 
     DSQBLFeat feat = ds_qbl_feat_now();
@@ -4313,7 +4302,6 @@ static BOOL ds_espgui_publish(ESPBox2D *boxes, int count, CGRect portraitBounds,
     f->cmdCount = (uint32_t)copied;
     ESPRsShmPublish(g_espguiShm, f);
     g_espguiFrames++;
-    g_espguiWasLive = YES;
     ESPDrawFrameReset();
 
     if (!g_espguiLogged) {
