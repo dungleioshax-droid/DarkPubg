@@ -535,6 +535,18 @@ static const CACornerMask kCornerMaskAll = kCALayerMinXMinYCorner | kCALayerMaxX
 {
     [super viewDidAppear:animated];
     notify_post(NOTIFY_LAUNCHED_HUD);
+
+    // Query orientation hiện tại và apply ngay khi HUD xuất hiện.
+    // FBSOrientationObserver chỉ thông báo khi orientation *thay đổi*,
+    // nên nếu thiết bị đã ở landscape sẵn thì không có event nào fire.
+    // Phải chủ động query bằng activeInterfaceOrientation để HUD tự động
+    // hiển thị kiểu ngang ngay từ đầu.
+    UIInterfaceOrientation currentOrientation = (UIInterfaceOrientation)[_orientationObserver activeInterfaceOrientation];
+    if (currentOrientation != UIInterfaceOrientationUnknown &&
+        currentOrientation != _orientation)
+    {
+        [self updateOrientation:currentOrientation animateWithDuration:0];
+    }
 }
 
 - (void)resetLoopTimer
