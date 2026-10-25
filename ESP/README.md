@@ -87,53 +87,6 @@ QBL có value 0) — mọi offset trong repo vẫn là offset của dump đang d
 
 Bones/Scale mặc định OFF vì đọc thêm bộ nhớ mỗi tick.
 
-## Renderer ImGui + Metal (mặc định, `kernrw83-imgui-metal`)
-
-ESP giờ vẽ bằng **Dear ImGui + Metal** trong một process overlay riêng, không còn
-remote call nào trong tick vẽ. Setting → ESP → **`ESP ImGui (Metal)`** (`espImGui`,
-mặc định ON) để tắt về renderer QBL cũ.
-
-### Luồng dữ liệu
-
-1. App (process chính) đọc kernel, tính box như cũ, rồi **builder QBL dùng chung**
-   (`ds_qbl_build_frame`) sinh draw list CPU — y hệt trước đây.
-2. `ds_espgui_publish()` copy draw list đó vào **1 frame 46KB** trong vùng `mmap`
-   chung rồi publish bằng 1 store (`ESP/ESPRenderShm.h`): double buffer + seqlock
-   theo slot, không lock, không syscall, không ai chờ ai.
-3. Process overlay (`DarkSpeed -espgui <shmPath>`, do app `posix_spawn` với persona
-   root) là **cùng binary** chạy dưới dạng UIApplication plugin (giống nhánh
-   `-hud` của TrollSpeed): cửa sổ level `10000010` + `CAMetalLayer`.
-4. `imguirender/DSEspImGui.mm` mỗi `CADisplayLink` tick: đọc frame, map toạ độ
-   landscape → cửa sổ (`ESP/ESPRenderImGuiDraw.h`, cùng công thức
-   `ds_esp_map_point` nên xoay máy không lệch), rồi render 1 command buffer.
-
-### Vì sao đổi
-
-- Không còn `setPath:`/`setFrame:`/`setText:` trên main thread của SpringBoard
-  mỗi frame — đây là nguồn `0x8badf00d`/respring của renderer cũ.
-- Không tạo/giữ object trong process khác: hết rò rỉ `CAShapeLayer`/`UILabel`/
-  `CGPath` và hết phụ thuộc vòng đời RemoteCall của SpringBoard.
-- Không inject dylib, không trustcache/amfi: process overlay là binary của chính
-  app.
-
-### Tắt / fallback
-
-- `espImGui = NO`, hoặc spawn/mmap lỗi (`espgui: posix_spawn rc=…`, `espgui: mmap …`)
-  → tick rơi về renderer QBL cũ nguyên vẹn (`ds_qbl_present`), ESP vẫn chạy.
-- Overlay tự thoát khi app ngừng publish > 8s (app bị kill/tắt ESP) — không để lại
-  cửa sổ ma trên game. `ds_finish_disable` cũng `SIGKILL` nó.
-- Log: `ESP.log` có `espgui: spawn ok pid=…`, `espgui: publishing cmds=… pts=…`.
-
-### Test
-
-```sh
-./scripts/test-espimgui.sh
-```
-
-Compile ImGui core + protocol + translator bằng g++/clang (không cần iOS SDK) và kiểm:
-roundtrip shm, double-buffer, map toạ độ 2 chiều xoay, rect NaN/ngoài màn hình bị bỏ,
-text outline sinh thêm vertex, và stress 20.000 frame writer/reader không đọc rách frame.
-
 ### Kiến trúc render kiểu QBL (frame + command list)
 
 Trước đây mỗi box = 4 view viền + label + HP + path riêng (hàng trăm remote call/frame).

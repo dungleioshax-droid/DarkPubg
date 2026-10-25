@@ -206,14 +206,6 @@ static NSString * const kESPSettingsCellReuse = @"ESPSettingsCell";
             @"default": @NO,
             @"icon": @"arrow.up.left.and.arrow.down.right",
             @"iconColor": [UIColor colorWithRed:191/255.0 green:90/255.0 blue:242/255.0 alpha:1.0]
-        },
-        @{
-            @"title": @"ESP ImGui (Metal)",
-            @"subtitle": @"Vẽ bằng Dear ImGui + Metal trong process overlay riêng (mượt, không remote call mỗi frame). Tắt = renderer QBL cũ",
-            @"key": HUDUserDefaultsKeyESPImGui,
-            @"default": @YES,
-            @"icon": @"square.stack.3d.up.fill",
-            @"iconColor": [UIColor colorWithRed:130/255.0 green:230/255.0 blue:120/255.0 alpha:1.0]
         }
     ];
 

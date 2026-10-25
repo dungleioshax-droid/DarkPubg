@@ -144,7 +144,6 @@
 		CC91309E2B616541006E3280 /* HUDBackdropLabel.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC91309D2B616541006E3280 /* HUDBackdropLabel.mm */; };
 		CC9130A32B616C18006E3280 /* HUDBackdropView.mm in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A22B616C18006E3280 /* HUDBackdropView.mm */; };
 		CC9130A72B62A33A006E3280 /* TSSettingsIndex.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */; };
-		D5E0A0F10000000000000B1C /* DSEspImGui.mm in Sources */ = {isa = PBXBuildFile; fileRef = D5E0A0F10000000000000A1B /* DSEspImGui.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -286,7 +285,6 @@
 		CC9130A52B62A262006E3280 /* hudapp-bridging-header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "hudapp-bridging-header.h"; sourceTree = "<group>"; };
 		CC9130A62B62A33A006E3280 /* TSSettingsIndex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSSettingsIndex.swift; sourceTree = "<group>"; };
 		CCB6B6FA2B5C06DD00AD2A89 /* NSUserDefaults+Private.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "NSUserDefaults+Private.h"; sourceTree = "<group>"; };
-		D5E0A0F10000000000000A1B /* DSEspImGui.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DSEspImGui.mm; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -380,7 +378,6 @@
 				DSB100052B5BF5C6007235A6 /* darksword */,
 				ESP0GROUP00000000001 /* ESP */,
 				CC711D1D2B5BF5C6007235A6 /* sources */,
-				D5E0A0F10000000000000C1D /* imguirender */,
 				CC8DDA972B66318E001C7C9E /* Frameworks */,
 			);
 			sourceTree = "<group>";
@@ -554,14 +551,6 @@
 				CC8DDA982B66318E001C7C9E /* AppIntents.framework */,
 			);
 			name = Frameworks;
-			sourceTree = "<group>";
-		};
-		D5E0A0F10000000000000C1D /* imguirender */ = {
-			isa = PBXGroup;
-			children = (
-				D5E0A0F10000000000000A1B /* DSEspImGui.mm */,
-			);
-			path = imguirender;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -782,7 +771,6 @@
 				CC711D5D2B5BF5C6007235A6 /* ScreenshotInvincibleContainerProtocol.swift in Sources */,
 				CC711D562B5BF5C6007235A6 /* SPLarkController.swift in Sources */,
 				CC711D642B5BF5C6007235A6 /* HUDApp.mm in Sources */,
-				D5E0A0F10000000000000B1C /* DSEspImGui.mm in Sources */,
 				CC711D502B5BF5C6007235A6 /* IOHIDEvent+KIF.m in Sources */,
 				CC8DDA922B655156001C7C9E /* DeactivateHUDIntent.swift in Sources */,
 				CC711D572B5BF5C6007235A6 /* SPLarkSettingsCollectionView.swift in Sources */,
@@ -973,7 +961,6 @@
 					"$(SRCROOT)/Vendor/darksword-kexploit",
 					"$(SRCROOT)/Vendor/darksword-kexploit/pe",
 					"$(SRCROOT)/Vendor/darksword-kexploit/TaskRop",
-					"$(SRCROOT)/Vendor/imgui",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
@@ -1043,7 +1030,6 @@
 					"$(SRCROOT)/Vendor/darksword-kexploit",
 					"$(SRCROOT)/Vendor/darksword-kexploit/pe",
 					"$(SRCROOT)/Vendor/darksword-kexploit/TaskRop",
-					"$(SRCROOT)/Vendor/imgui",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
