@@ -2009,7 +2009,14 @@ BOOL DSBridgeSetHUDEnabled(BOOL enabled) {
     dispatch_async(ds_bridge_queue(), ^{
         @autoreleasepool {
             if (enabled) {
-                if (!g_hudRequested.load() || g_hudActive.load()) return;
+                if (!g_hudRequested.load()) return;
+                if (g_hudActive.load()) {
+                    // Already rendering (auto-restore finished before the
+                    // button's notification listener was installed). Wake
+                    // the UI instead of leaving its spinner stuck.
+                    notify_post(NOTIFY_LAUNCHED_HUD);
+                    return;
+                }
                 ds_finish_enable();
             } else {
                 ds_finish_disable();

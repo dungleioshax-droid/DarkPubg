@@ -313,6 +313,12 @@ static BOOL IsPUBGProcessRunning(void) {
 
 - (BOOL)isHUDEnabled
 {
+    // The persisted intent is the source of truth while a background restore
+    // is still handshaking: otherwise the button flashes OPEN HUD and a tap
+    // would start a second, concurrent enable path.
+    if (DSBridgeHUDIntentSet()) {
+        return YES;
+    }
     return IsHUDEnabled();
 }
 
