@@ -146,15 +146,6 @@ struct DSPUBGActorCacheEntry {
 static const size_t kDSPUBGActorCacheSize = 16384;
 static DSPUBGActorCacheEntry g_dspubgActorCache[kDSPUBGActorCacheSize] = {};
 
-struct DSPUBGCachedLoot {
-    DSPUBGVector worldLoc;
-    bool hasWorldLoc;
-    DSPUBGItemCategory category;
-    char name[36];
-    uint32_t colorRGBA;
-    bool isPriority;
-};
-static DSPUBGCachedLoot s_cachedLoot[kDSPUBGMaxItems * 2] = {};
 static int s_cachedLootCount = 0;
 static uint32_t s_levelScanTick = 0;
 static std::vector<uint64_t> s_trackedLevelPawns;
@@ -298,6 +289,16 @@ static inline void ds_pubg_compute_item_props(DSPUBGItemCategory cat, const char
 struct DSPUBGVector {
     float X, Y, Z;
 };
+
+struct DSPUBGCachedLoot {
+    DSPUBGVector worldLoc;
+    bool hasWorldLoc;
+    DSPUBGItemCategory category;
+    char name[36];
+    uint32_t colorRGBA;
+    bool isPriority;
+};
+static DSPUBGCachedLoot s_cachedLoot[kDSPUBGMaxItems * 2] = {};
 
 struct DSPUBGRotator {
     float Pitch, Yaw, Roll;

@@ -2222,7 +2222,7 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
 
     // PUBG-only pool: batched vector layers + per-player labels/arrows
         {
-            auto makeBatchShape = ^(CGColorRef fillColor, CGColorRef strokeColor, CGFloat lineWidth) -> CAShapeLayer * {
+            auto makeBatchShape = [&](CGColorRef fillColor, CGColorRef strokeColor, CGFloat lineWidth) -> CAShapeLayer * {
                 CAShapeLayer *layer = [CAShapeLayer layer];
                 layer.actions = noAnim;
                 layer.contentsScale = scale;
