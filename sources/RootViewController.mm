@@ -313,12 +313,6 @@ static BOOL IsPUBGProcessRunning(void) {
 
 - (BOOL)isHUDEnabled
 {
-    // The persisted intent is the source of truth while a background restore
-    // is still handshaking: otherwise the button flashes OPEN HUD and a tap
-    // would start a second, concurrent enable path.
-    if (DSBridgeHUDIntentSet()) {
-        return YES;
-    }
     return IsHUDEnabled();
 }
 
@@ -1566,8 +1560,8 @@ static BOOL IsPUBGProcessRunning(void) {
 
 - (void)doEnableHUD
 {
-    BOOL isNowEnabled = [self isHUDEnabled];
-    if (isNowEnabled || _isHUDLaunching) return;
+    if ([self isHUDEnabled]) return;
+    if (_isHUDLaunching) return;
 
     BOOL isEN = IsEnglish();
     _isHUDLaunching = YES;
@@ -1582,7 +1576,14 @@ static BOOL IsPUBGProcessRunning(void) {
 
     [self appendConsoleLog:@"KERN" message:(isEN ? @"Attaching DarkSword kernel hooks..." : @"Đang nạp bộ nhớ qua DarkSword Kernel...") tagColor:DSColorWarning()];
 
-    [self setHUDEnabled:YES];
+    if (DSBridgeHUDIntentSet()) {
+        // A background restore already owns the enable path (intent persisted,
+        // SpringBoard handshake still running). Do not queue a second enable;
+        // just attach this tap to the same result.
+        DSBridgeRestoreHUD();
+    } else {
+        [self setHUDEnabled:YES];
+    }
 
     [_impactFeedbackGenerator prepare];
     int anyToken;
@@ -1603,6 +1604,21 @@ static BOOL IsPUBGProcessRunning(void) {
 
         BOOL isEN = IsEnglish();
         [strongSelf appendConsoleLog:@"OK" message:(isEN ? @"ESP Overlay successfully launched in-game!" : @"Menu ESP đã kích hoạt thành công trong game!") tagColor:DSColorSuccess()];
+    });
+
+    // The launch notification is the only thing that clears this spinner. If
+    // the enable fails before posting it, the button would stay frozen at
+    // "LAUNCHING..." forever. Re-sync from actual state after 20s.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf->_isHUDLaunching) return;
+        if ([strongSelf isHUDEnabled]) return;
+        strongSelf->_isHUDLaunching = NO;
+        [strongSelf->_mainBtnSpinner stopAnimating];
+        strongSelf->_mainButton.contentEdgeInsets = UIEdgeInsetsZero;
+        [strongSelf reloadMainButtonState];
+        [strongSelf.backgroundView setUserInteractionEnabled:YES];
     });
 
     [self.backgroundView setUserInteractionEnabled:YES];
@@ -1639,6 +1655,9 @@ static BOOL IsPUBGProcessRunning(void) {
 {
     if (_isHUDLaunching) return;
 
+    // "EXIT HUD" only when the overlay is actually attached. An in-flight
+    // background restore is handled inside doEnableHUD, which attaches to the
+    // existing enable instead of starting a second one.
     BOOL isNowEnabled = [self isHUDEnabled];
 
     // If HUD is currently ON, turn it OFF:
