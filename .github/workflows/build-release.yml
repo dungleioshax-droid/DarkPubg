@@ -1,0 +1,83 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*.*"
+      - "v*.*.*"
+
+env:
+  PKG_VERSION: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and upload DarkPubg IPA
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Resolve version
+        run: |
+          echo "PKG_VERSION=$(./get-version.sh)" >> "$GITHUB_ENV"
+
+      - name: Build unsigned IPA
+        run: |
+          chmod +x ./build-darkspeed.sh ./get-version.sh
+          DARKSPEED_UNSIGNED=1 ./build-darkspeed.sh
+
+      - name: Verify IPA
+        run: |
+          set -eu
+          ipa="packages/DarkPubg_${PKG_VERSION}.ipa"
+          test -f "$ipa" || { echo "missing $ipa" >&2; exit 1; }
+          unzip -l "$ipa" | grep -q "Payload/DarkPubg.app/DarkPubg" || {
+            echo "IPA payload does not contain DarkPubg.app" >&2; exit 1; }
+          ls -l "$ipa"
+
+      - name: Package dSYMs
+        run: |
+          if [ -d "DarkPubg.xcarchive/dSYMs" ]; then
+            cd DarkPubg.xcarchive
+            zip -qry "../packages/DarkPubg_${PKG_VERSION}_symbols.zip" dSYMs
+          else
+            echo "No dSYMs in archive; skipping"
+          fi
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DarkPubg_${{ env.PKG_VERSION }}
+          path: packages/DarkPubg_${{ env.PKG_VERSION }}.ipa
+          if-no-files-found: error
+
+      - name: Upload dSYMs
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: DarkPubg_${{ env.PKG_VERSION }}_symbols
+          path: packages/DarkPubg_${{ env.PKG_VERSION }}_symbols.zip
+          if-no-files-found: ignore
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.PKG_VERSION }}
+          body_path: README.md
+          files: |
+            packages/DarkPubg_${{ env.PKG_VERSION }}.ipa
+          fail_on_unmatched_files: true
