@@ -1727,7 +1727,11 @@ static void ds_hud_watchdog_start(void) {
             (void)token;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                if (!g_hudRequested.load()) return;
+                if (!g_hudRequested.load() || g_dsRunning.load()) return;
+                // This notification is also posted on the boot that precedes
+                // our own launch. Only treat it as a respring when the
+                // SpringBoard we registered with is actually gone.
+                if (g_hostedSBPid > 0 && ds_springboard_pid() != 0) return;
                 // New SpringBoard generation: the hosted controllers died
                 // with the old one, so force one fresh registration.
                 g_hostedRemoteController = 0;
