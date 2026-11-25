@@ -109,6 +109,25 @@ extern "C" kern_return_t mach_vm_deallocate(task_t task,
                                             mach_vm_size_t size);
 
 static const NSInteger kDSSpringBoardHUDTag = 0x54534844; // "TSHD"
+
+// The HUD intent has to outlive the process. g_hudActive/g_hudRequested are
+// RAM-only atomics: when iOS jetsams the app (or the user swipes it away and
+// relaunches it) the whole HUD state is gone and the button drops back to
+// OPEN HUD. Persisting the intent lets applicationDidBecomeActive /
+// didFinishLaunching rebuild the overlay without a manual toggle.
+static NSString * const kDSHUDPersistIntentKey = @"DSHUDPersistIntent";
+
+static BOOL ds_hud_intent(void) {
+    return [NSUserDefaults.standardUserDefaults boolForKey:kDSHUDPersistIntentKey];
+}
+
+static void ds_set_hud_intent(BOOL intent) {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    if ([defaults boolForKey:kDSHUDPersistIntentKey] == intent) return;
+    [defaults setBool:intent forKey:kDSHUDPersistIntentKey];
+    [defaults synchronize];
+}
+
 static const CGFloat kDSHUDMinFontSize = 9.0;
 static const CGFloat kDSHUDMaxFontSize = 10.0;
 static const CGFloat kDSHUDMinCornerRadius = 4.5;
@@ -147,6 +166,7 @@ static AVAudioPlayer *g_keepAlivePlayer = nil;
 static std::atomic<int> g_remoteOrientation(UIInterfaceOrientationUnknown);
 static int g_reloadHUDToken = -1;
 static int g_lockStateToken = -1;
+static int g_sbBootToken = -1;
 static NSUInteger g_lastPresentationSignature = 0;
 static CGRect g_lastWindowFrame = CGRectNull;
 static CGRect g_lastHUDContentFrame = CGRectNull;
@@ -198,6 +218,9 @@ static const uint64_t kDSRemoteTextScratchOffset = 0x1000;
 static const size_t kDSRemoteTextScratchCapacity = 0x800;
 static void ds_update_rate(void);
 static void ds_stop_keepalive(void);
+static void ds_finish_enable(void);
+static void ds_hud_watchdog_stop(void);
+static void ds_hud_watchdog_start(void);
 static CGRect ds_scene_bounds(void);
 static CGRect ds_content_bounds(void);
 static CGRect ds_hud_screen_bounds(void);
@@ -1526,6 +1549,7 @@ static void ds_register_hud_notifications(void) {
 
 static void ds_finish_disable(void) {
     ds_set_stage(ds_localized(@"Closing HUD"));
+    ds_set_hud_intent(NO);
     ds_unregister_hud_notifications();
     ds_stop_rate_timer();
     // Pause (not stop): keep the local window + CAContext + the SpringBoard
@@ -1584,6 +1608,7 @@ static void ds_finish_disable(void) {
     g_lastAppliedText = nil;
     g_remoteFailureCount = 0;
     g_pendingWindowLevelReapply = NO;
+    ds_hud_watchdog_stop();
     // Keep the selector/class cache too: it belongs to the live channel and
     // makes the next enable skip every remote symbol lookup.
     // Keep the keepalive running while the SpringBoard channel exists: only a
@@ -1593,6 +1618,150 @@ static void ds_finish_disable(void) {
     if (!g_springBoard) ds_stop_keepalive();
     ds_set_stage(ds_localized(@"HUD closed"));
     notify_post(NOTIFY_RELOAD_APP);
+}
+
+// A single background watchdog owns every "the HUD died by itself" case:
+//   * iOS expired the background task -> process frozen, audio session stolen
+//     by the game, display link silent;
+//   * SpringBoard respun -> our hosted registration died with it;
+//   * the overlay was paused by a failure path but the user never toggled.
+// It only ever uses the local fast path (no RemoteCall) unless the SpringBoard
+// pid actually changed, in which case the normal enable path rebuilds it once.
+static dispatch_source_t g_hudWatchdogTimer = nil;
+static std::atomic<double> g_lastHudRebuildAt(0.0);
+static std::atomic_bool g_hudRebuildInFlight(false);
+static std::atomic<int> g_hudRebuildAttempts(0);
+
+static const int kDSMaxAutoRebuilds = 3;
+
+static pid_t ds_springboard_pid(void) {
+    // kill() on SpringBoard's pid is a userspace probe: no kernel reads, no
+    // allproc walk every two seconds. EPERM still means "alive".
+    pid_t cached = g_hostedSBPid;
+    if (cached > 0 && (kill(cached, 0) == 0 || errno == EPERM)) return cached;
+    return 0;
+}
+
+static void ds_hud_request_rebuild(void) {
+    // Cooldown + single-flight: a persistent boot failure must not turn the
+    // watchdog into a RemoteCall retry storm (that is the panic path).
+    if (g_hudRebuildInFlight.exchange(true)) return;
+    if (g_hudRebuildAttempts.load() >= kDSMaxAutoRebuilds) {
+        g_hudRebuildInFlight.store(false);
+        return;
+    }
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_lastHudRebuildAt.load() < 15.0) {
+        g_hudRebuildInFlight.store(false);
+        return;
+    }
+    g_lastHudRebuildAt.store(now);
+    g_hudRebuildAttempts.fetch_add(1);
+    dispatch_async(ds_bridge_queue(), ^{
+        @autoreleasepool {
+            if (!g_hudRequested.load() || g_dsRunning.load() || g_hudActive.load()) {
+                g_hudRebuildInFlight.store(false);
+                return;
+            }
+            if (g_hostedLayer) ds_hosted_overlay_pause();
+            g_hudActive.store(false);
+            ds_finish_enable();
+            g_hudRebuildInFlight.store(false);
+        }
+    });
+}
+
+static void ds_hud_watchdog_tick(void) {
+    if (!g_hudRequested.load()) return;
+    // A user-initiated or already running enable owns the state machine.
+    if (g_dsRunning.load()) return;
+    if (!ds_hud_intent()) {
+        // Intent was cleared from another thread (termination/reset).
+        g_hudRequested.store(false);
+        return;
+    }
+
+    // Audio/bg-task re-assertion lives in ds_keepalive_tick() on the main
+    // thread; never block this queue on it.
+
+    if (!g_hudActive.load()) {
+        // The overlay was paused (failure path or a lost registration) while
+        // the user still wants it. Re-run the enable path on the bridge queue.
+        ds_hud_request_rebuild();
+        return;
+    }
+
+    if (g_hostedSBPid > 0 && ds_springboard_pid() == 0) {
+        // SpringBoard died under us: the hosted controllers are dead. Drop
+        // the local registration state so the enable path performs a fresh,
+        // single RemoteCall handshake instead of reusing zombie pointers.
+        g_hostedRemoteController = 0;
+        g_hostedMenuRemoteController = 0;
+        g_hostedSBPid = 0;
+        // The hosted registration died with that SpringBoard; the local
+        // context is useless until it is re-registered.
+        if (g_hostedLayer) ds_hosted_overlay_pause();
+        g_hudActive.store(false);
+        g_hudRebuildAttempts.store(0);  // respring is legit, not a failure
+        ds_hud_request_rebuild();
+        return;
+    }
+
+    // Registration alive but the render timer was cancelled (hosted timer is
+    // the only thing that repaints the ESP): restart it.
+    if (!g_hostedTimer && g_hostedLayerReady.load(std::memory_order_acquire)) {
+        ds_hosted_overlay_start();
+    }
+}
+
+static void ds_hud_watchdog_start(void) {
+    if (g_hudWatchdogTimer) return;
+    if (!g_hudRequested.load()) return;
+    // SpringBoard resprings do not always change what we can observe from a
+    // suspended process. This notification fires right when the new
+    // SpringBoard is up; rebuild after a short settle delay so the channel
+    // handshake does not race the respring itself.
+    if (g_sbBootToken < 0) {
+        notify_register_dispatch("SBSpringBoardDidLaunchNotification", &g_sbBootToken,
+                                 dispatch_get_main_queue(), ^(int token) {
+            (void)token;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (!g_hudRequested.load()) return;
+                // New SpringBoard generation: the hosted controllers died
+                // with the old one, so force one fresh registration.
+                g_hostedRemoteController = 0;
+                g_hostedMenuRemoteController = 0;
+                g_hostedSBPid = 0;
+                if (g_hostedLayer) ds_hosted_overlay_pause();
+                g_hudActive.store(false);
+                g_hudRebuildAttempts.store(0);
+                ds_hud_request_rebuild();
+            });
+        });
+    }
+    g_hudWatchdogTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                ds_bridge_queue());
+    dispatch_source_set_timer(g_hudWatchdogTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                              2 * NSEC_PER_SEC, 500 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(g_hudWatchdogTimer, ^{
+        @autoreleasepool {
+            ds_hud_watchdog_tick();
+        }
+    });
+    dispatch_resume(g_hudWatchdogTimer);
+}
+
+static void ds_hud_watchdog_stop(void) {
+    if (g_hudWatchdogTimer) {
+        dispatch_source_cancel(g_hudWatchdogTimer);
+        g_hudWatchdogTimer = nil;
+    }
+    if (g_sbBootToken >= 0) {
+        notify_cancel(g_sbBootToken);
+        g_sbBootToken = -1;
+    }
 }
 
 static void ds_finish_enable(void) {
@@ -1699,6 +1868,7 @@ static void ds_finish_enable(void) {
         g_dsProgress.store(1.0);
         ds_set_stage(ds_localized(@"SpringBoard HUD started"));
         ds_set_error(@"");
+        ds_register_hud_notifications();
         notify_post(NOTIFY_LAUNCHED_HUD);
         ds_post_progress();
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1710,6 +1880,10 @@ static void ds_finish_enable(void) {
             }
         });
         ds_hosted_overlay_start();
+        ds_set_hud_intent(YES);
+        g_hudRebuildAttempts.store(0);
+        ds_hud_watchdog_start();
+        notify_post(NOTIFY_RELOAD_APP);
         return;
     }
 
@@ -1820,10 +1994,18 @@ static void ds_finish_enable(void) {
     notify_post(NOTIFY_LAUNCHED_HUD);
     ds_post_progress();
     ds_hosted_overlay_start();
+    ds_set_hud_intent(YES);
+    g_hudRebuildAttempts.store(0);
+    ds_hud_watchdog_start();
+    notify_post(NOTIFY_RELOAD_APP);
 }
 
 BOOL DSBridgeSetHUDEnabled(BOOL enabled) {
     g_hudRequested.store(enabled);
+    // Persist the intent at request time, not only after success: if iOS
+    // jetsams us mid-handshake the next launch must still know the user
+    // wanted the HUD. ds_fail_enable() clears it again on a hard failure.
+    ds_set_hud_intent(enabled);
     dispatch_async(ds_bridge_queue(), ^{
         @autoreleasepool {
             if (enabled) {
@@ -1839,6 +2021,30 @@ BOOL DSBridgeSetHUDEnabled(BOOL enabled) {
 
 BOOL DSBridgeHUDEnabled(void) {
     return g_hudActive.load();
+}
+
+BOOL DSBridgeHUDIntentSet(void) {
+    return ds_hud_intent();
+}
+
+BOOL DSBridgeRestoreHUD(void) {
+    if (!ds_hud_intent()) return NO;
+    if (g_dsRunning.load()) return YES;
+
+    g_hudRequested.store(true);
+    dispatch_async(ds_bridge_queue(), ^{
+        @autoreleasepool {
+            if (!g_hudRequested.load()) return;
+            if (g_hudActive.load()) {
+                // Active but not ticking: the display timer is the only thing
+                // that repaints. Restart it instead of rebuilding the HUD.
+                if (!g_hostedTimer) ds_hosted_overlay_start();
+                return;
+            }
+            ds_finish_enable();
+        }
+    });
+    return YES;
 }
 
 void DSBridgeTeardownForTermination(void) {
@@ -1912,6 +2118,8 @@ BOOL DSBridgeStartKeepalive(void) {
 }
 void DSBridgeTeardownForTermination(void) {}
 BOOL DSBridgeHUDEnabled(void) { return NO; }
+BOOL DSBridgeHUDIntentSet(void) { return NO; }
+BOOL DSBridgeRestoreHUD(void) { return NO; }
 double DSBridgeProgress(void) { return 0.0; }
 BOOL DSBridgeIsRunning(void) { return NO; }
 

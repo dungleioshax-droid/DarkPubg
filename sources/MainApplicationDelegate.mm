@@ -91,6 +91,15 @@
     // the user enables the HUD.
     DSBridgeWarmUpNetworkAndPrefetchKernelCache();
 
+    // The user left the HUD on last session: rebuild it without requiring a
+    // manual OPEN HUD tap. DSBridgeRestoreHUD reuses the local fast path when
+    // SpringBoard's pid is unchanged; it only re-hijacks after a respring.
+    if (DSBridgeHUDIntentSet()) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            DSBridgeRestoreHUD();
+        });
+    }
+
     return YES;
 }
 
@@ -104,15 +113,17 @@
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {
     BypassJetsamByProcess(getpid(), NO);
-    if (DSBridgeHUDEnabled() || DSBridgeIsRunning()) {
+    if (DSBridgeHUDEnabled() || DSBridgeIsRunning() || DSBridgeHUDIntentSet()) {
         DSBridgeStartKeepalive();
     }
 }
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     BypassJetsamByProcess(getpid(), NO);
-    if (DSBridgeHUDEnabled()) {
+    BOOL wantsHUD = DSBridgeHUDEnabled() || DSBridgeHUDIntentSet();
+    if (wantsHUD) {
         DSBridgeStartKeepalive();
+        DSBridgeRestoreHUD();
     }
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^(void) {

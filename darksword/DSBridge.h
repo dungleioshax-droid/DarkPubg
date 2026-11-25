@@ -39,6 +39,15 @@ OBJC_EXTERN BOOL DSBridgeSetHUDEnabled(BOOL enabled);
 /// YES only after the remote view is attached inside SpringBoard.
 OBJC_EXTERN BOOL DSBridgeHUDEnabled(void);
 
+/// YES while the user wants the HUD running, including across a process
+/// relaunch. Survives jetsam/swipe-kill; cleared only on an explicit toggle off.
+OBJC_EXTERN BOOL DSBridgeHUDIntentSet(void);
+
+/// Reattach the HUD after the app returns to the foreground or relaunches.
+/// Uses the zero-hijack fast path unless SpringBoard's pid changed.
+/// Safe to call repeatedly; no-ops when the HUD is alread active.
+OBJC_EXTERN BOOL DSBridgeRestoreHUD(void);
+
 /// Tear down the hijacked SpringBoard channel before our ports die with the
 /// process. Call from applicationWillTerminate: (main thread); the keepalive
 /// keeps the app background-running so this really fires on a swipe-kill.
