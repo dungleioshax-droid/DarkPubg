@@ -265,11 +265,15 @@ static BOOL ds_debug_target_alive(void) {
     pid_t pid = g_debugShmemPid;
     if (!pid || !ds_is_ready()) return NO;
     if (!ds_pid_alive_userspace(pid)) return NO;
-    if (ds_isvalid(g_debugShmemProc) && off_proc_p_pid) {
-        return ds_kread32(g_debugShmemProc + off_proc_p_pid) == (uint32_t)pid ? YES : NO;
+    @try {
+        if (ds_isvalid(g_debugShmemProc) && off_proc_p_pid) {
+            return ds_kread32(g_debugShmemProc + off_proc_p_pid) == (uint32_t)pid ? YES : NO;
+        }
+        uint64_t proc = procbypid(pid);
+        return ds_isvalid(proc) ? YES : NO;
+    } @catch (__unused NSException *exception) {
+        return NO;
     }
-    uint64_t proc = procbypid(pid);
-    return ds_isvalid(proc) ? YES : NO;
 }
 
 // Fl0rkFF-style shared-page cache. vmmapremotepage() performs kernel WRITES
@@ -392,7 +396,12 @@ static uint64_t ds_debug_map_page(uint64_t vmMap, uint64_t pageAddress) {
     // Use the entry captured by the region-index pass. Calling the legacy
     // vmmapremotepage() here would walk up to 9,000 kernel entries again for
     // every newly observed pawn/mesh/bone page.
-    struct vmshmem shmem = vmmapremotepagefromentry(entryAddress, pageAddress);
+    struct vmshmem shmem = {0};
+    @try {
+        shmem = vmmapremotepagefromentry(entryAddress, pageAddress);
+    } @catch (__unused NSException *exception) {
+        shmem = (struct vmshmem){0};
+    }
     if (!shmem.used || !shmem.localAddress) {
         // The target may have mutated its vm_map after the index was built.
         // Refresh the index in the background rather than re-walking it here
@@ -891,12 +900,15 @@ static void ds_hosted_configure_display_link(CADisplayLink *displayLink) {
     if (!displayLink) return;
     NSInteger maximum = MAX((NSInteger)UIScreen.mainScreen.maximumFramesPerSecond,
                             (NSInteger)60);
-    g_hostedMaximumFrameRate.store((uint32_t)maximum,
+    // Cap ESP compositor updates to 60 Hz so ProMotion devices do not burn
+    // double CPU/backboardd bandwidth and starve PUBG Mobile.
+    NSInteger targetFPS = MIN(maximum, (NSInteger)60);
+    g_hostedMaximumFrameRate.store((uint32_t)targetFPS,
                                    std::memory_order_release);
-    displayLink.preferredFramesPerSecond = maximum;
+    displayLink.preferredFramesPerSecond = targetFPS;
     if (@available(iOS 15.0, *)) {
         displayLink.preferredFrameRateRange =
-            CAFrameRateRangeMake(60.0, (float)maximum, (float)maximum);
+            CAFrameRateRangeMake(60.0, (float)targetFPS, (float)targetFPS);
     }
 }
 
@@ -914,13 +926,15 @@ static void ds_hosted_configure_display_link(CADisplayLink *displayLink) {
     g_hostedLastDisplayLinkTick.store(CACurrentMediaTime(),
                                       std::memory_order_relaxed);
 
-    // Phase-locked frame trigger: Immediately dispatch next memory sample & projection
-    // so the next snapshot is ready with zero frame latency when the display link fires next!
+    // Phase-locked frame trigger: clear pending AFTER ds_hosted_overlay_frame()
+    // finishes so slow ticks cannot queue up on ds_bridge_queue().
     static std::atomic<bool> s_pubgFramePending(false);
     if (!s_pubgFramePending.exchange(true, std::memory_order_acq_rel)) {
         dispatch_async(ds_bridge_queue(), ^{
+            @autoreleasepool {
+                ds_hosted_overlay_frame();
+            }
             s_pubgFramePending.store(false, std::memory_order_release);
-            ds_hosted_overlay_frame();
         });
     }
 }
@@ -971,13 +985,18 @@ static void ds_hosted_apply_orientation(UIInterfaceOrientation orientation, doub
 
 #pragma mark - PUBG ESP render
 
-static CAShapeLayer *g_hostedPUBGBoxLayers[kDSPUBGMaxPlayers] = {};
-static CAShapeLayer *g_hostedPUBGSkeletonLayers[kDSPUBGMaxPlayers] = {};
-static CAShapeLayer *g_hostedPUBGLineLayers[kDSPUBGMaxPlayers] = {};
-static CAShapeLayer *g_hostedPUBGAIMarkLayers[kDSPUBGMaxPlayers] = {};
+// Batched player shape layers (alive vs knocked) replace 500+ per-player
+// CAShapeLayers, avoiding hundreds of screen-spanning bitmap allocations.
+static CAShapeLayer *g_hostedPUBGBoxAliveLayer = nil;
+static CAShapeLayer *g_hostedPUBGBoxKnockedLayer = nil;
+static CAShapeLayer *g_hostedPUBGSkeletonAliveLayer = nil;
+static CAShapeLayer *g_hostedPUBGSkeletonKnockedLayer = nil;
+static CAShapeLayer *g_hostedPUBGLineAliveLayer = nil;
+static CAShapeLayer *g_hostedPUBGLineKnockedLayer = nil;
+static CAShapeLayer *g_hostedPUBGHealthBgLayer = nil;
+static CAShapeLayer *g_hostedPUBGHealthAliveLayer = nil;
+static CAShapeLayer *g_hostedPUBGHealthKnockedLayer = nil;
 static CATextLayer *g_hostedPUBGInfoLabels[kDSPUBGMaxPlayers] = {};
-static CAShapeLayer *g_hostedPUBGHealthBgLayers[kDSPUBGMaxPlayers] = {};
-static CAShapeLayer *g_hostedPUBGHealthBarLayers[kDSPUBGMaxPlayers] = {};
 static CATextLayer *g_hostedPUBGWeaponLabels[kDSPUBGMaxPlayers] = {};
 static CAShapeLayer *g_hostedPUBGArrowLayers[kDSPUBGMaxPlayers] = {};
 static CATextLayer *g_hostedPUBGArrowTextLayers[kDSPUBGMaxPlayers] = {};
@@ -1011,14 +1030,17 @@ static void ds_hosted_pubg_hide_all(void) {
     if (g_hostedMenuViewController) {
         [g_hostedMenuViewController dsUpdateRadarWithPlayers:NULL count:0];
     }
+    if (g_hostedPUBGBoxAliveLayer && !g_hostedPUBGBoxAliveLayer.hidden) g_hostedPUBGBoxAliveLayer.hidden = YES;
+    if (g_hostedPUBGBoxKnockedLayer && !g_hostedPUBGBoxKnockedLayer.hidden) g_hostedPUBGBoxKnockedLayer.hidden = YES;
+    if (g_hostedPUBGSkeletonAliveLayer && !g_hostedPUBGSkeletonAliveLayer.hidden) g_hostedPUBGSkeletonAliveLayer.hidden = YES;
+    if (g_hostedPUBGSkeletonKnockedLayer && !g_hostedPUBGSkeletonKnockedLayer.hidden) g_hostedPUBGSkeletonKnockedLayer.hidden = YES;
+    if (g_hostedPUBGLineAliveLayer && !g_hostedPUBGLineAliveLayer.hidden) g_hostedPUBGLineAliveLayer.hidden = YES;
+    if (g_hostedPUBGLineKnockedLayer && !g_hostedPUBGLineKnockedLayer.hidden) g_hostedPUBGLineKnockedLayer.hidden = YES;
+    if (g_hostedPUBGHealthBgLayer && !g_hostedPUBGHealthBgLayer.hidden) g_hostedPUBGHealthBgLayer.hidden = YES;
+    if (g_hostedPUBGHealthAliveLayer && !g_hostedPUBGHealthAliveLayer.hidden) g_hostedPUBGHealthAliveLayer.hidden = YES;
+    if (g_hostedPUBGHealthKnockedLayer && !g_hostedPUBGHealthKnockedLayer.hidden) g_hostedPUBGHealthKnockedLayer.hidden = YES;
     for (int i = 0; i < kDSPUBGMaxPlayers; i++) {
-        if (g_hostedPUBGBoxLayers[i] && !g_hostedPUBGBoxLayers[i].hidden) g_hostedPUBGBoxLayers[i].hidden = YES;
-        if (g_hostedPUBGSkeletonLayers[i] && !g_hostedPUBGSkeletonLayers[i].hidden) g_hostedPUBGSkeletonLayers[i].hidden = YES;
-        if (g_hostedPUBGLineLayers[i] && !g_hostedPUBGLineLayers[i].hidden) g_hostedPUBGLineLayers[i].hidden = YES;
-        if (g_hostedPUBGAIMarkLayers[i] && !g_hostedPUBGAIMarkLayers[i].hidden) g_hostedPUBGAIMarkLayers[i].hidden = YES;
         if (g_hostedPUBGInfoLabels[i] && !g_hostedPUBGInfoLabels[i].hidden) g_hostedPUBGInfoLabels[i].hidden = YES;
-        if (g_hostedPUBGHealthBgLayers[i] && !g_hostedPUBGHealthBgLayers[i].hidden) g_hostedPUBGHealthBgLayers[i].hidden = YES;
-        if (g_hostedPUBGHealthBarLayers[i] && !g_hostedPUBGHealthBarLayers[i].hidden) g_hostedPUBGHealthBarLayers[i].hidden = YES;
         if (g_hostedPUBGWeaponLabels[i] && !g_hostedPUBGWeaponLabels[i].hidden) g_hostedPUBGWeaponLabels[i].hidden = YES;
         if (g_hostedPUBGArrowLayers[i] && !g_hostedPUBGArrowLayers[i].hidden) g_hostedPUBGArrowLayers[i].hidden = YES;
         if (g_hostedPUBGArrowTextLayers[i] && !g_hostedPUBGArrowTextLayers[i].hidden) g_hostedPUBGArrowTextLayers[i].hidden = YES;
@@ -1103,6 +1125,27 @@ static inline void ds_layer_set_hidden(CALayer *layer, BOOL hidden) {
 static inline void ds_layer_set_frame(CALayer *layer, CGRect frame) {
     if (!layer) return;
     if (!CGRectEqualToRect(layer.frame, frame)) layer.frame = frame;
+}
+
+static inline CGFloat ds_q05(CGFloat v) {
+    return (CGFloat)(roundf((float)v * 2.0f) * 0.5f);
+}
+
+static inline CGRect ds_q1_rect(CGFloat x, CGFloat y, CGFloat w, CGFloat h) {
+    return CGRectMake((CGFloat)roundf((float)x), (CGFloat)roundf((float)y), w, h);
+}
+
+static inline void ds_layer_set_cgpath(CAShapeLayer *layer, CGMutablePathRef path, BOOL nonEmpty) {
+    if (!layer) return;
+    if (!nonEmpty || !path) {
+        ds_layer_set_hidden(layer, YES);
+        return;
+    }
+    CGPathRef current = layer.path;
+    if (current != path && (!current || !CGPathEqualToPath(current, path))) {
+        layer.path = path;
+    }
+    ds_layer_set_hidden(layer, NO);
 }
 
 static inline void ds_layer_set_path(CAShapeLayer *layer, UIBezierPath *path) {
@@ -1296,19 +1339,30 @@ static void ds_hosted_apply_pubg(void) {
     // and drops the raster cost of the tail.
     const int drawCount = (count > kDSPUBGDrawMaxPlayers) ? kDSPUBGDrawMaxPlayers : count;
 
+    CGMutablePathRef boxAlivePath = CGPathCreateMutable();
+    CGMutablePathRef boxKnockedPath = CGPathCreateMutable();
+    CGMutablePathRef skelAlivePath = CGPathCreateMutable();
+    CGMutablePathRef skelKnockedPath = CGPathCreateMutable();
+    CGMutablePathRef lineAlivePath = CGPathCreateMutable();
+    CGMutablePathRef lineKnockedPath = CGPathCreateMutable();
+    CGMutablePathRef hpBgPath = CGPathCreateMutable();
+    CGMutablePathRef hpAlivePath = CGPathCreateMutable();
+    CGMutablePathRef hpKnockedPath = CGPathCreateMutable();
+    BOOL hasBoxAlive = NO, hasBoxKnocked = NO;
+    BOOL hasSkelAlive = NO, hasSkelKnocked = NO;
+    BOOL hasLineAlive = NO, hasLineKnocked = NO;
+    BOOL hasHpBg = NO, hasHpAlive = NO, hasHpKnocked = NO;
+
+    CGFloat snapOriginX = ds_q05(width * 0.5f);
+    CGFloat snapOriginY = 25.0f;
+
     for (int i = 0; i < drawCount; i++) {
         const DSPUBGProjectedPlayer &p = players[i];
-        CAShapeLayer *box = g_hostedPUBGBoxLayers[i];
-        CAShapeLayer *skel = g_hostedPUBGSkeletonLayers[i];
-        CAShapeLayer *line = g_hostedPUBGLineLayers[i];
-        CAShapeLayer *aiMark = g_hostedPUBGAIMarkLayers[i];
         CATextLayer *info = g_hostedPUBGInfoLabels[i];
-        CAShapeLayer *hpBg = g_hostedPUBGHealthBgLayers[i];
-        CAShapeLayer *hpBar = g_hostedPUBGHealthBarLayers[i];
         CATextLayer *wLabel = g_hostedPUBGWeaponLabels[i];
         CAShapeLayer *arrow = g_hostedPUBGArrowLayers[i];
         CATextLayer *arrowText = g_hostedPUBGArrowTextLayers[i];
-        if (!box || !line || !info || !hpBar) continue;
+        if (!info) continue;
 
         BOOL ai = p.isAI;
 
@@ -1317,13 +1371,7 @@ static void ds_hosted_apply_pubg(void) {
         const BOOL isOffScreen = (!p.isVisible || outsideBounds || p.boxWidth <= 0.0f || p.boxHeight <= 0.0f);
 
         if (isOffScreen) {
-            ds_layer_set_hidden(box, YES);
-            ds_layer_set_hidden(skel, YES);
-            ds_layer_set_hidden(line, YES);
-            ds_layer_set_hidden(aiMark, YES);
             ds_layer_set_hidden(info, YES);
-            ds_layer_set_hidden(hpBg, YES);
-            ds_layer_set_hidden(hpBar, YES);
             ds_layer_set_hidden(wLabel, YES);
 
             // Arrow only shows for enemies BEHIND the player ("ở sau lưng", camRelZ <= 0.0f)
@@ -1350,63 +1398,43 @@ static void ds_hosted_apply_pubg(void) {
             continue;
         }
 
-        CGFloat centerX = p.screenX + p.boxWidth * 0.5f;
-        CGFloat topY = p.screenY;
+        CGFloat centerX = ds_q05(p.screenX + p.boxWidth * 0.5f);
+        CGFloat topY = ds_q05(p.screenY);
 
         // On-screen player is in front ("còn trước đừng hiện"): always hide arrow
         ds_layer_set_hidden(arrow, YES);
         ds_layer_set_hidden(arrowText, YES);
 
-        // Player Visibility & Colors (Vischeck disabled: Green alive, Red knocked)
-        CGColorRef playerColor = p.isKnocked ? s_knockedColor : s_aliveColor;
-
-        // 1. 3D Bounding Box (Khung hình hộp 3D không gian kiểu MADNESS, fallback 2D chữ nhật)
+        // 1. 3D Bounding Box (batched into alive / knocked CGPath)
         if (g_pubgEspBox) {
-            UIBezierPath *boxPath = [UIBezierPath bezierPath];
+            CGMutablePathRef bTarget = p.isKnocked ? boxKnockedPath : boxAlivePath;
             if (p.has3DBox) {
-                // Đáy dưới (0 -> 1 -> 2 -> 3 -> 0)
-                [boxPath moveToPoint:p.boxCorners[0]];
-                [boxPath addLineToPoint:p.boxCorners[1]];
-                [boxPath addLineToPoint:p.boxCorners[2]];
-                [boxPath addLineToPoint:p.boxCorners[3]];
-                [boxPath closePath];
+                CGPoint c[8];
+                for (int k = 0; k < 8; k++) {
+                    c[k] = CGPointMake(ds_q05(p.boxCorners[k].x), ds_q05(p.boxCorners[k].y));
+                }
+                CGPathMoveToPoint(bTarget, NULL, c[0].x, c[0].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[1].x, c[1].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[2].x, c[2].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[3].x, c[3].y);
+                CGPathCloseSubpath(bTarget);
 
-                // Mặt trên (4 -> 5 -> 6 -> 7 -> 4)
-                [boxPath moveToPoint:p.boxCorners[4]];
-                [boxPath addLineToPoint:p.boxCorners[5]];
-                [boxPath addLineToPoint:p.boxCorners[6]];
-                [boxPath addLineToPoint:p.boxCorners[7]];
-                [boxPath closePath];
+                CGPathMoveToPoint(bTarget, NULL, c[4].x, c[4].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[5].x, c[5].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[6].x, c[6].y);
+                CGPathAddLineToPoint(bTarget, NULL, c[7].x, c[7].y);
+                CGPathCloseSubpath(bTarget);
 
-                // 4 cạnh đứng nối 2 mặt
-                [boxPath moveToPoint:p.boxCorners[0]];
-                [boxPath addLineToPoint:p.boxCorners[4]];
-
-                [boxPath moveToPoint:p.boxCorners[1]];
-                [boxPath addLineToPoint:p.boxCorners[5]];
-
-                [boxPath moveToPoint:p.boxCorners[2]];
-                [boxPath addLineToPoint:p.boxCorners[6]];
-
-                [boxPath moveToPoint:p.boxCorners[3]];
-                [boxPath addLineToPoint:p.boxCorners[7]];
+                for (int k = 0; k < 4; k++) {
+                    CGPathMoveToPoint(bTarget, NULL, c[k].x, c[k].y);
+                    CGPathAddLineToPoint(bTarget, NULL, c[k + 4].x, c[k + 4].y);
+                }
             } else {
-                CGFloat bx = p.screenX;
-                CGFloat by = p.screenY;
-                CGFloat bw = p.boxWidth;
-                CGFloat bh = p.boxHeight;
-                [boxPath appendPath:[UIBezierPath bezierPathWithRect:CGRectMake(bx, by, bw, bh)]];
+                CGPathAddRect(bTarget, NULL, CGRectMake(ds_q05(p.screenX), ds_q05(p.screenY),
+                                                        ds_q05(p.boxWidth), ds_q05(p.boxHeight)));
             }
-
-            ds_layer_set_path(box, boxPath);
-            ds_layer_set_stroke(box, playerColor, g_pubgEspThickness);
-            ds_layer_set_hidden(box, NO);
-        } else {
-            ds_layer_set_hidden(box, YES);
+            if (p.isKnocked) hasBoxKnocked = YES; else hasBoxAlive = YES;
         }
-
-        // 3. AI Mark: disabled per user request
-        ds_layer_set_hidden(aiMark, YES);
 
         BOOL haveNick = (p.name[0] != '\0' && strncmp(p.name, "Unknown", 7) != 0);
         BOOL isBot = ai || (haveNick && (strstr(p.name, "ModelTarget") != NULL || strstr(p.name, "Target") != NULL || strstr(p.name, "AI") != NULL || strstr(p.name, "Bot") != NULL || strstr(p.name, "bot") != NULL));
@@ -1423,12 +1451,12 @@ static void ds_hosted_apply_pubg(void) {
             nameStr = [NSString stringWithFormat:@"⚠️ %@", nameStr];
         }
 
-        // 4. MADNESS Player Info Tag (3 tầng: [67M] [25] -> Thanh máu 3 vạch -> Badge đen BOT)
+        // 4. MADNESS Player Info Tag
         CGFloat headerW = 76.0f;
         if (!isBot && g_pubgEspFlag && p.nation[0] != '\0') {
             headerW = 92.0f;
         }
-        CGFloat headerX = centerX - headerW * 0.5f;
+        CGFloat headerX = ds_q05(centerX - headerW * 0.5f);
 
         CGFloat anchorY = topY;
         if (p.hasSkeleton && p.skeleton[0].valid && p.skeleton[0].y > 0.0f) {
@@ -1441,21 +1469,22 @@ static void ds_hosted_apply_pubg(void) {
             }
             anchorY = fminf(anchorY, min3DY - 2.0f);
         }
+        anchorY = ds_q05(anchorY);
 
-        // Tầng 3: Badge đen chứa tên / BOT (Line 3: Name / BOT Badge)
+        // Tầng 3: Badge đen chứa tên / BOT
         CGFloat badgeH = 13.0f;
         CGFloat badgeY = anchorY - badgeH - 3.0f;
 
-        ds_layer_set_frame(info, CGRectMake(headerX, badgeY, headerW, badgeH));
+        ds_layer_set_frame(info, ds_q1_rect(headerX, badgeY, headerW, badgeH));
         ds_layer_set_string(info, nameStr);
         ds_layer_set_hidden(info, NO);
 
-        // Tầng 2: Thanh máu 3 vạch liền kề dính nhau (Line 2: 3 Connected Segments with Black Dividers)
+        // Tầng 2: Thanh máu 3 vạch liền kề (batched into shared bg + alive/knocked fill paths)
         BOOL showHp = (g_pubgEspHealth && p.healthMax > 0 && p.health >= 0);
         CGFloat barH = 3.6f;
-        CGFloat barY = badgeY - barH - 1.5f;
+        CGFloat barY = ds_q05(badgeY - barH - 1.5f);
 
-        if (showHp && hpBg && hpBar) {
+        if (showHp) {
             float hpVal = p.health;
             float hpMax = (p.healthMax > 0.0f) ? p.healthMax : 100.0f;
             float hpRatio = hpVal / hpMax;
@@ -1463,42 +1492,32 @@ static void ds_hosted_apply_pubg(void) {
             if (hpRatio > 1.0f) hpRatio = 1.0f;
 
             CGFloat segW = headerW / 3.0f;
+            CGFloat radius = barH * 0.5f;
 
-            // 1. Toàn bộ khung nền 3 vạch liền khối (1 thanh capsule bo tròn viền đen chứa 2 vạch kẻ phân cách)
-            UIBezierPath *bgPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(headerX, barY, headerW, barH) cornerRadius:barH * 0.5f];
-            [bgPath moveToPoint:CGPointMake(headerX + segW, barY)];
-            [bgPath addLineToPoint:CGPointMake(headerX + segW, barY + barH)];
-            [bgPath moveToPoint:CGPointMake(headerX + segW * 2.0f, barY)];
-            [bgPath addLineToPoint:CGPointMake(headerX + segW * 2.0f, barY + barH)];
+            CGPathAddRoundedRect(hpBgPath, NULL, CGRectMake(headerX, barY, headerW, barH), radius, radius);
+            CGPathMoveToPoint(hpBgPath, NULL, headerX + segW, barY);
+            CGPathAddLineToPoint(hpBgPath, NULL, headerX + segW, barY + barH);
+            CGPathMoveToPoint(hpBgPath, NULL, headerX + segW * 2.0f, barY);
+            CGPathAddLineToPoint(hpBgPath, NULL, headerX + segW * 2.0f, barY + barH);
+            hasHpBg = YES;
 
-            ds_layer_set_path(hpBg, bgPath);
-            ds_layer_set_hidden(hpBg, NO);
-
-            // 2. Phần máu hiển thị liền kề 3 vạch (Xanh khi thấy, đỏ khi khuất)
             if (hpRatio > 0.01f) {
-                CGFloat fillW = fmaxf(barH, headerW * hpRatio);
-                UIBezierPath *fillPath = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(headerX, barY, fillW, barH) cornerRadius:barH * 0.5f];
+                CGFloat fillW = ds_q05(fmaxf(barH, headerW * hpRatio));
+                CGMutablePathRef hpTarget = p.isKnocked ? hpKnockedPath : hpAlivePath;
+                CGPathAddRoundedRect(hpTarget, NULL, CGRectMake(headerX, barY, fillW, barH), radius, radius);
                 if (fillW > segW) {
-                    [fillPath moveToPoint:CGPointMake(headerX + segW, barY)];
-                    [fillPath addLineToPoint:CGPointMake(headerX + segW, barY + barH)];
+                    CGPathMoveToPoint(hpTarget, NULL, headerX + segW, barY);
+                    CGPathAddLineToPoint(hpTarget, NULL, headerX + segW, barY + barH);
                 }
                 if (fillW > segW * 2.0f) {
-                    [fillPath moveToPoint:CGPointMake(headerX + segW * 2.0f, barY)];
-                    [fillPath addLineToPoint:CGPointMake(headerX + segW * 2.0f, barY + barH)];
+                    CGPathMoveToPoint(hpTarget, NULL, headerX + segW * 2.0f, barY);
+                    CGPathAddLineToPoint(hpTarget, NULL, headerX + segW * 2.0f, barY + barH);
                 }
-
-                ds_layer_set_path(hpBar, fillPath);
-                ds_layer_set_fill(hpBar, playerColor);
-                ds_layer_set_hidden(hpBar, NO);
-            } else {
-                ds_layer_set_hidden(hpBar, YES);
+                if (p.isKnocked) hasHpKnocked = YES; else hasHpAlive = YES;
             }
-        } else {
-            ds_layer_set_hidden(hpBg, YES);
-            ds_layer_set_hidden(hpBar, YES);
         }
 
-        // Tầng 1: Khoảng cách và Team ID dạng [67M]   [25] (Line 1: Distance & Team ID)
+        // Tầng 1: Khoảng cách và Team ID
         CGFloat distH = 11.0f;
         CGFloat distY = (showHp ? barY : badgeY) - distH - 1.5f;
         if (wLabel) {
@@ -1512,7 +1531,7 @@ static void ds_hosted_apply_pubg(void) {
                 dtStr = [NSString stringWithFormat:@"[%d]", tId];
             }
             if (dtStr.length > 0) {
-                ds_layer_set_frame(wLabel, CGRectMake(headerX - 8.0f, distY, headerW + 16.0f, distH));
+                ds_layer_set_frame(wLabel, ds_q1_rect(headerX - 8.0f, distY, headerW + 16.0f, distH));
                 if (wLabel.font != s_distFont) wLabel.font = s_distFont;
                 ds_layer_set_string(wLabel, dtStr);
                 ds_layer_set_hidden(wLabel, NO);
@@ -1521,105 +1540,104 @@ static void ds_hosted_apply_pubg(void) {
             }
         }
 
-        // 2. Snapline: Kẻ từ mũi tên compass xuống đỉnh cụm thông tin địch (Xanh khi thấy, Đỏ khi khuất)
+        // 2. Snapline (batched into alive / knocked CGPath)
         if (g_pubgEspLine) {
-            UIBezierPath *linePath = [UIBezierPath bezierPath];
-            [linePath moveToPoint:CGPointMake(width * 0.5f, 25.0f)];
-            [linePath addLineToPoint:CGPointMake(centerX, distY - 1.0f)];
-            ds_layer_set_path(line, linePath);
-            ds_layer_set_stroke(line, playerColor, g_pubgEspThickness);
-            ds_layer_set_hidden(line, NO);
-        } else {
-            ds_layer_set_hidden(line, YES);
+            CGMutablePathRef lTarget = p.isKnocked ? lineKnockedPath : lineAlivePath;
+            CGPathMoveToPoint(lTarget, NULL, snapOriginX, snapOriginY);
+            CGPathAddLineToPoint(lTarget, NULL, centerX, ds_q05(distY - 1.0f));
+            if (p.isKnocked) hasLineKnocked = YES; else hasLineAlive = YES;
         }
 
-        // 5. Skeleton ESP (Hiện xương khớp MADNESS: Xanh lá khi nhìn thấy, Đỏ khi khuất/gục)
-        if (g_pubgEspSkeleton && p.hasSkeleton && skel) {
-            @try {
-                UIBezierPath *skelPath = [UIBezierPath bezierPath];
-                static const int bonePairs[][2] = {
-                    {0, 1},                     // Head <-> Neck
-                    {1, 2},                     // Neck <-> Pelvis (Spine)
-                    {1, 3}, {3, 4}, {4, 5},     // Neck <-> UprR <-> LwrR <-> HandR
-                    {1, 6}, {6, 7}, {7, 8},     // Neck <-> UprL <-> LwrL <-> HandL
-                    {2, 9}, {9, 10}, {10, 11},  // Pelvis <-> ThighR <-> CalfR <-> FootR
-                    {2, 12}, {12, 13}, {13, 14} // Pelvis <-> ThighL <-> CalfL <-> FootL
-                };
-                const int boneCount = (int)(sizeof(bonePairs) / sizeof(bonePairs[0]));
-                int drawnLines = 0;
-                for (int b = 0; b < boneCount; b++) {
-                    int u = bonePairs[b][0];
-                    int v = bonePairs[b][1];
-                    if (p.skeleton[u].valid && p.skeleton[v].valid) {
-                        float ux = p.skeleton[u].x, uy = p.skeleton[u].y;
-                        float vx = p.skeleton[v].x, vy = p.skeleton[v].y;
-                        if (!isnan(ux) && !isinf(ux) && !isnan(uy) && !isinf(uy) &&
-                            !isnan(vx) && !isinf(vx) && !isnan(vy) && !isinf(vy) &&
-                            fabsf(ux) < 10000.0f && fabsf(uy) < 10000.0f &&
-                            fabsf(vx) < 10000.0f && fabsf(vy) < 10000.0f) {
-                            float segDist = hypotf(ux - vx, uy - vy);
-                            float maxAllowed = fmaxf(fmaxf(p.boxHeight, p.boxWidth) * 1.25f, 120.0f);
-                            if (segDist <= maxAllowed) {
-                                [skelPath moveToPoint:CGPointMake(ux, uy)];
-                                [skelPath addLineToPoint:CGPointMake(vx, vy)];
-                                drawnLines++;
-                            }
+        // 5. Skeleton ESP (batched into alive / knocked CGPath)
+        if (g_pubgEspSkeleton && p.hasSkeleton) {
+            static const int bonePairs[][2] = {
+                {0, 1},                     // Head <-> Neck
+                {1, 2},                     // Neck <-> Pelvis (Spine)
+                {1, 3}, {3, 4}, {4, 5},     // Neck <-> UprR <-> LwrR <-> HandR
+                {1, 6}, {6, 7}, {7, 8},     // Neck <-> UprL <-> LwrL <-> HandL
+                {2, 9}, {9, 10}, {10, 11},  // Pelvis <-> ThighR <-> CalfR <-> FootR
+                {2, 12}, {12, 13}, {13, 14} // Pelvis <-> ThighL <-> CalfL <-> FootL
+            };
+            const int boneCount = (int)(sizeof(bonePairs) / sizeof(bonePairs[0]));
+            CGMutablePathRef sTarget = p.isKnocked ? skelKnockedPath : skelAlivePath;
+            BOOL drewSkel = NO;
+            for (int b = 0; b < boneCount; b++) {
+                int u = bonePairs[b][0];
+                int v = bonePairs[b][1];
+                if (p.skeleton[u].valid && p.skeleton[v].valid) {
+                    float ux = p.skeleton[u].x, uy = p.skeleton[u].y;
+                    float vx = p.skeleton[v].x, vy = p.skeleton[v].y;
+                    if (!isnan(ux) && !isinf(ux) && !isnan(uy) && !isinf(uy) &&
+                        !isnan(vx) && !isinf(vx) && !isnan(vy) && !isinf(vy) &&
+                        fabsf(ux) < 10000.0f && fabsf(uy) < 10000.0f &&
+                        fabsf(vx) < 10000.0f && fabsf(vy) < 10000.0f) {
+                        float segDist = hypotf(ux - vx, uy - vy);
+                        float maxAllowed = fmaxf(fmaxf(p.boxHeight, p.boxWidth) * 1.25f, 120.0f);
+                        if (segDist <= maxAllowed) {
+                            CGPathMoveToPoint(sTarget, NULL, ds_q05(ux), ds_q05(uy));
+                            CGPathAddLineToPoint(sTarget, NULL, ds_q05(vx), ds_q05(vy));
+                            drewSkel = YES;
                         }
                     }
                 }
-
-                // Head Circle (scaled with 3D perspective projection distance)
-                if (p.skeleton[0].valid || p.skeleton[15].valid) {
-                    float cx = p.skeleton[0].valid ? p.skeleton[0].x : p.skeleton[15].x;
-                    float cy = p.skeleton[0].valid ? p.skeleton[0].y : p.skeleton[15].y;
-                    if (!isnan(cx) && !isinf(cx) && !isnan(cy) && !isinf(cy) &&
-                        fabsf(cx) < 10000.0f && fabsf(cy) < 10000.0f) {
-                        float r = p.boxHeight / 18.0f;
-                        if (p.skeleton[15].valid && p.skeleton[0].valid) {
-                            float dx = p.skeleton[15].x - p.skeleton[0].x;
-                            float dy = p.skeleton[15].y - p.skeleton[0].y;
-                            float d = hypotf(dx, dy) * 1.1f;
-                            if (d >= 0.6f && d <= 30.0f) {
-                                r = d;
-                            }
-                        }
-                        if (r < 0.6f) r = 0.6f;
-                        if (r > 24.0f) r = 24.0f;
-
-                        [skelPath moveToPoint:CGPointMake(cx + r, cy)];
-                        [skelPath addArcWithCenter:CGPointMake(cx, cy)
-                                            radius:r
-                                        startAngle:0
-                                          endAngle:2.0f * (float)M_PI
-                                         clockwise:YES];
-                        drawnLines++;
-                    }
-                }
-
-                if (drawnLines > 0) {
-                    CGColorRef skelColor = p.isKnocked ? s_skeletonKnockedColor : s_skeletonAliveColor;
-                    ds_layer_set_path(skel, skelPath);
-                    ds_layer_set_stroke(skel, skelColor, g_pubgEspThickness);
-                    ds_layer_set_hidden(skel, NO);
-                } else {
-                    ds_layer_set_hidden(skel, YES);
-                }
-            } @catch (NSException *ex) {
-                ds_layer_set_hidden(skel, YES);
             }
-        } else if (skel) {
-            ds_layer_set_hidden(skel, YES);
+
+            if (p.skeleton[0].valid || p.skeleton[15].valid) {
+                float hcx = p.skeleton[0].valid ? p.skeleton[0].x : p.skeleton[15].x;
+                float hcy = p.skeleton[0].valid ? p.skeleton[0].y : p.skeleton[15].y;
+                if (!isnan(hcx) && !isinf(hcx) && !isnan(hcy) && !isinf(hcy) &&
+                    fabsf(hcx) < 10000.0f && fabsf(hcy) < 10000.0f) {
+                    float r = p.boxHeight / 18.0f;
+                    if (p.skeleton[15].valid && p.skeleton[0].valid) {
+                        float d = hypotf(p.skeleton[15].x - p.skeleton[0].x,
+                                         p.skeleton[15].y - p.skeleton[0].y) * 1.1f;
+                        if (d >= 0.6f && d <= 30.0f) r = d;
+                    }
+                    if (r < 0.6f) r = 0.6f;
+                    if (r > 24.0f) r = 24.0f;
+                    CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(r);
+                    CGPathMoveToPoint(sTarget, NULL, qx + qr, qy);
+                    CGPathAddArc(sTarget, NULL, qx, qy, qr, 0, 2.0f * (CGFloat)M_PI, true);
+                    drewSkel = YES;
+                }
+            }
+            if (drewSkel) {
+                if (p.isKnocked) hasSkelKnocked = YES; else hasSkelAlive = YES;
+            }
         }
     }
 
+    ds_layer_set_stroke(g_hostedPUBGBoxAliveLayer, s_aliveColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGBoxAliveLayer, boxAlivePath, hasBoxAlive);
+    ds_layer_set_stroke(g_hostedPUBGBoxKnockedLayer, s_knockedColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGBoxKnockedLayer, boxKnockedPath, hasBoxKnocked);
+
+    ds_layer_set_stroke(g_hostedPUBGSkeletonAliveLayer, s_skeletonAliveColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGSkeletonAliveLayer, skelAlivePath, hasSkelAlive);
+    ds_layer_set_stroke(g_hostedPUBGSkeletonKnockedLayer, s_skeletonKnockedColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGSkeletonKnockedLayer, skelKnockedPath, hasSkelKnocked);
+
+    ds_layer_set_stroke(g_hostedPUBGLineAliveLayer, s_aliveColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGLineAliveLayer, lineAlivePath, hasLineAlive);
+    ds_layer_set_stroke(g_hostedPUBGLineKnockedLayer, s_knockedColor, g_pubgEspThickness);
+    ds_layer_set_cgpath(g_hostedPUBGLineKnockedLayer, lineKnockedPath, hasLineKnocked);
+
+    ds_layer_set_cgpath(g_hostedPUBGHealthBgLayer, hpBgPath, hasHpBg);
+    ds_layer_set_cgpath(g_hostedPUBGHealthAliveLayer, hpAlivePath, hasHpAlive);
+    ds_layer_set_cgpath(g_hostedPUBGHealthKnockedLayer, hpKnockedPath, hasHpKnocked);
+
+    CGPathRelease(boxAlivePath);
+    CGPathRelease(boxKnockedPath);
+    CGPathRelease(skelAlivePath);
+    CGPathRelease(skelKnockedPath);
+    CGPathRelease(lineAlivePath);
+    CGPathRelease(lineKnockedPath);
+    CGPathRelease(hpBgPath);
+    CGPathRelease(hpAlivePath);
+    CGPathRelease(hpKnockedPath);
+
     for (int i = drawCount; i < kDSPUBGMaxPlayers; i++) {
-        ds_layer_set_hidden(g_hostedPUBGBoxLayers[i], YES);
-        ds_layer_set_hidden(g_hostedPUBGSkeletonLayers[i], YES);
-        ds_layer_set_hidden(g_hostedPUBGLineLayers[i], YES);
-        ds_layer_set_hidden(g_hostedPUBGAIMarkLayers[i], YES);
         ds_layer_set_hidden(g_hostedPUBGInfoLabels[i], YES);
-        ds_layer_set_hidden(g_hostedPUBGHealthBgLayers[i], YES);
-        ds_layer_set_hidden(g_hostedPUBGHealthBarLayers[i], YES);
         ds_layer_set_hidden(g_hostedPUBGWeaponLabels[i], YES);
         ds_layer_set_hidden(g_hostedPUBGArrowLayers[i], YES);
         ds_layer_set_hidden(g_hostedPUBGArrowTextLayers[i], YES);
@@ -1914,14 +1932,18 @@ static void ds_hosted_apply_pubg(void) {
                     CALayer *redFill = g_hostedPUBGGrenadeMarkerFillLayers[i];
                     CALayer *bgYellow = g_hostedPUBGGrenadeMarkerBgLayers[i];
                     if (redFill) {
-                        CGFloat redH = 22.0f * progress;
-                        redFill.frame = CGRectMake(0, 22.0f - redH, 22.0f, redH);
+                        CGFloat redH = ds_q05(22.0f * progress);
+                        ds_layer_set_frame(redFill, CGRectMake(0, 22.0f - redH, 22.0f, redH));
                     }
                     if (bgYellow) {
-                        CGFloat gVal = 0.95f - (0.87f * progress);
+                        CGFloat gVal = (CGFloat)(roundf((0.95f - (0.87f * progress)) * 50.0f) * 0.02f);
                         if (gVal < 0.08f) gVal = 0.08f;
                         if (gVal > 0.95f) gVal = 0.95f;
-                        bgYellow.backgroundColor = [UIColor colorWithRed:1.0f green:gVal blue:0.05f alpha:1.0f].CGColor;
+                        static CGFloat s_lastBgG[kDSPUBGMaxGrenades] = {-1, -1, -1, -1, -1, -1, -1, -1};
+                        if (fabs(s_lastBgG[i] - gVal) > 0.005f) {
+                            s_lastBgG[i] = gVal;
+                            bgYellow.backgroundColor = [UIColor colorWithRed:1.0f green:gVal blue:0.05f alpha:1.0f].CGColor;
+                        }
                     }
                 }
             } else {
@@ -2050,7 +2072,6 @@ static void ds_hosted_consume_render_snapshot(bool fallback,
     ds_hosted_apply_orientation(renderOri);
     ds_hosted_apply_pubg();
     [CATransaction commit];
-    [CATransaction flush];
 }
 
 static void ds_hosted_publish_render_snapshot(const DSHostedRenderSnapshot &next) {
@@ -2199,44 +2220,36 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
                              @"lineDashPhase": [NSNull null]};
     CGFloat scale = UIScreen.mainScreen.scale;
 
-    // PUBG-only pool: bounding boxes, snaplines, info labels, and health bars
+    // PUBG-only pool: batched vector layers + per-player labels/arrows
         {
+            auto makeBatchShape = ^(CGColorRef fillColor, CGColorRef strokeColor, CGFloat lineWidth) -> CAShapeLayer * {
+                CAShapeLayer *layer = [CAShapeLayer layer];
+                layer.actions = noAnim;
+                layer.contentsScale = scale;
+                layer.fillColor = fillColor;
+                layer.strokeColor = strokeColor;
+                layer.lineWidth = lineWidth;
+                layer.lineCap = kCALineCapSquare;
+                layer.lineJoin = kCALineJoinMiter;
+                layer.hidden = YES;
+                [g_hostedLayer addSublayer:layer];
+                return layer;
+            };
+
+            g_hostedPUBGBoxAliveLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.5);
+            g_hostedPUBGBoxKnockedLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.5);
+            g_hostedPUBGSkeletonAliveLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.2);
+            g_hostedPUBGSkeletonKnockedLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.2);
+            g_hostedPUBGLineAliveLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.2);
+            g_hostedPUBGLineKnockedLayer = makeBatchShape(UIColor.clearColor.CGColor, NULL, 1.2);
+            g_hostedPUBGHealthBgLayer = makeBatchShape([UIColor colorWithWhite:0.1 alpha:0.75].CGColor,
+                                                       [UIColor blackColor].CGColor, 0.8f);
+            g_hostedPUBGHealthAliveLayer = makeBatchShape([UIColor colorWithRed:0.12f green:0.95f blue:0.35f alpha:1.0f].CGColor,
+                                                          [UIColor blackColor].CGColor, 0.8f);
+            g_hostedPUBGHealthKnockedLayer = makeBatchShape([UIColor colorWithRed:1.0f green:0.20f blue:0.15f alpha:1.0f].CGColor,
+                                                            [UIColor blackColor].CGColor, 0.8f);
+
             for (int i = 0; i < kDSPUBGMaxPlayers; i++) {
-                CAShapeLayer *box = [CAShapeLayer layer];
-                box.actions = noAnim;
-                box.contentsScale = scale;
-                box.fillColor = UIColor.clearColor.CGColor;
-                box.lineWidth = 1.5;
-                box.lineCap = kCALineCapSquare;
-                box.lineJoin = kCALineJoinMiter;
-                box.hidden = YES;
-                [g_hostedLayer addSublayer:box];
-                g_hostedPUBGBoxLayers[i] = box;
-
-                CAShapeLayer *skel = [CAShapeLayer layer];
-                skel.actions = noAnim;
-                skel.contentsScale = scale;
-                skel.fillColor = UIColor.clearColor.CGColor;
-                skel.lineWidth = 1.2;
-                skel.hidden = YES;
-                [g_hostedLayer addSublayer:skel];
-                g_hostedPUBGSkeletonLayers[i] = skel;
-
-                CAShapeLayer *line = [CAShapeLayer layer];
-                line.actions = noAnim;
-                line.contentsScale = scale;
-                line.lineWidth = 1.2;
-                line.hidden = YES;
-                [g_hostedLayer addSublayer:line];
-                g_hostedPUBGLineLayers[i] = line;
-
-                CAShapeLayer *aiMark = [CAShapeLayer layer];
-                aiMark.actions = noAnim;
-                aiMark.contentsScale = scale;
-                aiMark.hidden = YES;
-                [g_hostedLayer addSublayer:aiMark];
-                g_hostedPUBGAIMarkLayers[i] = aiMark;
-
                 // Every property below is constant for the lifetime of the
                 // layer. Writing them from the frame loop was pure raster churn.
                 CATextLayer *info = [CATextLayer layer];
@@ -2258,25 +2271,6 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
                 info.hidden = YES;
                 [g_hostedLayer addSublayer:info];
                 g_hostedPUBGInfoLabels[i] = info;
-
-                CAShapeLayer *hpBg = [CAShapeLayer layer];
-                hpBg.actions = noAnim;
-                hpBg.contentsScale = scale;
-                hpBg.fillColor = [UIColor colorWithWhite:0.1 alpha:0.75].CGColor;
-                hpBg.strokeColor = [UIColor blackColor].CGColor;
-                hpBg.lineWidth = 0.8f;
-                hpBg.hidden = YES;
-                [g_hostedLayer addSublayer:hpBg];
-                g_hostedPUBGHealthBgLayers[i] = hpBg;
-
-                CAShapeLayer *hpBar = [CAShapeLayer layer];
-                hpBar.actions = noAnim;
-                hpBar.contentsScale = scale;
-                hpBar.strokeColor = [UIColor blackColor].CGColor;
-                hpBar.lineWidth = 0.8f;
-                hpBar.hidden = YES;
-                [g_hostedLayer addSublayer:hpBar];
-                g_hostedPUBGHealthBarLayers[i] = hpBar;
 
                 CATextLayer *wLabel = [CATextLayer layer];
                 wLabel.actions = noAnim;
@@ -2702,9 +2696,13 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
 }
 
 static void ds_hosted_overlay_frame(void) {
-    ds_hosted_menu_ensure();
+    static CFAbsoluteTime s_lastMenuEnsureAt = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - s_lastMenuEnsureAt >= 1.0) {
+        s_lastMenuEnsureAt = now;
+        ds_hosted_menu_ensure();
+    }
     if (!g_hostedLayerReady.load(std::memory_order_acquire)) {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         if (now - g_hostedLastSetupTryAt >= 2.0) {
             g_hostedLastSetupTryAt = now;
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -2758,12 +2756,12 @@ static void ds_hosted_overlay_start(void) {
                 if (contextId) ds_hosted_overlay_register(contextId);
                 if (menuContextId) ds_hosted_menu_register(menuContextId);
                 if (g_hostedTimer) {
-                    uint32_t maximumFrameRate = MAX(
+                    uint32_t targetFPS = MIN(MAX(
                         g_hostedMaximumFrameRate.load(std::memory_order_acquire),
-                        30u);
+                        30u), 60u);
                     dispatch_source_set_timer(
                         g_hostedTimer, DISPATCH_TIME_NOW,
-                        (uint64_t)(NSEC_PER_SEC / maximumFrameRate),
+                        (uint64_t)(NSEC_PER_SEC / targetFPS),
                         1 * NSEC_PER_MSEC);
                 }
             });
@@ -2771,33 +2769,28 @@ static void ds_hosted_overlay_start(void) {
     });
     g_hostedTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                            ds_bridge_queue());
-    uint32_t maximumFrameRate = MAX(
-        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 30u);
+    uint32_t targetFPS = MIN(MAX(
+        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 30u), 60u);
     dispatch_source_set_timer(g_hostedTimer, DISPATCH_TIME_NOW,
-                              (uint64_t)(NSEC_PER_SEC / maximumFrameRate),
+                              (uint64_t)(NSEC_PER_SEC / targetFPS),
                               1 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(g_hostedTimer, ^{
-        if (g_hostedLayerReady.load(std::memory_order_acquire)) {
-            uint64_t pulse = g_hostedDisplayPulse.load(std::memory_order_acquire);
-            if (pulse == g_hostedConsumedDisplayPulse) {
-                // The display link can go silent while this process is
-                // backgrounded (hosted SpringBoard context, audio keepalive).
-                // Returning here starved ds_pubg_tick() after the first frame:
-                // no ESP refresh, no camera zoom, no auto smite, and menu
-                // switches appeared dead. Only skip while the display link is
-                // actually driving frames; otherwise this timer reads and
-                // publishes, and the publish fallback applies on main.
-                double lastTick = g_hostedLastDisplayLinkTick.load(
-                    std::memory_order_relaxed);
-                if (lastTick > 0.0 &&
-                    CACurrentMediaTime() - lastTick <= 0.10) {
-                    return;
+        @autoreleasepool {
+            if (g_hostedLayerReady.load(std::memory_order_acquire)) {
+                uint64_t pulse = g_hostedDisplayPulse.load(std::memory_order_acquire);
+                if (pulse == g_hostedConsumedDisplayPulse) {
+                    double lastTick = g_hostedLastDisplayLinkTick.load(
+                        std::memory_order_relaxed);
+                    if (lastTick > 0.0 &&
+                        CACurrentMediaTime() - lastTick <= 0.10) {
+                        return;
+                    }
+                } else {
+                    g_hostedConsumedDisplayPulse = pulse;
                 }
-            } else {
-                g_hostedConsumedDisplayPulse = pulse;
             }
+            ds_hosted_overlay_frame();
         }
-        ds_hosted_overlay_frame();
     });
     dispatch_resume(g_hostedTimer);
 }

@@ -439,8 +439,11 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.radacircle3.lineWidth = 1.0f;
     [self.dragMap.layer addSublayer:self.radacircle3];
 
+    NSDictionary *noAnim = @{@"path": NSNull.null, @"hidden": NSNull.null};
+
     // 5. Alive enemy / bot red dots layer (crisp red dots with thin white outline)
     self.radarDotsLayer = [CAShapeLayer layer];
+    self.radarDotsLayer.actions = noAnim;
     self.radarDotsLayer.fillColor = [UIColor colorWithRed:1.0f green:0.12f blue:0.12f alpha:1.0f].CGColor;
     self.radarDotsLayer.strokeColor = [UIColor whiteColor].CGColor;
     self.radarDotsLayer.lineWidth = 0.8f;
@@ -448,6 +451,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     // 6. Knocked enemy orange warning dots layer
     self.radarKnockedDotsLayer = [CAShapeLayer layer];
+    self.radarKnockedDotsLayer.actions = noAnim;
     self.radarKnockedDotsLayer.fillColor = [UIColor colorWithRed:1.0f green:0.55f blue:0.0f alpha:1.0f].CGColor;
     self.radarKnockedDotsLayer.strokeColor = [UIColor blackColor].CGColor;
     self.radarKnockedDotsLayer.lineWidth = 0.8f;
@@ -467,23 +471,13 @@ static const CGFloat kMadnessPanelH = 325.0f;
 }
 
 - (void)updateRadarWithPlayers:(nullable const void *)players count:(int)count {
-    if (!self.dragMap || self.dragMap.hidden || !g_pubgEspRadar) {
-        if (self.radarDotsLayer && self.radarDotsLayer.path != nil) {
+    if (!self.dragMap || self.dragMap.hidden || !g_pubgEspRadar || !players || count <= 0) {
+        if ((self.radarDotsLayer && self.radarDotsLayer.path != nil) ||
+            (self.radarKnockedDotsLayer && self.radarKnockedDotsLayer.path != nil)) {
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
-            self.radarDotsLayer.path = nil;
-            if (self.radarKnockedDotsLayer) self.radarKnockedDotsLayer.path = nil;
-            [CATransaction commit];
-        }
-        return;
-    }
-
-    if (!players || count <= 0) {
-        if (self.radarDotsLayer && self.radarDotsLayer.path != nil) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            self.radarDotsLayer.path = nil;
-            if (self.radarKnockedDotsLayer) self.radarKnockedDotsLayer.path = nil;
+            if (self.radarDotsLayer && self.radarDotsLayer.path != nil) self.radarDotsLayer.path = nil;
+            if (self.radarKnockedDotsLayer && self.radarKnockedDotsLayer.path != nil) self.radarKnockedDotsLayer.path = nil;
             [CATransaction commit];
         }
         return;
@@ -497,8 +491,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     const CGFloat dotRadius = 2.8f;
     const CGFloat dotDiameter = dotRadius * 2.0f;
 
-    UIBezierPath *aliveDots = [UIBezierPath bezierPath];
-    UIBezierPath *knockedDots = [UIBezierPath bezierPath];
+    CGMutablePathRef alivePath = CGPathCreateMutable();
+    CGMutablePathRef knockedPath = CGPathCreateMutable();
     int aliveCount = 0;
     int knockedCount = 0;
 
@@ -506,17 +500,11 @@ static const CGFloat kMadnessPanelH = 325.0f;
         const DSPUBGProjectedPlayer &p = playerList[i];
         if (p.isDead) continue;
 
-        // Relative coordinates to camera:
-        // camRelX: cm Right (+X)
-        // camRelZ: cm Forward (+Z)
         float relX = p.camRelX * 0.01f; // meters right
         float relZ = p.camRelZ * 0.01f; // meters forward
 
         if (isnan(relX) || isnan(relZ) || isinf(relX) || isinf(relZ)) continue;
 
-        // In radar coordinates:
-        // Forward is UP (-Y)
-        // Right is +X
         float ox = relX * scale;
         float oy = -relZ * scale;
 
@@ -530,30 +518,38 @@ static const CGFloat kMadnessPanelH = 325.0f;
             }
         }
 
-        CGFloat dotX = rx + (CGFloat)ox;
-        CGFloat dotY = ry + (CGFloat)oy;
-
+        // Quantize to 0.5pt to avoid sub-pixel CoreAnimation re-rasterization churn.
+        CGFloat dotX = (CGFloat)(roundf((float)(rx + ox) * 2.0f) * 0.5f);
+        CGFloat dotY = (CGFloat)(roundf((float)(ry + oy) * 2.0f) * 0.5f);
         CGRect r = CGRectMake(dotX - dotRadius, dotY - dotRadius, dotDiameter, dotDiameter);
-        UIBezierPath *circlePath = [UIBezierPath bezierPathWithOvalInRect:r];
 
         if (p.isKnocked) {
-            [knockedDots appendPath:circlePath];
+            CGPathAddEllipseInRect(knockedPath, NULL, r);
             knockedCount++;
         } else {
-            [aliveDots appendPath:circlePath];
+            CGPathAddEllipseInRect(alivePath, NULL, r);
             aliveCount++;
         }
     }
 
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    if (self.radarDotsLayer) {
-        self.radarDotsLayer.path = (aliveCount > 0) ? aliveDots.CGPath : nil;
+    CGPathRef targetAlive = (aliveCount > 0) ? alivePath : NULL;
+    CGPathRef targetKnocked = (knockedCount > 0) ? knockedPath : NULL;
+    BOOL updateAlive = self.radarDotsLayer &&
+        ((targetAlive == NULL) != (self.radarDotsLayer.path == NULL) ||
+         (targetAlive && self.radarDotsLayer.path && !CGPathEqualToPath(self.radarDotsLayer.path, targetAlive)));
+    BOOL updateKnocked = self.radarKnockedDotsLayer &&
+        ((targetKnocked == NULL) != (self.radarKnockedDotsLayer.path == NULL) ||
+         (targetKnocked && self.radarKnockedDotsLayer.path && !CGPathEqualToPath(self.radarKnockedDotsLayer.path, targetKnocked)));
+
+    if (updateAlive || updateKnocked) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (updateAlive) self.radarDotsLayer.path = targetAlive;
+        if (updateKnocked) self.radarKnockedDotsLayer.path = targetKnocked;
+        [CATransaction commit];
     }
-    if (self.radarKnockedDotsLayer) {
-        self.radarKnockedDotsLayer.path = (knockedCount > 0) ? knockedDots.CGPath : nil;
-    }
-    [CATransaction commit];
+    CGPathRelease(alivePath);
+    CGPathRelease(knockedPath);
 }
 
 #pragma mark - Clock & Contact

@@ -1645,13 +1645,12 @@ static pid_t ds_springboard_pid(void) {
 static void ds_hud_request_rebuild(void) {
     // Cooldown + single-flight: a persistent boot failure must not turn the
     // watchdog into a RemoteCall retry storm (that is the panic path).
+    // After kDSMaxAutoRebuilds, back off to a 60s recovery interval instead
+    // of permanently giving up while the HUD is still requested.
     if (g_hudRebuildInFlight.exchange(true)) return;
-    if (g_hudRebuildAttempts.load() >= kDSMaxAutoRebuilds) {
-        g_hudRebuildInFlight.store(false);
-        return;
-    }
+    double minInterval = (g_hudRebuildAttempts.load() >= kDSMaxAutoRebuilds) ? 60.0 : 15.0;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - g_lastHudRebuildAt.load() < 15.0) {
+    if (now - g_lastHudRebuildAt.load() < minInterval) {
         g_hudRebuildInFlight.store(false);
         return;
     }
@@ -1712,6 +1711,7 @@ static void ds_hud_watchdog_tick(void) {
     if (!g_hostedTimer && g_hostedLayerReady.load(std::memory_order_acquire)) {
         ds_hosted_overlay_start();
     }
+    ds_start_keepalive();
 }
 
 static void ds_hud_watchdog_start(void) {
@@ -1852,12 +1852,22 @@ static void ds_finish_enable(void) {
     g_dsProgress.store(0.96);
     ds_set_stage(ds_localized(@"Locating SpringBoard"));
     ds_post_progress();
-    uint64_t sbProc = proc_find_by_name("SpringBoard");
+    uint64_t sbProc = 0;
+    uint32_t sbPidEarly = 0;
+    @try {
+        sbProc = proc_find_by_name("SpringBoard");
+        if (sbProc && off_proc_p_pid) {
+            sbPidEarly = ds_kread32(sbProc + off_proc_p_pid);
+        }
+    } @catch (NSException *exception) {
+        ds_fail_enable([NSString stringWithFormat:ds_localized(@"SpringBoard lookup failed: %@"),
+                        exception.reason ?: exception.name ?: @"dsexception"]);
+        return;
+    }
     if (!sbProc) {
         ds_fail_enable(ds_localized(@"SpringBoard is not ready, so the HUD cannot be created. Retry or reinstall over the existing app; restart the device only as a last resort."));
         return;
     }
-    uint32_t sbPidEarly = off_proc_p_pid ? ds_kread32(sbProc + off_proc_p_pid) : 0;
 
     // One-shot channel design: after the first successful enable the overlay
     // registration lives inside SpringBoard but the hijacked thread/exception
@@ -2065,12 +2075,14 @@ void DSBridgeTeardownForTermination(void) {
     g_hostedMenuWindow.hidden = YES;
     g_hostedWindow.hidden = YES;
     [CATransaction flush];
+    ds_stop_keepalive();
     // Called from applicationWillTerminate: on the main thread. The keepalive
     // keeps us background-RUNNING (not suspended), so this really fires on a
     // swipe-kill. Serialize with the bridge queue, but never call helpers that
     // dispatch_sync to the main thread from here (it is blocked in this call).
     dispatch_sync(ds_bridge_queue(), ^{
         @autoreleasepool {
+            ds_hud_watchdog_stop();
             ds_stop_rate_timer();
             if (g_hostedTimer) {
                 dispatch_source_cancel(g_hostedTimer);
@@ -2162,9 +2174,13 @@ void DSBridgeSetActiveGame(int game) {
 BOOL DSBridgeIsPUBGRunning(void) {
 #if USE_DARKSWORD
     if (DSBridgeIsReady()) {
-        pid_t pid = 0;
-        uint64_t proc = ds_pubg_find_proc(&pid);
-        return (proc != 0 && pid > 0);
+        @try {
+            pid_t pid = 0;
+            uint64_t proc = ds_pubg_find_proc(&pid);
+            return (proc != 0 && pid > 0);
+        } @catch (__unused NSException *exception) {
+            return NO;
+        }
     }
 #endif
     return NO;

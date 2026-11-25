@@ -133,6 +133,12 @@ struct DSPUBGActorCacheEntry {
     uint64_t infoActor;
     char cachedName[32];
     char cachedNation[16];
+    uint64_t metaActor;
+    uint64_t metaPs;
+    bool cachedIsAI;
+    bool cachedHasNation;
+    bool cachedHasUID;
+    char cachedMetaNation[16];
     uint64_t weaponActor;
     char cachedWeapon[32];
     uint64_t weaponRefreshTick;
@@ -140,13 +146,43 @@ struct DSPUBGActorCacheEntry {
 static const size_t kDSPUBGActorCacheSize = 16384;
 static DSPUBGActorCacheEntry g_dspubgActorCache[kDSPUBGActorCacheSize] = {};
 
+struct DSPUBGCachedLoot {
+    DSPUBGVector worldLoc;
+    bool hasWorldLoc;
+    DSPUBGItemCategory category;
+    char name[36];
+    uint32_t colorRGBA;
+    bool isPriority;
+};
+static DSPUBGCachedLoot s_cachedLoot[kDSPUBGMaxItems * 2] = {};
+static int s_cachedLootCount = 0;
+static uint32_t s_levelScanTick = 0;
+static std::vector<uint64_t> s_trackedLevelPawns;
+static std::vector<uint64_t> s_trackedLevelGrenades;
+static std::vector<uint64_t> s_trackedLevelVehicles;
+static uint64_t s_lastMatchWorld = 0;
+static uint64_t s_lastMatchLevel = 0;
+static bool s_lastMatchMapIsLobby = false;
+
 static inline uint32_t ds_pubg_actor_cache_hash(uint64_t actor) {
     return (uint32_t)((actor >> 4) ^ (actor >> 13)) & (uint32_t)(kDSPUBGActorCacheSize - 1);
+}
+
+static inline bool ds_pubg_is_pet_name(const char *name) {
+    if (!name || !name[0]) return false;
+    return (strcasestr(name, "Pet") != NULL ||
+            strcasestr(name, "Companion") != NULL ||
+            strcasestr(name, "Buddy") != NULL ||
+            strcasestr(name, "Mascot") != NULL ||
+            strcasestr(name, "Partner") != NULL ||
+            strcasestr(name, "Falcon") != NULL ||
+            strcasestr(name, "Pigeon") != NULL);
 }
 
 // Fast check for static scenery / non-loot / non-character engine classes
 static inline bool ds_pubg_is_scenery_name(const char *name) {
     if (!name || !name[0]) return false;
+    if (ds_pubg_is_pet_name(name)) return true;
     return (strstr(name, "StaticMesh") || strstr(name, "Foliage") ||
             strstr(name, "Landscape") || strstr(name, "Building") ||
             strstr(name, "House") || strstr(name, "Tree") ||
@@ -2302,53 +2338,62 @@ static bool ds_pubg_scan_for_engine_and_world(uint64_t vmMap, uint64_t base) {
 
 // Find PUBG Mobile process. In iOS XNU, p_comm is 16 bytes max (15 chars + \0),
 // so "ShadowTrackerExtra" (18 chars) truncates to "ShadowTrackerEx".
+static void ds_pubg_overlay_reset(void);
+
 static uint64_t ds_pubg_find_proc(pid_t *outPid) {
     if (outPid) *outPid = 0;
     if (!ds_is_ready()) return 0;
 
-    // 1. Prefix match via procbyname (15 chars)
-    uint64_t proc = procbyname("ShadowTrackerEx");
-    if (!proc) proc = procbyname("ShadowTrackerExtra");
-    if (!proc) proc = procbyname("ShadowTracker");
-    if (!proc) proc = procbyname("PUBG MOBILE");
-    if (!proc) proc = procbyname("PUBGMOBILE");
-    if (!proc) proc = procbyname("pubgmobile");
-    if (!proc) proc = procbyname("PUBGM");
-    if (!proc) proc = procbyname("pubg");
+    proc_entry_t *list = NULL;
+    @try {
+        // 1. Prefix match via procbyname (15 chars)
+        uint64_t proc = procbyname("ShadowTrackerEx");
+        if (!proc) proc = procbyname("ShadowTrackerExtra");
+        if (!proc) proc = procbyname("ShadowTracker");
+        if (!proc) proc = procbyname("PUBG MOBILE");
+        if (!proc) proc = procbyname("PUBGMOBILE");
+        if (!proc) proc = procbyname("pubgmobile");
+        if (!proc) proc = procbyname("PUBGM");
+        if (!proc) proc = procbyname("pubg");
 
-    if (proc) {
-        if (outPid) {
-            pid_t pid = (pid_t)(off_proc_p_pid ? ds_kread32(proc + off_proc_p_pid) : 0);
-            if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x60);
-            if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x28);
-            *outPid = pid;
+        if (proc) {
+            if (outPid) {
+                pid_t pid = (pid_t)(off_proc_p_pid ? ds_kread32(proc + off_proc_p_pid) : 0);
+                if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x60);
+                if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x28);
+                *outPid = pid;
+            }
+            return proc;
         }
-        return proc;
-    }
 
-    // 2. Full proclist search with case-insensitive substring
-    int count = 0;
-    proc_entry_t *list = proclist("", &count);
-    if (list && count > 0) {
-        for (int i = 0; i < count; i++) {
-            const char *name = list[i].name;
-            if (!name || !name[0]) continue;
-            if (strcasestr(name, "Shadow") != NULL || strcasestr(name, "PUBG") != NULL) {
-                uint64_t p = list[i].kaddr;
-                if (p && ds_isvalid(p)) {
-                    pid_t pid = off_proc_p_pid ? (pid_t)ds_kread32(p + off_proc_p_pid) : (pid_t)list[i].pid;
-                    if (pid <= 0) pid = (pid_t)list[i].pid;
-                    if (pid > 0) {
-                        if (outPid) *outPid = pid;
-                        proc = p;
-                        break;
+        // 2. Full proclist search with case-insensitive substring
+        int count = 0;
+        list = proclist("", &count);
+        if (list && count > 0) {
+            for (int i = 0; i < count; i++) {
+                const char *name = list[i].name;
+                if (!name || !name[0]) continue;
+                if (strcasestr(name, "Shadow") != NULL || strcasestr(name, "PUBG") != NULL) {
+                    uint64_t p = list[i].kaddr;
+                    if (p && ds_isvalid(p)) {
+                        pid_t pid = off_proc_p_pid ? (pid_t)ds_kread32(p + off_proc_p_pid) : (pid_t)list[i].pid;
+                        if (pid <= 0) pid = (pid_t)list[i].pid;
+                        if (pid > 0) {
+                            if (outPid) *outPid = pid;
+                            proc = p;
+                            break;
+                        }
                     }
                 }
             }
         }
-        free_proclist(list);
+        return proc;
+    } @catch (__unused NSException *exception) {
+        if (outPid) *outPid = 0;
+        return 0;
+    } @finally {
+        if (list) free_proclist(list);
     }
-    return proc;
 }
 
 // Locate main executable base image.
@@ -2378,7 +2423,18 @@ static uint64_t ds_pubg_find_base(uint64_t vmMap) {
 static bool ds_pubg_attach(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (g_dspubgTargetActive.load(std::memory_order_acquire) && g_dspubgBase && g_dspubgVmMap) {
-        return true;
+        if (g_dspubgPid > 0 && ds_pid_alive_userspace((pid_t)g_dspubgPid)) {
+            return true;
+        }
+        // Target exited or restarted: drop stale shmem/VM/match state right away.
+        ds_debug_shmem_flush_ex(NO);
+        ds_pubg_overlay_reset();
+        g_dspubgTargetActive.store(false, std::memory_order_release);
+        g_dspubgProc = g_dspubgVmMap = g_dspubgBase = 0;
+        g_dspubgPid = 0;
+        g_dspubgCachedWorld = 0;
+        g_dspubgEngineRva = 0;
+        g_dspubgWorldRva = 0;
     }
     if (now < g_dspubgNextAttach) return false;
 
@@ -2882,6 +2938,17 @@ static int ds_pubg_copy_projected_grenades(DSPUBGProjectedGrenade out[kDSPUBGMax
     return count;
 }
 
+static void ds_pubg_reset_match_caches(void) {
+    s_cachedLootCount = 0;
+    s_levelScanTick = 0;
+    s_trackedLevelPawns.clear();
+    s_trackedLevelGrenades.clear();
+    s_trackedLevelVehicles.clear();
+    s_lastMatchWorld = 0;
+    s_lastMatchLevel = 0;
+    s_lastMatchMapIsLobby = false;
+}
+
 static void ds_pubg_overlay_reset(void) {
     os_unfair_lock_lock(&g_dspubgSnapshotLock);
     g_dspubgPlayerCount = 0;
@@ -2898,6 +2965,7 @@ static void ds_pubg_overlay_reset(void) {
     ++g_dspubgGrenadeEpoch;
     os_unfair_lock_unlock(&g_dspubgSnapshotLock);
 
+    ds_pubg_reset_match_caches();
     s_crateCache.clear();
 }
 
@@ -4045,26 +4113,36 @@ static const char* ds_pubg_get_debug_status(void) {
 static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint64_t localPawn) {
     if (!world || !ds_pubg_valid(world)) return false;
 
-    // 1. World and PersistentLevel Name check (rejects Lobby_Menu, MainCity, Frontend maps)
-    char worldName[64] = {0};
-    if (ds_pubg_get_actor_name(world, worldName, sizeof(worldName))) {
-        if (strcasestr(worldName, "Lobby") || strcasestr(worldName, "MainCity") ||
-            strcasestr(worldName, "Frontend") || strcasestr(worldName, "Hall") ||
-            strcasestr(worldName, "Login") || strcasestr(worldName, "Menu")) {
-            return false;
-        }
-    }
-
     uint64_t level = ds_pubg_read_ptr(world + 0x30ULL); // PersistentLevel
-    if (level && ds_pubg_valid(level)) {
-        char levelName[64] = {0};
-        if (ds_pubg_get_actor_name(level, levelName, sizeof(levelName))) {
-            if (strcasestr(levelName, "Lobby") || strcasestr(levelName, "MainCity") ||
-                strcasestr(levelName, "Frontend") || strcasestr(levelName, "Hall") ||
-                strcasestr(levelName, "Login") || strcasestr(levelName, "Menu")) {
-                return false;
+
+    // 1. World and PersistentLevel Name check (cached per (world, level) pair
+    // so steady-state frames do not hit GNames for unchanging map objects).
+    if (world != s_lastMatchWorld || level != s_lastMatchLevel) {
+        bool isLobbyMap = false;
+        char worldName[64] = {0};
+        if (ds_pubg_get_actor_name(world, worldName, sizeof(worldName))) {
+            if (strcasestr(worldName, "Lobby") || strcasestr(worldName, "MainCity") ||
+                strcasestr(worldName, "Frontend") || strcasestr(worldName, "Hall") ||
+                strcasestr(worldName, "Login") || strcasestr(worldName, "Menu")) {
+                isLobbyMap = true;
             }
         }
+        if (!isLobbyMap && level && ds_pubg_valid(level)) {
+            char levelName[64] = {0};
+            if (ds_pubg_get_actor_name(level, levelName, sizeof(levelName))) {
+                if (strcasestr(levelName, "Lobby") || strcasestr(levelName, "MainCity") ||
+                    strcasestr(levelName, "Frontend") || strcasestr(levelName, "Hall") ||
+                    strcasestr(levelName, "Login") || strcasestr(levelName, "Menu")) {
+                    isLobbyMap = true;
+                }
+            }
+        }
+        s_lastMatchWorld = world;
+        s_lastMatchLevel = level;
+        s_lastMatchMapIsLobby = isLobbyMap;
+    }
+    if (s_lastMatchMapIsLobby) {
+        return false;
     }
 
     // 2. NetDriver -> ServerConnection check
@@ -5042,7 +5120,7 @@ static void ds_pubg_smart_begin_frame(uint64_t world, uint64_t localPawn) {
     (void)localPawn;
 }
 
-static void ds_pubg_tick(void) {
+static void ds_pubg_tick_impl(void) {
     if (!ds_pubg_attach()) {
         return;
     }
@@ -5085,6 +5163,7 @@ static void ds_pubg_tick(void) {
     }
 
     if (!world) {
+        ds_pubg_reset_match_caches();
         g_dspubgLastActorsCount = 0;
         g_dspubgLastEnemyCount = 0;
         g_dspubgLastBotCount = 0;
@@ -5160,6 +5239,7 @@ static void ds_pubg_tick(void) {
         ++g_dspubgGrenadeEpoch;
         os_unfair_lock_unlock(&g_dspubgSnapshotLock);
 
+        ds_pubg_reset_match_caches();
         g_dspubgLastActorsCount = 0;
         g_dspubgLastEnemyCount = 0;
         g_dspubgLastBotCount = 0;
@@ -5313,19 +5393,33 @@ static void ds_pubg_tick(void) {
                     return false;
                 }
 
+                if (ds_pubg_is_pet_name(pawnName) ||
+                    strcasestr(pawnName, "Particle") || strcasestr(pawnName, "Effect") ||
+                    strcasestr(pawnName, "Decal") || strcasestr(pawnName, "Camera") ||
+                    strcasestr(pawnName, "Volume") || strcasestr(pawnName, "Trigger") ||
+                    strcasestr(pawnName, "Light") || strcasestr(pawnName, "Audio") ||
+                    strcasestr(pawnName, "Sound") || strcasestr(pawnName, "Zone") ||
+                    strcasestr(pawnName, "Fog") || strcasestr(pawnName, "Lobby") ||
+                    strcasestr(pawnName, "MainCity") || strcasestr(pawnName, "PetAvatar") ||
+                    strcasestr(pawnName, "LobbyModel") || strcasestr(pawnName, "Avatar") ||
+                    strcasestr(pawnName, "Preview")) {
+                    cEntry.actor = pawn;
+                    cEntry.isScenery = true;
+                    cEntry.isPawn = false;
+                    cEntry.itemCat = DSPUBGItemCategoryNone;
+                    cEntry.vCommon = 0;
+                    return false;
+                }
+
                 if (strcasestr(pawnName, "Bullet") || strcasestr(pawnName, "Proj") || strcasestr(pawnName, "Weapon") ||
                     strcasestr(pawnName, "PickUp") || strcasestr(pawnName, "Vehicle") || strcasestr(pawnName, "VH_") ||
                     strcasestr(pawnName, "Drop") || strcasestr(pawnName, "Tomb") || strcasestr(pawnName, "Box") ||
-                    strcasestr(pawnName, "Supply") || strcasestr(pawnName, "Particle") || strcasestr(pawnName, "Effect") ||
-                    strcasestr(pawnName, "Decal") || strcasestr(pawnName, "Camera") || strcasestr(pawnName, "Volume") ||
-                    strcasestr(pawnName, "Trigger") || strcasestr(pawnName, "AirDrop") || strcasestr(pawnName, "Item") ||
-                    strcasestr(pawnName, "Controller") || strcasestr(pawnName, "Light") || strcasestr(pawnName, "Audio") ||
-                    strcasestr(pawnName, "Sound") || strcasestr(pawnName, "Zone") || strcasestr(pawnName, "Fog") ||
-                    strcasestr(pawnName, "Shell") || strcasestr(pawnName, "Cartridge") || strcasestr(pawnName, "Trace") ||
-                    strcasestr(pawnName, "Grenade") || strcasestr(pawnName, "Smoke") || strcasestr(pawnName, "Explosion") ||
-                    strcasestr(pawnName, "Shoulei") || strcasestr(pawnName, "Molotov") || strcasestr(pawnName, "Burn") ||
-                    strcasestr(pawnName, "Lobby") || strcasestr(pawnName, "MainCity") || strcasestr(pawnName, "PetAvatar") ||
-                    strcasestr(pawnName, "LobbyModel") || strcasestr(pawnName, "Avatar") || strcasestr(pawnName, "Preview")) {
+                    strcasestr(pawnName, "Supply") || strcasestr(pawnName, "AirDrop") || strcasestr(pawnName, "Item") ||
+                    strcasestr(pawnName, "Controller") || strcasestr(pawnName, "Shell") ||
+                    strcasestr(pawnName, "Cartridge") || strcasestr(pawnName, "Trace") ||
+                    strcasestr(pawnName, "Grenade") || strcasestr(pawnName, "Smoke") ||
+                    strcasestr(pawnName, "Explosion") || strcasestr(pawnName, "Shoulei") ||
+                    strcasestr(pawnName, "Molotov") || strcasestr(pawnName, "Burn")) {
                     return false;
                 }
             }
@@ -5446,64 +5540,91 @@ static void ds_pubg_tick(void) {
 
         uint64_t ps = psHint ? psHint : ds_pubg_read_ptr(pawn + 0x4D0ULL);
         bool isAI = knownBot;
+        char readNation[16] = {0};
+        bool hasNation = false;
 
-        // 1. Check Character AI flags (UAECharacter.bIsAI, bIsMLAI, bIsAIWithPet)
-        if (!isAI) {
-            uint8_t a50 = ds_pubg_read_u8(pawn + kDSPUBGCharacterIsAIOffset); // 0xA50 UAECharacter.bIsAI
-            uint8_t a51 = ds_pubg_read_u8(pawn + 0xA51ULL);                 // 0xA51 UAECharacter.bIsMLAI
-            uint8_t a52 = ds_pubg_read_u8(pawn + 0xA52ULL);                 // 0xA52 UAECharacter.bIsAIWithPet
-            uint8_t a40 = ds_pubg_read_u8(pawn + 0xA40ULL);                 // Older UAECharacter.bIsAI
-            uint8_t a41 = ds_pubg_read_u8(pawn + 0xA41ULL);                 // Older UAECharacter.bIsMLAI
-            if (a50 == 1 || a51 == 1 || a52 == 1 || a40 == 1 || a41 == 1) {
-                isAI = true;
+        if (cEntry.actor == pawn && cEntry.metaActor == pawn && cEntry.metaPs == ps) {
+            if (!isAI) isAI = cEntry.cachedIsAI;
+            hasNation = cEntry.cachedHasNation;
+            if (hasNation) {
+                memcpy(readNation, cEntry.cachedMetaNation, sizeof(readNation));
             }
-        }
-
-        // 2. Check PlayerState AI flags
-        if (!isAI && ps && ds_pubg_valid(ps)) {
-            uint8_t botByte = ds_pubg_read_u8(ps + kDSPUBGPlayerStateIsABotOffset);
-            if ((botByte & 0x4) != 0) {
-                isAI = true;
-            }
-            uint64_t mlaiUid = ds_pubg_read_ptr(ps + 0x6D0ULL); // AUAEPlayerState.MLAIDisplayUID
-            if (mlaiUid != 0) {
-                isAI = true;
-            }
-        }
-
-        // 3. Check AI Controller on Pawn (Remote players on client have Controller == 0)
-        if (!isAI) {
-            uint64_t ctrl = ds_pubg_read_ptr(pawn + 0x4E8ULL);
-            if (ctrl && ds_pubg_valid(ctrl)) {
-                char ctrlName[64] = {0};
-                if (ds_pubg_get_actor_name(ctrl, ctrlName, sizeof(ctrlName))) {
-                    if (strcasestr(ctrlName, "AI") || strcasestr(ctrlName, "Fake")) {
-                        isAI = true;
-                    }
-                } else {
+        } else {
+            // 1. Check Character AI flags (UAECharacter.bIsAI, bIsMLAI, bIsAIWithPet)
+            if (!isAI) {
+                uint8_t a50 = ds_pubg_read_u8(pawn + kDSPUBGCharacterIsAIOffset); // 0xA50 UAECharacter.bIsAI
+                uint8_t a51 = ds_pubg_read_u8(pawn + 0xA51ULL);                 // 0xA51 UAECharacter.bIsMLAI
+                uint8_t a52 = ds_pubg_read_u8(pawn + 0xA52ULL);                 // 0xA52 UAECharacter.bIsAIWithPet
+                uint8_t a40 = ds_pubg_read_u8(pawn + 0xA40ULL);                 // Older UAECharacter.bIsAI
+                uint8_t a41 = ds_pubg_read_u8(pawn + 0xA41ULL);                 // Older UAECharacter.bIsMLAI
+                if (a50 == 1 || a51 == 1 || a52 == 1 || a40 == 1 || a41 == 1) {
                     isAI = true;
                 }
             }
-        }
 
-        // 4. Read Nation & PlayerUID to verify real player presence
-        char readNation[16] = {0};
-        bool hasNation = ds_pubg_read_fstring_nation(pawn + kDSPUBGCharacterNationOffset, readNation, sizeof(readNation));
-        if (!hasNation && ps && ds_pubg_valid(ps)) {
-            hasNation = ds_pubg_read_fstring_nation(ps + kDSPUBGPlayerStateNationOffset, readNation, sizeof(readNation));
-        }
+            // 2. Check PlayerState AI flags
+            if (!isAI && ps && ds_pubg_valid(ps)) {
+                uint8_t botByte = ds_pubg_read_u8(ps + kDSPUBGPlayerStateIsABotOffset);
+                if ((botByte & 0x4) != 0) {
+                    isAI = true;
+                }
+                uint64_t mlaiUid = ds_pubg_read_ptr(ps + 0x6D0ULL); // AUAEPlayerState.MLAIDisplayUID
+                if (mlaiUid != 0) {
+                    isAI = true;
+                }
+            }
 
-        char readUID[32] = {0};
-        bool hasUID = ds_pubg_read_fstring_nick(pawn + kDSPUBGCharacterPlayerUIDOffset, readUID, sizeof(readUID)) && strlen(readUID) >= 5;
-        if (!hasUID && ps && ds_pubg_valid(ps)) {
-            hasUID = ds_pubg_read_fstring_nick(ps + 0x668ULL, readUID, sizeof(readUID)) && strlen(readUID) >= 5;
-        }
+            // 3. Check AI Controller on Pawn (Remote players on client have Controller == 0)
+            if (!isAI) {
+                uint64_t ctrl = ds_pubg_read_ptr(pawn + 0x4E8ULL);
+                if (ctrl && ds_pubg_valid(ctrl)) {
+                    char ctrlName[64] = {0};
+                    if (ds_pubg_get_actor_name(ctrl, ctrlName, sizeof(ctrlName))) {
+                        if (ds_pubg_is_pet_name(ctrlName)) {
+                            cEntry.actor = pawn;
+                            cEntry.isScenery = true;
+                            cEntry.isPawn = false;
+                            cEntry.itemCat = DSPUBGItemCategoryNone;
+                            cEntry.vCommon = 0;
+                            return false;
+                        }
+                        if (strcasestr(ctrlName, "AI") || strcasestr(ctrlName, "Fake")) {
+                            isAI = true;
+                        }
+                    } else {
+                        isAI = true;
+                    }
+                }
+            }
 
-        if (!isAI) {
-            // Real players in multiplayer ALWAYS have at least a valid PlayerState, PlayerUID, or Nation.
-            // If pawn has neither PlayerState nor PlayerUID nor Nation, it is an AI pawn.
-            if ((!ps || !ds_pubg_valid(ps)) && !hasUID && !hasNation) {
-                isAI = true;
+            // 4. Read Nation & PlayerUID to verify real player presence
+            hasNation = ds_pubg_read_fstring_nation(pawn + kDSPUBGCharacterNationOffset, readNation, sizeof(readNation));
+            if (!hasNation && ps && ds_pubg_valid(ps)) {
+                hasNation = ds_pubg_read_fstring_nation(ps + kDSPUBGPlayerStateNationOffset, readNation, sizeof(readNation));
+            }
+
+            char readUID[32] = {0};
+            bool hasUID = ds_pubg_read_fstring_nick(pawn + kDSPUBGCharacterPlayerUIDOffset, readUID, sizeof(readUID)) && strlen(readUID) >= 5;
+            if (!hasUID && ps && ds_pubg_valid(ps)) {
+                hasUID = ds_pubg_read_fstring_nick(ps + 0x668ULL, readUID, sizeof(readUID)) && strlen(readUID) >= 5;
+            }
+
+            if (!isAI) {
+                // Real players in multiplayer ALWAYS have at least a valid PlayerState, PlayerUID, or Nation.
+                // If pawn has neither PlayerState nor PlayerUID nor Nation, it is an AI pawn.
+                if ((!ps || !ds_pubg_valid(ps)) && !hasUID && !hasNation) {
+                    isAI = true;
+                }
+            }
+
+            cEntry.metaActor = pawn;
+            cEntry.metaPs = ps;
+            cEntry.cachedIsAI = isAI;
+            cEntry.cachedHasNation = hasNation;
+            cEntry.cachedHasUID = hasUID;
+            memset(cEntry.cachedMetaNation, 0, sizeof(cEntry.cachedMetaNation));
+            if (hasNation) {
+                strncpy(cEntry.cachedMetaNation, readNation, sizeof(cEntry.cachedMetaNation) - 1);
             }
         }
 
@@ -6289,7 +6410,8 @@ static void ds_pubg_tick(void) {
         return true;
     };
 
-    DSPUBGProjectedItem itemStaging[kDSPUBGMaxItems * 2];
+    DSPUBGProjectedItem itemStaging[kDSPUBGMaxItems * 2] = {};
+    DSPUBGVector itemWorldLocStaging[kDSPUBGMaxItems * 2] = {};
     int itemStagingCount = 0;
     int stagedVehicleCount = 0;
 
@@ -6443,7 +6565,9 @@ static void ds_pubg_tick(void) {
                 for (const auto &ci : cItems) {
                     if (!ds_pubg_is_item_type_enabled(ci.category, ci.name)) continue;
                     if (itemStagingCount >= (kDSPUBGMaxItems * 2 - 2)) break;
-                    DSPUBGProjectedItem &pi = itemStaging[itemStagingCount++];
+                    int idx = itemStagingCount++;
+                    itemWorldLocStaging[idx] = rootLoc;
+                    DSPUBGProjectedItem &pi = itemStaging[idx];
                     pi.screenX = sx;
                     pi.screenY = sy;
                     pi.distanceMeters = dist3D;
@@ -6463,7 +6587,9 @@ static void ds_pubg_tick(void) {
             }
         }
 
-        DSPUBGProjectedItem &pi = itemStaging[itemStagingCount++];
+        int idx = itemStagingCount++;
+        itemWorldLocStaging[idx] = rootLoc;
+        DSPUBGProjectedItem &pi = itemStaging[idx];
         pi.screenX = sx;
         pi.screenY = sy;
         pi.distanceMeters = dist3D;
@@ -6484,6 +6610,9 @@ static void ds_pubg_tick(void) {
 
         if (cat == DSPUBGItemCategoryVehicle) {
             stagedVehicleCount++;
+            bool tracked = false;
+            for (uint64_t tv : s_trackedLevelVehicles) { if (tv == actor) { tracked = true; break; } }
+            if (!tracked && s_trackedLevelVehicles.size() < 24) s_trackedLevelVehicles.push_back(actor);
         }
 
     };
@@ -6518,20 +6647,8 @@ static void ds_pubg_tick(void) {
         }
     }
 
-    // Source 2: Levels Actors (Dual-Cadence Engine: Fast Pawn/Bone loop every frame, throttled loot sweep)
-    struct DSPUBGCachedLoot {
-        DSPUBGVector worldLoc;
-        DSPUBGItemCategory category;
-        char name[36];
-        uint32_t colorRGBA;
-        bool isPriority;
-    };
-    static DSPUBGCachedLoot s_cachedLoot[kDSPUBGMaxItems * 2];
-    static int s_cachedLootCount = 0;
-    static uint32_t s_levelScanTick = 0;
-    static std::vector<uint64_t> s_trackedLevelPawns;
-
-    // Fast-path: Update any tracked level pawns at full 60/120 Hz frame rate
+    // Source 2: Levels Actors (Dual-Cadence Engine: tracked pawns/grenades/vehicles every frame, full loot scan throttled)
+    // Fast-path: Update tracked level pawns at full frame rate
     for (size_t pi = 0; pi < s_trackedLevelPawns.size(); ) {
         uint64_t tp = s_trackedLevelPawns[pi];
         if (!tp || !ds_pubg_valid(tp)) {
@@ -6542,6 +6659,15 @@ static void ds_pubg_tick(void) {
             s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
         } else {
             pi++;
+        }
+    }
+
+    for (size_t gi = 0; gi < s_trackedLevelGrenades.size(); ) {
+        uint64_t tg = s_trackedLevelGrenades[gi];
+        if (!tg || !ds_pubg_valid(tg) || !processGrenade(tg)) {
+            s_trackedLevelGrenades.erase(s_trackedLevelGrenades.begin() + gi);
+        } else {
+            gi++;
         }
     }
 
@@ -6590,6 +6716,10 @@ static void ds_pubg_tick(void) {
                     if (!processPawn(actor, 0, false)) {
                         if (!processGrenade(actor)) {
                             processItemOrVehicle(actor);
+                        } else {
+                            bool alreadyG = false;
+                            for (uint64_t tg : s_trackedLevelGrenades) { if (tg == actor) { alreadyG = true; break; } }
+                            if (!alreadyG && s_trackedLevelGrenades.size() < 16) s_trackedLevelGrenades.push_back(actor);
                         }
                     } else {
                         bool already = false;
@@ -6601,14 +6731,19 @@ static void ds_pubg_tick(void) {
         }
     };
 
-    bool needFullLevelScan = ((++s_levelScanTick % 6 == 0) || (s_cachedLootCount == 0));
+    static const uint32_t kDSPUBGFullScanInterval = 10;
+    bool needFullLevelScan = ((s_levelScanTick++ % kDSPUBGFullScanInterval) == 0);
     if (needFullLevelScan && level) {
+        s_trackedLevelVehicles.clear();
         int beforeCount = itemStagingCount;
         collectActorsFromLevel(level);
-        // Cache discovered loot items with their 3D world coordinates for zero-latency reprojection
+        // Cache discovered static loot items with their 3D world coordinates for smooth reprojection
         s_cachedLootCount = 0;
         for (int i = beforeCount; i < itemStagingCount && s_cachedLootCount < (int)(sizeof(s_cachedLoot)/sizeof(s_cachedLoot[0])); i++) {
+            if (itemStaging[i].category == DSPUBGItemCategoryVehicle) continue;
             DSPUBGCachedLoot &cl = s_cachedLoot[s_cachedLootCount++];
+            cl.worldLoc = itemWorldLocStaging[i];
+            cl.hasWorldLoc = true;
             cl.category = itemStaging[i].category;
             strncpy(cl.name, itemStaging[i].name, sizeof(cl.name) - 1);
             cl.name[sizeof(cl.name) - 1] = '\0';
@@ -6616,15 +6751,43 @@ static void ds_pubg_tick(void) {
             cl.isPriority = itemStaging[i].isPriority;
         }
     } else {
-        // High-speed intermediate frame: preserve and re-publish staged loot items (<0.02ms)
+        // Intermediate frames: live-update tracked vehicles and reproject cached loot
+        // through the current camera basis so labels move smoothly without (0,0) flicker.
+        for (size_t vi = 0; vi < s_trackedLevelVehicles.size(); ) {
+            uint64_t tv = s_trackedLevelVehicles[vi];
+            if (!tv || !ds_pubg_valid(tv)) {
+                s_trackedLevelVehicles.erase(s_trackedLevelVehicles.begin() + vi);
+                continue;
+            }
+            processItemOrVehicle(tv);
+            vi++;
+        }
         for (int i = 0; i < s_cachedLootCount && itemStagingCount < kDSPUBGMaxItems * 2; i++) {
+            const DSPUBGCachedLoot &cl = s_cachedLoot[i];
+            if (!cl.hasWorldLoc) continue;
+            if (!ds_pubg_is_item_type_enabled(cl.category, cl.name)) continue;
+
+            float dx = (cl.worldLoc.X - basis.lx) * 0.01f;
+            float dy = (cl.worldLoc.Y - basis.ly) * 0.01f;
+            float dz = (cl.worldLoc.Z - basis.lz) * 0.01f;
+            float dist3D = sqrtf(dx * dx + dy * dy + dz * dz);
+            float maxDist = (cl.category == DSPUBGItemCategoryCrate) ? (g_pubgItemMaxDistance * 2.0f) : g_pubgItemMaxDistance;
+            if (dist3D < 1.0f || dist3D > maxDist) continue;
+
+            float sx = 0.0f, sy = 0.0f, dist = 0.0f;
+            if (!ds_pubg_cam_basis_project(basis, cl.worldLoc, sx, sy, dist)) continue;
+            if (sx < -80.0f || sx > (screenW + 80.0f) || sy < -80.0f || sy > (screenH + 80.0f)) continue;
+
             DSPUBGProjectedItem &pi = itemStaging[itemStagingCount++];
-            pi.category = s_cachedLoot[i].category;
-            strncpy(pi.name, s_cachedLoot[i].name, sizeof(pi.name) - 1);
-            pi.name[sizeof(pi.name) - 1] = '\0';
+            memset(&pi, 0, sizeof(pi));
+            pi.screenX = sx;
+            pi.screenY = sy;
+            pi.distanceMeters = dist3D;
+            pi.category = cl.category;
+            strncpy(pi.name, cl.name, sizeof(pi.name) - 1);
             pi.isVisible = true;
-            pi.colorRGBA = s_cachedLoot[i].colorRGBA;
-            pi.isPriority = s_cachedLoot[i].isPriority;
+            pi.colorRGBA = cl.colorRGBA;
+            pi.isPriority = cl.isPriority;
         }
     }
 
@@ -6689,4 +6852,19 @@ static void ds_pubg_tick(void) {
 
     // Advance tick
     ++s_visTickCounter;
+}
+
+static void ds_pubg_tick(void) {
+    @try {
+        ds_pubg_tick_impl();
+    } @catch (__unused NSException *exception) {
+        if (!ds_debug_target_alive()) {
+            ds_pubg_overlay_reset();
+            ds_debug_shmem_flush_ex(NO);
+            g_dspubgTargetActive.store(false, std::memory_order_release);
+            g_dspubgProc = g_dspubgVmMap = g_dspubgBase = 0;
+            g_dspubgPid = 0;
+            g_dspubgCachedWorld = 0;
+        }
+    }
 }
