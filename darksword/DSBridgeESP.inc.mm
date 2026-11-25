@@ -1651,20 +1651,23 @@ static void ds_hosted_apply_pubg(void) {
         static UIFont *s_topCountFont = nil;
         static dispatch_once_t s_topCountOnce;
         dispatch_once(&s_topCountOnce, ^{
-            UIFont *f = [UIFont fontWithName:@"Helvetica-Bold" size:13.5];
-            if (!f) f = [UIFont boldSystemFontOfSize:13.5];
+            UIFont *f = [UIFont fontWithName:@"Helvetica-Bold" size:10.5];
+            if (!f) f = [UIFont boldSystemFontOfSize:10.5];
             s_topCountFont = f;
         });
 
         if (g_pubgEspEnemyNumber && ds_pubg_has_render_source() && (totalEnemies + totalBots > 0)) {
-            CGFloat lblW = 320.0f;
-            CGFloat lblH = 18.0f;
+            CGFloat lblW = 230.0f;
+            CGFloat lblH = 14.0f;
             CGFloat lblX = (width - lblW) * 0.5f;
-            CGFloat lblY = 25.0f;
+            CGFloat lblY = 24.0f;
 
-            ds_layer_set_frame(g_hostedPUBGTopCountLabel, CGRectMake(lblX, lblY, lblW, lblH));
+            ds_layer_set_frame(g_hostedPUBGTopCountLabel, ds_q1_rect(lblX, lblY, lblW, lblH));
             if (g_hostedPUBGTopCountLabel.font != (__bridge CFTypeRef)s_topCountFont) {
                 g_hostedPUBGTopCountLabel.font = (__bridge CFTypeRef)s_topCountFont;
+            }
+            if (g_hostedPUBGTopCountLabel.fontSize != 10.5) {
+                g_hostedPUBGTopCountLabel.fontSize = 10.5;
             }
             NSString *topCountStr = [NSString stringWithFormat:@"PLAYER AROUND [%d]  BOT AROUND [%d]", totalEnemies, totalBots];
             ds_layer_set_string(g_hostedPUBGTopCountLabel, topCountStr);
@@ -2658,8 +2661,8 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
             topLabel.actions = noAnim;
             topLabel.contentsScale = scale;
             topLabel.alignmentMode = kCAAlignmentCenter;
-            topLabel.fontSize = 16.0;
-            topLabel.font = (__bridge CFTypeRef)[UIFont monospacedDigitSystemFontOfSize:16.0 weight:UIFontWeightHeavy];
+            topLabel.fontSize = 10.5;
+            topLabel.font = (__bridge CFTypeRef)[UIFont monospacedDigitSystemFontOfSize:10.5 weight:UIFontWeightHeavy];
             topLabel.foregroundColor = [UIColor colorWithRed:255.0/255.0 green:59.0/255.0 blue:48.0/255.0 alpha:1.0].CGColor;
             topLabel.backgroundColor = UIColor.clearColor.CGColor;
             topLabel.shadowColor = UIColor.blackColor.CGColor;
