@@ -174,6 +174,8 @@ static inline bool ds_pubg_is_pet_name(const char *name) {
 static inline bool ds_pubg_is_scenery_name(const char *name) {
     if (!name || !name[0]) return false;
     if (ds_pubg_is_pet_name(name)) return true;
+    // Keep training range humanoid targets eligible for pawn detection.
+    if (strstr(name, "ModelTarget")) return false;
     return (strstr(name, "StaticMesh") || strstr(name, "Foliage") ||
             strstr(name, "Landscape") || strstr(name, "Building") ||
             strstr(name, "House") || strstr(name, "Tree") ||
@@ -4111,29 +4113,56 @@ static const char* ds_pubg_get_debug_status(void) {
     return "";
 }
 
+static inline bool ds_pubg_is_lobby_name(const char *name) {
+    if (!name || !name[0]) return false;
+    if (strcasestr(name, "Training") != NULL ||
+        strcasestr(name, "Shooting") != NULL ||
+        strcasestr(name, "Practice") != NULL ||
+        strcasestr(name, "CheerPark") != NULL) {
+        return false;
+    }
+    return (strcasestr(name, "Lobby") != NULL ||
+            strcasestr(name, "Frontend") != NULL ||
+            strcasestr(name, "Login") != NULL ||
+            strcasestr(name, "Menu") != NULL ||
+            strcasestr(name, "Showroom") != NULL);
+}
+
 static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint64_t localPawn) {
     if (!world || !ds_pubg_valid(world)) return false;
 
     uint64_t level = ds_pubg_read_ptr(world + 0x30ULL); // PersistentLevel
 
-    // 1. World and PersistentLevel Name check (cached per (world, level) pair
-    // so steady-state frames do not hit GNames for unchanging map objects).
+    // 1. World, PersistentLevel, and World->Outer (map package) check.
+    // Clear actor/loot caches whenever the active world/level changes (e.g. Lobby -> Training).
     if (world != s_lastMatchWorld || level != s_lastMatchLevel) {
+        memset(g_dspubgActorCache, 0, sizeof(g_dspubgActorCache));
+        s_cachedLootCount = 0;
+        s_levelScanTick = 0;
+        s_trackedLevelPawns.clear();
+        s_trackedLevelGrenades.clear();
+        s_trackedLevelVehicles.clear();
+        s_crateCache.clear();
+
         bool isLobbyMap = false;
-        char worldName[64] = {0};
-        if (ds_pubg_get_actor_name(world, worldName, sizeof(worldName))) {
-            if (strcasestr(worldName, "Lobby") || strcasestr(worldName, "MainCity") ||
-                strcasestr(worldName, "Frontend") || strcasestr(worldName, "Hall") ||
-                strcasestr(worldName, "Login") || strcasestr(worldName, "Menu")) {
+        char objName[64] = {0};
+        if (ds_pubg_get_actor_name(world, objName, sizeof(objName)) &&
+            ds_pubg_is_lobby_name(objName)) {
+            isLobbyMap = true;
+        }
+        if (!isLobbyMap && level && ds_pubg_valid(level)) {
+            memset(objName, 0, sizeof(objName));
+            if (ds_pubg_get_actor_name(level, objName, sizeof(objName)) &&
+                ds_pubg_is_lobby_name(objName)) {
                 isLobbyMap = true;
             }
         }
-        if (!isLobbyMap && level && ds_pubg_valid(level)) {
-            char levelName[64] = {0};
-            if (ds_pubg_get_actor_name(level, levelName, sizeof(levelName))) {
-                if (strcasestr(levelName, "Lobby") || strcasestr(levelName, "MainCity") ||
-                    strcasestr(levelName, "Frontend") || strcasestr(levelName, "Hall") ||
-                    strcasestr(levelName, "Login") || strcasestr(levelName, "Menu")) {
+        if (!isLobbyMap) {
+            uint64_t worldOuter = ds_pubg_read_ptr(world + 0x20ULL); // UObject.Outer (UPackage)
+            if (worldOuter && ds_pubg_valid(worldOuter)) {
+                memset(objName, 0, sizeof(objName));
+                if (ds_pubg_get_actor_name(worldOuter, objName, sizeof(objName)) &&
+                    ds_pubg_is_lobby_name(objName)) {
                     isLobbyMap = true;
                 }
             }
@@ -4146,8 +4175,35 @@ static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint6
         return false;
     }
 
-    // 2. NetDriver -> ServerConnection check
-    // In match, GWorld->NetDriver is connected to a dedicated game server.
+    // 2. Reject Lobby / UI controllers & pawns before trusting NetDriver
+    if (playerController && ds_pubg_valid(playerController)) {
+        char ctrlName[64] = {0};
+        if (ds_pubg_get_actor_name(playerController, ctrlName, sizeof(ctrlName))) {
+            if (ds_pubg_is_lobby_name(ctrlName) || strcasestr(ctrlName, "UIController")) {
+                return false;
+            }
+        }
+    }
+
+    if (localPawn && ds_pubg_valid(localPawn)) {
+        char pawnName[64] = {0};
+        if (ds_pubg_get_actor_name(localPawn, pawnName, sizeof(pawnName))) {
+            if (ds_pubg_is_lobby_name(pawnName) || strcasestr(pawnName, "Preview") || strcasestr(pawnName, "Avatar")) {
+                return false;
+            }
+        }
+    }
+
+    uint64_t gs = ds_pubg_read_ptr(world + kDSPUBGWorldGameStateOffset);
+    if (!gs || !ds_pubg_valid(gs)) gs = ds_pubg_read_ptr(world + 0x140ULL);
+    if (!gs || !ds_pubg_valid(gs)) gs = ds_pubg_read_ptr(world + 0x120ULL);
+    char gsName[64] = {0};
+    bool hasGsName = (gs && ds_pubg_valid(gs) && ds_pubg_get_actor_name(gs, gsName, sizeof(gsName)));
+    if (hasGsName && ds_pubg_is_lobby_name(gsName)) {
+        return false;
+    }
+
+    // 3. NetDriver -> ServerConnection check (active in matches, Training Ground, and Cheer Park)
     uint64_t netDriver = ds_pubg_read_ptr(world + 0x38ULL); // UWorld.NetDriver
     if (!netDriver || !ds_pubg_valid(netDriver)) {
         netDriver = ds_pubg_read_ptr(world + 0x98ULL);
@@ -4161,45 +4217,26 @@ static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint6
             serverConn = ds_pubg_read_ptr(netDriver + 0x80ULL);
         }
         if (serverConn && ds_pubg_valid(serverConn)) {
-            return true; // Confirmed active dedicated server connection -> In Match!
+            return true; // Confirmed active dedicated server connection -> In Match / Training!
         }
     }
 
-    // 3. PlayerController check
-    if (playerController && ds_pubg_valid(playerController)) {
-        char ctrlName[64] = {0};
-        if (ds_pubg_get_actor_name(playerController, ctrlName, sizeof(ctrlName))) {
-            if (strcasestr(ctrlName, "Lobby") || strcasestr(ctrlName, "MainCity") ||
-                strcasestr(ctrlName, "UIController")) {
-                return false;
-            }
-        }
+    // MainCity without a ServerConnection is the offline social lobby.
+    if (hasGsName && strcasestr(gsName, "MainCity") != NULL) {
+        return false;
     }
 
-    // 4. LocalPawn check
+    // 4. Fallback if NetDriver offset shifted: require BOTH an active match GameState
+    // AND a live local character pawn with valid health (never default-true in Lobby).
+    bool isMatchGs = (hasGsName && (strcasestr(gsName, "STExtra") != NULL || strcasestr(gsName, "UAEGameState") != NULL));
+    bool hasLiveLocalPawn = false;
     if (localPawn && ds_pubg_valid(localPawn)) {
-        char pawnName[64] = {0};
-        if (ds_pubg_get_actor_name(localPawn, pawnName, sizeof(pawnName))) {
-            if (strcasestr(pawnName, "Lobby") || strcasestr(pawnName, "MainCity")) {
-                return false;
-            }
+        float lpMaxHp = ds_pubg_read_f32(localPawn + kDSPUBGCharacterHealthMaxOffset);
+        if (!isnan(lpMaxHp) && !isinf(lpMaxHp) && lpMaxHp >= 50.0f && lpMaxHp <= 2000.0f) {
+            hasLiveLocalPawn = true;
         }
     }
-
-    // 5. GameState check
-    uint64_t gs = ds_pubg_read_ptr(world + kDSPUBGWorldGameStateOffset);
-    if (!gs || !ds_pubg_valid(gs)) gs = ds_pubg_read_ptr(world + 0x140ULL);
-    if (!gs || !ds_pubg_valid(gs)) gs = ds_pubg_read_ptr(world + 0x120ULL);
-    if (gs && ds_pubg_valid(gs)) {
-        char gsName[64] = {0};
-        if (ds_pubg_get_actor_name(gs, gsName, sizeof(gsName))) {
-            if (strcasestr(gsName, "MainCity") || strcasestr(gsName, "Lobby")) {
-                return false;
-            }
-        }
-    }
-
-    return true;
+    return (isMatchGs && hasLiveLocalPawn);
 }
 
 // Gate on the class of the *mesh object itself*, not on the component's FName.
