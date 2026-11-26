@@ -11,7 +11,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 @interface MadnessMenuView () <UIScrollViewDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIButton *panel;
 @property (nonatomic, strong) UIView *titleBox;
-@property (nonatomic, strong) UIImageView *titleLogoView;
+@property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UIImageView *mascotView;
 @property (nonatomic, strong) UIPanGestureRecognizer *panGesture;
 @property (nonatomic, strong) UIPanGestureRecognizer *titlePan;
@@ -32,7 +32,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 // Scrolling & toggling
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UIButton *handle;
-@property (nonatomic, strong) UIImageView *handleIconView;
+@property (nonatomic, strong) UILabel *handleGlyph;
 @property (nonatomic, strong) UITapGestureRecognizer *handleTap;
 @property (nonatomic, strong) UILongPressGestureRecognizer *handleLong;
 @property (nonatomic, strong) NSDateFormatter *ttime;
@@ -155,15 +155,17 @@ static const CGFloat kMadnessPanelH = 325.0f;
 }
 
 - (UILabel *)addSectionHeader:(NSString *)title atY:(CGFloat)y {
-    UIImageView *chevron = [[UIImageView alloc] initWithFrame:CGRectMake(12, y + 3, 12, 12)];
-    chevron.image = MADChevronIconImage(NO, 12.0, UIColor.whiteColor, UIColor.whiteColor);
-    chevron.contentMode = UIViewContentModeScaleAspectFit;
-    [self.scroll addSubview:chevron];
+    UILabel *chev = [[UILabel alloc] initWithFrame:CGRectMake(12, y - 1, 15, 18)];
+    chev.text = @"⋗";
+    chev.textColor = UIColor.yellowColor;
+    chev.font = [UIFont boldSystemFontOfSize:25.0];
+    chev.textAlignment = NSTextAlignmentCenter;
+    [self.scroll addSubview:chev];
 
     UILabel *tit = [[UILabel alloc] initWithFrame:CGRectMake(30, y, 240, 18)];
     tit.text = title;
     tit.textColor = UIColor.whiteColor;
-    tit.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
+    tit.font = [UIFont boldSystemFontOfSize:12.0];
     tit.textAlignment = NSTextAlignmentLeft;
     [self.scroll addSubview:tit];
     return tit;
@@ -185,9 +187,9 @@ static const CGFloat kMadnessPanelH = 325.0f;
         }
     }
 
-    // Panel container: start collapsed (182 x 30)
+    // Panel container: start collapsed (158 x 30)
     self.panel = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.panel.frame = CGRectMake(startX, startY, 182, 30);
+    self.panel.frame = CGRectMake(startX, startY, 158, 30);
     self.panel.backgroundColor = UIColor.clearColor;
     self.panel.layer.cornerRadius = 14.0;
     self.panel.layer.cornerCurve = kCACornerCurveContinuous;
@@ -217,14 +219,17 @@ static const CGFloat kMadnessPanelH = 325.0f;
     [self.handle addGestureRecognizer:self.handleLong];
     [self.handle addTarget:self action:@selector(handleTapped:) forControlEvents:UIControlEventTouchUpInside];
 
-    self.handleIconView = [[UIImageView alloc] initWithFrame:CGRectMake(5, 5, 14, 14)];
-    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.whiteColor);
-    self.handleIconView.contentMode = UIViewContentModeScaleAspectFit;
-    self.handleIconView.userInteractionEnabled = NO;
-    [self.handle addSubview:self.handleIconView];
+    self.handleGlyph = [[UILabel alloc] initWithFrame:CGRectMake(5, 2, 15, 18)];
+    self.handleGlyph.text = @"⋗";
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:25.0];
+    self.handleGlyph.textColor = UIColor.yellowColor;
+    self.handleGlyph.textAlignment = NSTextAlignmentCenter;
+    self.handleGlyph.userInteractionEnabled = NO;
+    self.handleGlyph.backgroundColor = UIColor.clearColor;
+    [self.handle addSubview:self.handleGlyph];
 
-    // Top Dark Header Capsule Bar: collapsed (32, 3, 144, 24)
-    self.titleBox = [[UIView alloc] initWithFrame:CGRectMake(32, 3, 144, 24)];
+    // Top Dark Header Capsule Bar: collapsed (32, 3, 118, 24)
+    self.titleBox = [[UIView alloc] initWithFrame:CGRectMake(32, 3, 118, 24)];
     self.titleBox.backgroundColor = MADBlack50();
     self.titleBox.layer.cornerRadius = 12.0;
     self.titleBox.layer.cornerCurve = kCACornerCurveContinuous;
@@ -242,15 +247,20 @@ static const CGFloat kMadnessPanelH = 325.0f;
     UITapGestureRecognizer *titleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(titleBoxTapped:)];
     [self.titleBox addGestureRecognizer:titleTap];
 
-    // 1. Pixel-art Title Logo: DARKSWORD (bold 7x7 pixel font)
-    self.titleLogoView = [[UIImageView alloc] initWithFrame:CGRectMake(9, 6.5, 108, 11)];
-    self.titleLogoView.image = MADPixelTextImage(@"DARKSWORD", UIColor.yellowColor, 1.52);
-    self.titleLogoView.contentMode = UIViewContentModeScaleAspectFit;
-    self.titleLogoView.userInteractionEnabled = NO;
-    [self.titleBox addSubview:self.titleLogoView];
+    // 1. Title: DARKSWORD (exact MadnessMenu font: AvenirNextCondensed-HeavyItalic 12.0)
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 3, 82, 18)];
+    self.titleLabel.text = @"DARKSWORD";
+    self.titleLabel.textColor = UIColor.yellowColor;
+    self.titleLabel.font = [UIFont fontWithName:@"AvenirNextCondensed-HeavyItalic" size:12.0]
+                           ?: [UIFont boldSystemFontOfSize:12.0];
+    self.titleLabel.textAlignment = NSTextAlignmentLeft;
+    self.titleLabel.lineBreakMode = NSLineBreakByClipping;
+    self.titleLabel.numberOfLines = 1;
+    self.titleLabel.userInteractionEnabled = NO;
+    [self.titleBox addSubview:self.titleLabel];
 
     // 2. Mascot icon
-    self.mascotView = [[UIImageView alloc] initWithFrame:CGRectMake(120, 2, 20, 20)];
+    self.mascotView = [[UIImageView alloc] initWithFrame:CGRectMake(92, 1, 22, 22)];
     self.mascotView.image = MadnessMascotImage();
     self.mascotView.contentMode = UIViewContentModeScaleAspectFit;
     self.mascotView.userInteractionEnabled = NO;
@@ -1133,7 +1143,9 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllview1)];
     [self.handle addGestureRecognizer:self.handleTap];
 
-    self.handleIconView.image = MADChevronIconImage(YES, 14.0, UIColor.whiteColor, UIColor.whiteColor);
+    self.handleGlyph.frame = CGRectMake(4, 2, 16, 20);
+    self.handleGlyph.text = @"\u27C7";
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:20.0];
 
     // Header row left-to-right matching reference:
     // [ handle ] [ DARKSWORD 😈 | ENG VIE | contact | @handle | kernel ]
@@ -1143,7 +1155,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
     const CGFloat wEng = 28.0f, wVie = 26.0f, wContact = 56.0f;
     const CGFloat wHandle = 54.0f, wKernel = 112.0f;
 
-    CGFloat cursor = 144.0f;
+    CGFloat cursor = 118.0f;
 
     BOOL showLang = (cursor + wEng + 3.0f + wVie <= maxRight);
     self.btnEng.hidden = !showLang;
@@ -1194,7 +1206,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
     g_hostedMenuExpanded = NO;
 
     CGRect pf = self.panel.frame;
-    self.panel.frame = CGRectMake(pf.origin.x, pf.origin.y, 182, 30);
+    self.panel.frame = CGRectMake(pf.origin.x, pf.origin.y, 158, 30);
     self.panel.backgroundColor = UIColor.clearColor;
     self.panel.layer.borderWidth = 0.0;
     self.scroll.hidden = YES;
@@ -1213,8 +1225,10 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllview)];
     [self.handle addGestureRecognizer:self.handleTap];
 
-    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.whiteColor);
-    self.titleBox.frame = CGRectMake(32, 3, 144, 24);
+    self.handleGlyph.frame = CGRectMake(5, 2, 15, 18);
+    self.handleGlyph.text = @"⋗";
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:25.0];
+    self.titleBox.frame = CGRectMake(32, 3, 118, 24);
 }
 
 - (void)titleBoxTapped:(UITapGestureRecognizer *)gr {
