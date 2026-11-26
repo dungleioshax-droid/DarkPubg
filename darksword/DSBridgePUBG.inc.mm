@@ -180,7 +180,10 @@ static inline bool ds_pubg_is_training_target_name(const char *name) {
             strcasestr(name, "TargetDummy") != NULL ||
             strcasestr(name, "ShootTarget") != NULL ||
             strcasestr(name, "PracticeTarget") != NULL ||
-            strcasestr(name, "MoveTarget") != NULL);
+            strcasestr(name, "MoveTarget") != NULL ||
+            strcasestr(name, "RangeTarget") != NULL ||
+            strcasestr(name, "HumanTarget") != NULL ||
+            strcasestr(name, "Target_") != NULL);
 }
 
 // Fast check for static scenery / non-loot / non-character engine classes
@@ -3007,12 +3010,11 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
     if (!ds_pubg_actors_array_at(arr, &data, &count)) return 0;
     if (!data || count == 0) return 0;
 
-    const uint32_t probe = count < 16 ? count : 16;
+    const uint32_t probe = count < 8 ? count : 8;
     int score = 0;
     for (uint32_t i = 0; i < probe; i++) {
         uint64_t a = ds_pubg_read_ptr(data + (uint64_t)i * sizeof(uint64_t));
-        if (!a) continue; // UE4 leaves nullptr slots in ULevel::Actors between GC cycles
-        if (!ds_pubg_valid(a)) return 0;
+        if (!a || !ds_pubg_valid(a)) return 0;
         score++;
         // A live UObject carries ClassPrivate at 0x10; that second hop is what
         // separates an actor list from an array of random in-range pointers.
@@ -3128,12 +3130,7 @@ static bool ds_pubg_find_level_actors(uint64_t lvl, uint64_t *outData, uint32_t 
     if (!lvl || !ds_pubg_valid(lvl)) return false;
 
     if (g_dspubgLevelActorsOff) {
-        uint64_t cachedData = 0;
-        uint32_t cachedCount = 0;
-        if (ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &cachedData, &cachedCount)) {
-            if (cachedCount == 0) return false; // Empty sublevel; keep cached offset
-            if (ds_pubg_actor_array_plausible(lvl + g_dspubgLevelActorsOff, outData, outCount)) return true;
-        }
+        if (ds_pubg_actor_array_plausible(lvl + g_dspubgLevelActorsOff, outData, outCount)) return true;
         g_dspubgLevelActorsOff = 0;
     }
 
@@ -5589,8 +5586,10 @@ static void ds_pubg_tick_impl(void) {
         if (aHidden & 0x1) return false;
 
         // 3. Dead check - STExtraCharacter.bDead at 0xE8C
-        uint8_t isDead = ds_pubg_read_u8(pawn + kDSPUBGCharacterDeadOffset) & 1;
-        if (isDead) return false;
+        if (!isTrainingTarget) {
+            uint8_t isDead = ds_pubg_read_u8(pawn + kDSPUBGCharacterDeadOffset) & 1;
+            if (isDead) return false;
+        }
 
         // 4. Must have valid RootComponent and Mesh (standard UE4 character)
         uint64_t rootComp = (cEntry.actor == pawn && cEntry.rootComp) ? cEntry.rootComp : ds_pubg_read_ptr(pawn + kDSPUBGActorRootComponentOffset);
@@ -5674,38 +5673,38 @@ static void ds_pubg_tick_impl(void) {
         // Resolve world-space location BEFORE rejecting near-(0,0), because pawns attached to
         // moving platforms/tracks (e.g. Training Ground moving mannequins) have RelativeLocation == (0,0,Z).
         DSPUBGVector rootLoc = {};
+        if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
+            return false;
+        }
+
         uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
-        bool haveWorldLoc = false;
         if (parent && ds_pubg_valid(parent)) {
-            DSPUBGVector ax = {}, ay = {}, az = {}, sc = {};
-            if (ds_pubg_component_world_pose(rootComp, rootLoc, ax, ay, az, sc) &&
-                (fabsf(rootLoc.X) >= 1.0f || fabsf(rootLoc.Y) >= 1.0f)) {
-                haveWorldLoc = true;
+            DSPUBGVector parentLoc = {};
+            if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
+                rootLoc.X += parentLoc.X;
+                rootLoc.Y += parentLoc.Y;
+                rootLoc.Z += parentLoc.Z;
             }
         }
-        if (!haveWorldLoc) {
-            if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
-                return false;
-            }
-            if (isnan(rootLoc.X) || isinf(rootLoc.X) || (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
-                // Fallback to ComponentToWorld translation (+0x210 quat, +0x220 translation)
-                uint8_t rc2w[32] = {0};
-                if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
-                    float qx = 0, qy = 0, qz = 0, qw = 1.0f;
-                    DSPUBGVector c2wLoc = {};
-                    memcpy(&qx, rc2w + 0x0, 4);
-                    memcpy(&qy, rc2w + 0x4, 4);
-                    memcpy(&qz, rc2w + 0x8, 4);
-                    memcpy(&qw, rc2w + 0xC, 4);
-                    memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
-                    float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
-                    if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
-                        !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
-                        !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
-                        !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
-                        (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
-                        rootLoc = c2wLoc;
-                    }
+
+        if (isnan(rootLoc.X) || isinf(rootLoc.X) || (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
+            // Fallback to ComponentToWorld translation (+0x210 quat, +0x220 translation)
+            uint8_t rc2w[32] = {0};
+            if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
+                float qx = 0, qy = 0, qz = 0, qw = 1.0f;
+                DSPUBGVector c2wLoc = {};
+                memcpy(&qx, rc2w + 0x0, 4);
+                memcpy(&qy, rc2w + 0x4, 4);
+                memcpy(&qz, rc2w + 0x8, 4);
+                memcpy(&qw, rc2w + 0xC, 4);
+                memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
+                float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+                if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
+                    !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
+                    !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
+                    !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
+                    (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
+                    rootLoc = c2wLoc;
                 }
             }
         }
@@ -6864,21 +6863,34 @@ static void ds_pubg_tick_impl(void) {
         }
     }
 
-    auto collectActorsFromLevel = [&](uint64_t lvl) {
+    auto collectActorsFromLevel = [&](uint64_t lvl, bool isPersistent) {
         if (!lvl || !ds_pubg_valid(lvl)) return;
         uint64_t actorsData = 0;
         uint32_t actorsCount = 0;
 
-        if (!ds_pubg_find_level_actors(lvl, &actorsData, &actorsCount)) {
-            uint64_t cluster = ds_pubg_read_ptr(lvl + 0xE0ULL);
-            if (cluster && ds_pubg_valid(cluster)) {
-                ds_pubg_actor_array_plausible(cluster + 0x28ULL, &actorsData, &actorsCount);
+        if (isPersistent) {
+            if (!ds_pubg_find_level_actors(lvl, &actorsData, &actorsCount)) {
+                uint64_t cluster = ds_pubg_read_ptr(lvl + 0xE0ULL);
+                if (cluster && ds_pubg_valid(cluster)) {
+                    ds_pubg_actor_array_plausible(cluster + 0x28ULL, &actorsData, &actorsCount);
+                }
             }
+        } else if (g_dspubgLevelActorsOff) {
+            // For streaming sublevels, reuse the PersistentLevel Actors offset directly
+            // without running the 8KB brute-force scan or clearing g_dspubgLevelActorsOff.
+            if (!ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &actorsData, &actorsCount) ||
+                actorsCount == 0 || actorsCount > 2048) {
+                return;
+            }
+        } else {
+            return;
         }
 
         if (actorsData && actorsCount > 0) {
-            g_dspubgLastActorsCount = (int)actorsCount;
-            if (actorsCount > 16384) actorsCount = 16384;
+            if (isPersistent) {
+                g_dspubgLastActorsCount = (int)actorsCount;
+            }
+            if (actorsCount > 8192) actorsCount = 8192;
             static std::vector<uint64_t> s_levelActors;
             if (s_levelActors.size() < actorsCount) s_levelActors.resize(actorsCount);
             if (ds_pubg_read(actorsData, s_levelActors.data(), actorsCount * sizeof(uint64_t))) {
@@ -6893,7 +6905,7 @@ static void ds_pubg_tick_impl(void) {
                             continue;
                         }
                         if (cEntry.itemCat != DSPUBGItemCategoryNone) {
-                            processItemOrVehicle(actor);
+                            if (isPersistent) processItemOrVehicle(actor);
                             continue;
                         }
                         if (cEntry.isPawn) {
@@ -6908,7 +6920,7 @@ static void ds_pubg_tick_impl(void) {
 
                     if (!processPawn(actor, 0, false)) {
                         if (!processGrenade(actor)) {
-                            processItemOrVehicle(actor);
+                            if (isPersistent) processItemOrVehicle(actor);
                         } else {
                             bool alreadyG = false;
                             for (uint64_t tg : s_trackedLevelGrenades) { if (tg == actor) { alreadyG = true; break; } }
@@ -6929,10 +6941,13 @@ static void ds_pubg_tick_impl(void) {
     if (needFullLevelScan && level) {
         s_trackedLevelVehicles.clear();
         int beforeCount = itemStagingCount;
-        uint64_t worldLevels[32] = {0};
-        uint32_t worldLevelCount = ds_pubg_find_world_levels(world, level, worldLevels, 32);
-        for (uint32_t li = 0; li < worldLevelCount; li++) {
-            collectActorsFromLevel(worldLevels[li]);
+        collectActorsFromLevel(level, true);
+        if (g_dspubgLevelActorsOff) {
+            uint64_t worldLevels[16] = {0};
+            uint32_t worldLevelCount = ds_pubg_find_world_levels(world, level, worldLevels, 16);
+            for (uint32_t li = 1; li < worldLevelCount; li++) {
+                collectActorsFromLevel(worldLevels[li], false);
+            }
         }
         // Cache discovered static loot items with their 3D world coordinates for smooth reprojection
         s_cachedLootCount = 0;
