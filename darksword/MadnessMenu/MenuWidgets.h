@@ -6,6 +6,8 @@ UIColor *MADFieldYellow(void);
 UIColor *MADBlack50(void);
 UIFont  *MADBtnFont(void);
 UIFont  *MADItalicFont(CGFloat size);
+UIImage *MADPixelTextImage(NSString *text, UIColor *color, CGFloat pixelSize);
+UIImage *MADChevronIconImage(BOOL isDown, CGFloat size, UIColor *primaryColor, UIColor *accentColor);
 
 @interface MenuToggleButton : UIButton
 @property (nonatomic) BOOL on;

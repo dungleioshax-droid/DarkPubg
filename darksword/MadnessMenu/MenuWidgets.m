@@ -6,10 +6,118 @@ UIColor *MADPanelFill(void) { return [UIColor colorWithRed:0 green:0 blue:0 alph
 UIColor *MADCardFill(void)  { return [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5]; }
 UIColor *MADFieldYellow(void){ return [[UIColor yellowColor] colorWithAlphaComponent:0.7]; }
 UIColor *MADBlack50(void)   { return [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5]; }
-UIFont *MADBtnFont(void) { return [UIFont boldSystemFontOfSize:12.0]; }
+UIFont *MADBtnFont(void) { return [UIFont systemFontOfSize:11.0 weight:UIFontWeightMedium]; }
 UIFont *MADItalicFont(CGFloat size) {
-    UIFont *f = [UIFont fontWithName:@"AvenirNextCondensed-HeavyItalic" size:size];
-    return f ?: [UIFont boldSystemFontOfSize:size];
+    UIFont *f = [UIFont fontWithName:@"AvenirNext-DemiBoldItalic" size:size];
+    if (!f) f = [UIFont fontWithName:@"HelveticaNeue-MediumItalic" size:size];
+    return f ?: [UIFont italicSystemFontOfSize:size];
+}
+
+static const uint8_t *MADPixelGlyph5x7(unichar ch) {
+    static const uint8_t kSpace[7] = {0,0,0,0,0,0,0};
+    static const uint8_t kA[7] = {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t kB[7] = {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E};
+    static const uint8_t kC[7] = {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E};
+    static const uint8_t kD[7] = {0x1E,0x11,0x11,0x11,0x11,0x11,0x1E};
+    static const uint8_t kE[7] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F};
+    static const uint8_t kF[7] = {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10};
+    static const uint8_t kG[7] = {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F};
+    static const uint8_t kH[7] = {0x11,0x11,0x11,0x1F,0x11,0x11,0x11};
+    static const uint8_t kI[7] = {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E};
+    static const uint8_t kK[7] = {0x11,0x12,0x14,0x18,0x14,0x12,0x11};
+    static const uint8_t kL[7] = {0x10,0x10,0x10,0x10,0x10,0x10,0x1F};
+    static const uint8_t kM[7] = {0x11,0x1B,0x15,0x15,0x11,0x11,0x11};
+    static const uint8_t kN[7] = {0x11,0x19,0x15,0x13,0x11,0x11,0x11};
+    static const uint8_t kO[7] = {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t kP[7] = {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10};
+    static const uint8_t kR[7] = {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11};
+    static const uint8_t kS[7] = {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E};
+    static const uint8_t kT[7] = {0x1F,0x04,0x04,0x04,0x04,0x04,0x04};
+    static const uint8_t kU[7] = {0x11,0x11,0x11,0x11,0x11,0x11,0x0E};
+    static const uint8_t kV[7] = {0x11,0x11,0x11,0x11,0x11,0x0A,0x04};
+    static const uint8_t kW[7] = {0x11,0x11,0x11,0x15,0x15,0x1B,0x11};
+    static const uint8_t kX[7] = {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11};
+    static const uint8_t kY[7] = {0x11,0x11,0x0A,0x04,0x04,0x04,0x04};
+    static const uint8_t kZ[7] = {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F};
+    static const uint8_t kDash[7] = {0x00,0x00,0x00,0x1F,0x00,0x00,0x00};
+    switch (ch) {
+        case 'A': return kA; case 'B': return kB; case 'C': return kC;
+        case 'D': return kD; case 'E': return kE; case 'F': return kF;
+        case 'G': return kG; case 'H': return kH; case 'I': return kI;
+        case 'K': return kK; case 'L': return kL; case 'M': return kM;
+        case 'N': return kN; case 'O': return kO; case 'P': return kP;
+        case 'R': return kR; case 'S': return kS; case 'T': return kT;
+        case 'U': return kU; case 'V': return kV; case 'W': return kW;
+        case 'X': return kX; case 'Y': return kY; case 'Z': return kZ;
+        case '-': return kDash;
+        default: return kSpace;
+    }
+}
+
+UIImage *MADPixelTextImage(NSString *text, UIColor *color, CGFloat pixelSize) {
+    NSString *upper = [text uppercaseString];
+    NSUInteger len = upper.length;
+    if (len == 0) return nil;
+    CGFloat w = (len * 5 + (len - 1)) * pixelSize;
+    CGFloat h = 7.0 * pixelSize;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(w, h)];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        [color setFill];
+        for (NSUInteger idx = 0; idx < len; idx++) {
+            const uint8_t *rows = MADPixelGlyph5x7([upper characterAtIndex:idx]);
+            CGFloat baseX = idx * 6.0 * pixelSize;
+            for (int r = 0; r < 7; r++) {
+                uint8_t rowBits = rows[r];
+                for (int c = 0; c < 5; c++) {
+                    if (rowBits & (1 << (4 - c))) {
+                        CGRect px = CGRectMake(baseX + c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+                        CGContextFillRect(ctx.CGContext, px);
+                    }
+                }
+            }
+        }
+    }];
+}
+
+UIImage *MADChevronIconImage(BOOL isDown, CGFloat size, UIColor *primaryColor, UIColor *accentColor) {
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size)];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef cg = ctx.CGContext;
+        CGContextSetLineCap(cg, kCGLineCapRound);
+        CGContextSetLineJoin(cg, kCGLineJoinRound);
+
+        if (isDown) {
+            // Double-stroke V matching reference top-left circle icon
+            CGContextSetStrokeColorWithColor(cg, accentColor.CGColor);
+            CGContextSetLineWidth(cg, 1.3);
+            CGContextMoveToPoint(cg, size * 0.18, size * 0.24);
+            CGContextAddLineToPoint(cg, size * 0.50, size * 0.80);
+            CGContextAddLineToPoint(cg, size * 0.82, size * 0.24);
+            CGContextStrokePath(cg);
+
+            CGContextSetStrokeColorWithColor(cg, primaryColor.CGColor);
+            CGContextSetLineWidth(cg, 1.1);
+            CGContextMoveToPoint(cg, size * 0.30, size * 0.24);
+            CGContextAddLineToPoint(cg, size * 0.50, size * 0.58);
+            CGContextAddLineToPoint(cg, size * 0.70, size * 0.24);
+            CGContextStrokePath(cg);
+        } else {
+            // Double-stroke > chevron matching reference section headers
+            CGContextSetStrokeColorWithColor(cg, accentColor.CGColor);
+            CGContextSetLineWidth(cg, 1.3);
+            CGContextMoveToPoint(cg, size * 0.22, size * 0.16);
+            CGContextAddLineToPoint(cg, size * 0.82, size * 0.50);
+            CGContextAddLineToPoint(cg, size * 0.22, size * 0.84);
+            CGContextStrokePath(cg);
+
+            CGContextSetStrokeColorWithColor(cg, primaryColor.CGColor);
+            CGContextSetLineWidth(cg, 1.1);
+            CGContextMoveToPoint(cg, size * 0.22, size * 0.30);
+            CGContextAddLineToPoint(cg, size * 0.56, size * 0.50);
+            CGContextAddLineToPoint(cg, size * 0.22, size * 0.70);
+            CGContextStrokePath(cg);
+        }
+    }];
 }
 
 @interface MenuToggleButton ()
@@ -29,62 +137,33 @@ UIFont *MADItalicFont(CGFloat size) {
     self.layer.borderColor = UIColor.darkGrayColor.CGColor;
     [self setTitle:title forState:UIControlStateNormal];
     [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    self.titleLabel.font = italic ? MADItalicFont(11.0) : MADBtnFont();
+    self.titleLabel.font = italic ? MADItalicFont(10.5) : MADBtnFont();
     self.titleLabel.adjustsFontSizeToFitWidth = YES;
-    self.titleLabel.minimumScaleFactor = 0.62;
-    self.titleLabel.textAlignment = NSTextAlignmentRight;
-    self.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
+    self.titleLabel.minimumScaleFactor = 0.65;
+    self.titleLabel.textAlignment = NSTextAlignmentCenter;
+    self.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     self.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-
-    // LED rail on the left edge marks the toggle state without a checkbox.
-    self.led = [[UIView alloc] initWithFrame:CGRectMake(6.0, (frame.size.height - 6.0) / 2.0, 6.0, 6.0)];
-    self.led.userInteractionEnabled = NO;
-    self.led.backgroundColor = UIColor.darkGrayColor;
-    self.led.layer.cornerRadius = 3.0;
-    [self addSubview:self.led];
 
     [self addTarget:self action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
     [self applyState];
     return self;
 }
 
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    self.led.center = CGPointMake(10.0, CGRectGetMidY(self.bounds));
-}
-
-// Keep the caption clear of the LED dot on the left edge without relying on
-// the deprecated titleEdgeInsets API.
 - (CGRect)titleRectForContentRect:(CGRect)contentRect {
-    CGRect rect = [super titleRectForContentRect:contentRect];
-    CGFloat minX = 17.0;
-    CGFloat maxX = CGRectGetMaxX(contentRect) - 6.0;
-    if (CGRectGetMinX(rect) < minX) {
-        rect.size.width = MAX(0.0, rect.size.width - (minX - CGRectGetMinX(rect)));
-        rect.origin.x = minX;
-    }
-    if (CGRectGetMaxX(rect) > maxX) {
-        rect.size.width = MAX(0.0, maxX - CGRectGetMinX(rect));
-    }
-    return rect;
+    return CGRectInset(contentRect, 6.0, 0.0);
 }
 
 - (void)applyState {
     if (self.on) {
         self.backgroundColor = MADBlack50();
         self.layer.borderColor = UIColor.yellowColor.CGColor;
+        self.layer.borderWidth = 0.9;
         [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        self.led.backgroundColor = UIColor.yellowColor;
-        self.led.layer.shadowColor = UIColor.yellowColor.CGColor;
-        self.led.layer.shadowOpacity = 0.9f;
-        self.led.layer.shadowRadius = 4.0f;
-        self.led.layer.shadowOffset = CGSizeZero;
     } else {
         self.backgroundColor = MADBlack50();
         self.layer.borderColor = UIColor.darkGrayColor.CGColor;
+        self.layer.borderWidth = 0.8;
         [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        self.led.backgroundColor = UIColor.darkGrayColor;
-        self.led.layer.shadowOpacity = 0.0f;
     }
 }
 
@@ -127,12 +206,12 @@ UIFont *MADItalicFont(CGFloat size) {
     [_s addTarget:self action:@selector(changed) forControlEvents:UIControlEventValueChanged];
     [self addSubview:_s];
 
-    _bubble = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 36, 16)];
+    _bubble = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 34, 16)];
     _bubble.backgroundColor = UIColor.yellowColor;
     _bubble.textColor = UIColor.blackColor;
-    _bubble.font = [UIFont boldSystemFontOfSize:10];
+    _bubble.font = [UIFont systemFontOfSize:10.0 weight:UIFontWeightMedium];
     _bubble.textAlignment = NSTextAlignmentCenter;
-    _bubble.layer.cornerRadius = 8.0;
+    _bubble.layer.cornerRadius = 4.0;
     _bubble.layer.cornerCurve = kCACornerCurveContinuous;
     _bubble.clipsToBounds = YES;
     [self addSubview:_bubble];
@@ -196,15 +275,15 @@ UIFont *MADItalicFont(CGFloat size) {
 - (instancetype)initWithTitle:(NSString *)title origin:(CGPoint)origin {
     if (!(self = [super initWithFrame:CGRectMake(origin.x, origin.y, 260, 24)])) return nil;
 
-    UIView *rail = [[UIView alloc] initWithFrame:CGRectMake(0, 4, 3, 14)];
-    rail.backgroundColor = UIColor.yellowColor;
-    rail.layer.cornerRadius = 1.5;
-    [self addSubview:rail];
+    UIImageView *chevron = [[UIImageView alloc] initWithFrame:CGRectMake(0, 4, 12, 12)];
+    chevron.image = MADChevronIconImage(NO, 12.0, UIColor.whiteColor, UIColor.yellowColor);
+    chevron.contentMode = UIViewContentModeScaleAspectFit;
+    [self addSubview:chevron];
 
-    UILabel *tit = [[UILabel alloc] initWithFrame:CGRectMake(10, 1, 240, 18)];
+    UILabel *tit = [[UILabel alloc] initWithFrame:CGRectMake(18, 1, 232, 18)];
     tit.text = title;
     tit.textColor = UIColor.whiteColor;
-    tit.font = [UIFont boldSystemFontOfSize:12.0];
+    tit.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
     tit.adjustsFontSizeToFitWidth = YES;
     tit.minimumScaleFactor = 0.8;
     [self addSubview:tit];
