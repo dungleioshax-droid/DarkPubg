@@ -156,14 +156,14 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
 - (UILabel *)addSectionHeader:(NSString *)title atY:(CGFloat)y {
     UIView *rail = [[UIView alloc] initWithFrame:CGRectMake(12, y + 3, 3, 13)];
-    rail.backgroundColor = DSColorAccent();
+    rail.backgroundColor = UIColor.yellowColor;
     rail.layer.cornerRadius = 1.5;
     [self.scroll addSubview:rail];
 
     UILabel *tit = [[UILabel alloc] initWithFrame:CGRectMake(22, y, 240, 18)];
     tit.text = title;
-    tit.textColor = DSColorTextPrimary();
-    tit.font = DSFontBody(10.5, UIFontWeightHeavy);
+    tit.textColor = UIColor.whiteColor;
+    tit.font = [UIFont boldSystemFontOfSize:12.0];
     tit.textAlignment = NSTextAlignmentLeft;
     [self.scroll addSubview:tit];
     return tit;
@@ -203,11 +203,11 @@ static const CGFloat kMadnessPanelH = 325.0f;
     // Collapse / Expand handle button (Round circle [ V ])
     self.handle = [UIButton buttonWithType:UIButtonTypeCustom];
     self.handle.frame = CGRectMake(5, 3, 24, 24);
-    self.handle.backgroundColor = [DSColorAccent() colorWithAlphaComponent:0.16];
+    self.handle.backgroundColor = MADBlack50();
     self.handle.layer.cornerRadius = 12.0;
     self.handle.layer.masksToBounds = YES;
     self.handle.layer.borderWidth = 1.0;
-    self.handle.layer.borderColor = [DSColorAccent() colorWithAlphaComponent:0.55].CGColor;
+    self.handle.layer.borderColor = UIColor.darkGrayColor.CGColor;
     [self.panel addSubview:self.handle];
 
     self.handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllview)];
@@ -219,8 +219,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     self.handleGlyph = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 24, 24)];
     self.handleGlyph.text = @"⋗";
-    self.handleGlyph.font = DSFontBody(16.0, UIFontWeightHeavy);
-    self.handleGlyph.textColor = DSColorAccent();
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:20.0];
+    self.handleGlyph.textColor = UIColor.yellowColor;
     self.handleGlyph.textAlignment = NSTextAlignmentCenter;
     self.handleGlyph.userInteractionEnabled = NO;
     self.handleGlyph.backgroundColor = UIColor.clearColor;
@@ -228,10 +228,10 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     // Top Dark Header Capsule Bar: collapsed (32, 3, 118, 24)
     self.titleBox = [[UIView alloc] initWithFrame:CGRectMake(32, 3, 118, 24)];
-    self.titleBox.backgroundColor = [DSColorInk() colorWithAlphaComponent:0.86];
+    self.titleBox.backgroundColor = MADBlack50();
     self.titleBox.layer.cornerRadius = 12.0;
     self.titleBox.layer.cornerCurve = kCACornerCurveContinuous;
-    self.titleBox.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.85].CGColor;
+    self.titleBox.layer.borderColor = UIColor.darkGrayColor.CGColor;
     self.titleBox.layer.borderWidth = 1.0;
     self.titleBox.clipsToBounds = YES;
     self.titleBox.userInteractionEnabled = YES;
@@ -248,8 +248,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     // 1. Title: DARKSWORD
     self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 2, 82, 20)];
     self.titleLabel.text = @"DARKSWORD";
-    self.titleLabel.textColor = DSColorAccent();
-    self.titleLabel.font = DSFontBody(11.0, UIFontWeightHeavy);
+    self.titleLabel.textColor = UIColor.yellowColor;
+    self.titleLabel.font = MADItalicFont(12.0);
     self.titleLabel.textAlignment = NSTextAlignmentLeft;
     self.titleLabel.userInteractionEnabled = NO;
     [self.titleBox addSubview:self.titleLabel];
@@ -267,7 +267,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.btnEng.layer.cornerRadius = 3.5;
     self.btnEng.clipsToBounds = YES;
     [self.btnEng setTitle:@"ENG" forState:UIControlStateNormal];
-    self.btnEng.titleLabel.font = DSFontBody(9.0, UIFontWeightHeavy);
+    self.btnEng.titleLabel.font = [UIFont boldSystemFontOfSize:9.0];
     [self.btnEng addTarget:self action:@selector(selectEng) forControlEvents:UIControlEventTouchUpInside];
     self.btnEng.hidden = YES;
     [self.titleBox addSubview:self.btnEng];
@@ -277,7 +277,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.btnVie.layer.cornerRadius = 3.5;
     self.btnVie.clipsToBounds = YES;
     [self.btnVie setTitle:@"VIE" forState:UIControlStateNormal];
-    self.btnVie.titleLabel.font = DSFontBody(9.0, UIFontWeightHeavy);
+    self.btnVie.titleLabel.font = [UIFont boldSystemFontOfSize:9.0];
     [self.btnVie addTarget:self action:@selector(selectVie) forControlEvents:UIControlEventTouchUpInside];
     self.btnVie.hidden = YES;
     [self.titleBox addSubview:self.btnVie];
@@ -285,12 +285,12 @@ static const CGFloat kMadnessPanelH = 325.0f;
     // 4. Contact button: [ Dũng Lê ]
     self.contactBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     self.contactBtn.frame = CGRectMake(186, 3, 56, 18);
-    self.contactBtn.backgroundColor = DSColorAccent();
+    self.contactBtn.backgroundColor = UIColor.yellowColor;
     self.contactBtn.layer.cornerRadius = 9.0;
     self.contactBtn.clipsToBounds = YES;
     [self.contactBtn setTitle:@"Dũng Lê" forState:UIControlStateNormal];
-    [self.contactBtn setTitleColor:DSColorOnAccent() forState:UIControlStateNormal];
-    self.contactBtn.titleLabel.font = DSFontBody(9.0, UIFontWeightHeavy);
+    [self.contactBtn setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
+    self.contactBtn.titleLabel.font = [UIFont boldSystemFontOfSize:9.0];
     [self.contactBtn addTarget:self action:@selector(contactTapped) forControlEvents:UIControlEventTouchUpInside];
     self.contactBtn.hidden = YES;
     [self.titleBox addSubview:self.contactBtn];
@@ -298,16 +298,16 @@ static const CGFloat kMadnessPanelH = 325.0f;
     // 5. Handles: Dũng Lê  DARKSWORD~KERNEL
     self.handleMajed = [[UILabel alloc] initWithFrame:CGRectMake(248, 3, 72, 18)];
     self.handleMajed.text = @"Dũng Lê";
-    self.handleMajed.textColor = DSColorTextPrimary();
-    self.handleMajed.font = DSFontBody(9.5, UIFontWeightBold);
+    self.handleMajed.textColor = UIColor.whiteColor;
+    self.handleMajed.font = [UIFont boldSystemFontOfSize:9.5];
     self.handleMajed.textAlignment = NSTextAlignmentLeft;
     self.handleMajed.hidden = YES;
     [self.titleBox addSubview:self.handleMajed];
 
     self.handleChan = [[UILabel alloc] initWithFrame:CGRectMake(326, 3, 130, 18)];
     self.handleChan.text = @"DARKSWORD~KERNEL";
-    self.handleChan.textColor = DSColorTextTertiary();
-    self.handleChan.font = DSFontBody(9.0, UIFontWeightBold);
+    self.handleChan.textColor = UIColor.yellowColor;
+    self.handleChan.font = MADItalicFont(9.0);
     self.handleChan.textAlignment = NSTextAlignmentLeft;
     self.handleChan.hidden = YES;
     [self.titleBox addSubview:self.handleChan];
@@ -324,8 +324,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     // Left: Date & Time + Battery Level
     self.clockLabel = [[UILabel alloc] initWithFrame:CGRectMake(36, 31, 140, 16)];
     self.clockLabel.backgroundColor = UIColor.clearColor;
-    self.clockLabel.textColor = DSColorTextSecondary();
-    self.clockLabel.font = DSFontMono(10.0, UIFontWeightSemibold);
+    self.clockLabel.textColor = UIColor.whiteColor;
+    self.clockLabel.font = [UIFont boldSystemFontOfSize:11.0];
     self.clockLabel.textAlignment = NSTextAlignmentLeft;
     self.clockLabel.userInteractionEnabled = NO;
     self.clockLabel.hidden = YES;
@@ -333,8 +333,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     self.batteryLabel = [[UILabel alloc] initWithFrame:CGRectMake(180, 31, 26, 16)];
     self.batteryLabel.backgroundColor = UIColor.clearColor;
-    self.batteryLabel.textColor = DSColorAccent();
-    self.batteryLabel.font = DSFontMono(10.0, UIFontWeightSemibold);
+    self.batteryLabel.textColor = UIColor.yellowColor;
+    self.batteryLabel.font = [UIFont boldSystemFontOfSize:11.0];
     self.batteryLabel.textAlignment = NSTextAlignmentLeft;
     self.batteryLabel.userInteractionEnabled = NO;
     self.batteryLabel.hidden = YES;
@@ -344,8 +344,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.sloganLabel = [[UILabel alloc] initWithFrame:CGRectMake(210, 31, 280, 16)];
     self.sloganLabel.backgroundColor = UIColor.clearColor;
     self.sloganLabel.text = @"MORE FUTURE SOON INJOY ;)";
-    self.sloganLabel.textColor = DSColorTextTertiary();
-    self.sloganLabel.font = DSFontBody(10.0, UIFontWeightSemibold);
+    self.sloganLabel.textColor = UIColor.yellowColor;
+    self.sloganLabel.font = [UIFont boldSystemFontOfSize:10.5];
     self.sloganLabel.textAlignment = NSTextAlignmentRight;
     self.sloganLabel.userInteractionEnabled = NO;
     self.sloganLabel.hidden = YES;
@@ -589,15 +589,15 @@ static const CGFloat kMadnessPanelH = 325.0f;
 - (void)updateLanguageDisplayOnly {
     BOOL isVie = [self.currentLang isEqualToString:@"VIE"];
     if (isVie) {
-        self.btnVie.backgroundColor = DSColorAccent();
-        [self.btnVie setTitleColor:DSColorOnAccent() forState:UIControlStateNormal];
-        self.btnEng.backgroundColor = [DSColorSurfaceHi() colorWithAlphaComponent:0.8];
-        [self.btnEng setTitleColor:DSColorTextSecondary() forState:UIControlStateNormal];
+        self.btnVie.backgroundColor = UIColor.yellowColor;
+        [self.btnVie setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
+        self.btnEng.backgroundColor = MADBlack50();
+        [self.btnEng setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     } else {
-        self.btnEng.backgroundColor = DSColorAccent();
-        [self.btnEng setTitleColor:DSColorOnAccent() forState:UIControlStateNormal];
-        self.btnVie.backgroundColor = [DSColorSurfaceHi() colorWithAlphaComponent:0.8];
-        [self.btnVie setTitleColor:DSColorTextSecondary() forState:UIControlStateNormal];
+        self.btnEng.backgroundColor = UIColor.yellowColor;
+        [self.btnEng setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
+        self.btnVie.backgroundColor = MADBlack50();
+        [self.btnVie setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     }
 }
 
@@ -926,7 +926,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     // Thin yellow separator line (y = 191)
     UIView *sep = [[UIView alloc] initWithFrame:CGRectMake(12, 191, 476, 0.8)];
-    sep.backgroundColor = [DSColorAccent() colorWithAlphaComponent:0.45];
+    sep.backgroundColor = [[UIColor yellowColor] colorWithAlphaComponent:0.45];
     [self.scroll addSubview:sep];
 
     // Row 2 (y = 196): [ AR ], [ SMG ], [ SHOTGUN ], [ SNIPER ]
@@ -1128,8 +1128,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     if (pf.origin.x + targetW > maxW) pf.origin.x = MAX(10.0f, maxW - targetW - 10.0f);
     if (pf.origin.y + targetH > maxH) pf.origin.y = MAX(10.0f, maxH - targetH - 10.0f);
 
-    self.panel.backgroundColor = [DSColorInk() colorWithAlphaComponent:0.88];
-    self.panel.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.9].CGColor;
+    self.panel.backgroundColor = MADPanelFill();
+    self.panel.layer.borderColor = UIColor.darkGrayColor.CGColor;
     self.panel.layer.borderWidth = 1.0;
     self.panel.layer.cornerRadius = 18.0;
     self.panel.layer.cornerCurve = kCACornerCurveContinuous;
@@ -1140,7 +1140,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     self.handleGlyph.frame = CGRectMake(0, 0, 24, 24);
     self.handleGlyph.text = @"V";
-    self.handleGlyph.font = DSFontBody(12.0, UIFontWeightHeavy);
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:14.0];
 
     // Header row packs from the right edge so it survives narrow panels:
     // [ handle ] [ DARKSWORD ] ... [ ENG | VIE ] [ DLX07 ] [ @DLX07 ] [ kernel ]
@@ -1229,7 +1229,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     self.handleGlyph.frame = CGRectMake(0, 0, 24, 24);
     self.handleGlyph.text = @"⋗";
-    self.handleGlyph.font = DSFontBody(16.0, UIFontWeightHeavy);
+    self.handleGlyph.font = [UIFont boldSystemFontOfSize:20.0];
     self.titleBox.frame = CGRectMake(32, 3, 118, 24);
 }
 

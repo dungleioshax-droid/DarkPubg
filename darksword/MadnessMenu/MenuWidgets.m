@@ -1,15 +1,15 @@
 #import "MenuWidgets.h"
 #import "DSTheme.h"
 
-/* Shared surface tokens: the menu is drawn over live gameplay, so fills are
-   translucent and every edge stays hairline-thin. */
-UIColor *MADPanelFill(void) { return [DSColorSurface() colorWithAlphaComponent:0.55]; }
-UIColor *MADCardFill(void)  { return [DSColorSurfaceHi() colorWithAlphaComponent:0.55]; }
-UIColor *MADFieldYellow(void){ return [DSColorAccent() colorWithAlphaComponent:0.90]; }
-UIColor *MADBlack50(void)   { return [DSColorInk() colorWithAlphaComponent:0.55]; }
-UIFont *MADBtnFont(void) { return DSFontBody(10.5, UIFontWeightBold); }
+/* Shared surface tokens matching Madnessmenu style (translucent black + yellow accent). */
+UIColor *MADPanelFill(void) { return [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5]; }
+UIColor *MADCardFill(void)  { return [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5]; }
+UIColor *MADFieldYellow(void){ return [[UIColor yellowColor] colorWithAlphaComponent:0.7]; }
+UIColor *MADBlack50(void)   { return [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5]; }
+UIFont *MADBtnFont(void) { return [UIFont boldSystemFontOfSize:12.0]; }
 UIFont *MADItalicFont(CGFloat size) {
-    return DSRoundedFont(size, UIFontWeightSemibold);
+    UIFont *f = [UIFont fontWithName:@"AvenirNextCondensed-HeavyItalic" size:size];
+    return f ?: [UIFont boldSystemFontOfSize:size];
 }
 
 @interface MenuToggleButton ()
@@ -22,14 +22,14 @@ UIFont *MADItalicFont(CGFloat size) {
 }
 - (instancetype)initWithTitle:(NSString *)title frame:(CGRect)frame italic:(BOOL)italic {
     if (!(self = [super initWithFrame:frame])) return nil;
-    self.backgroundColor = [DSColorSurface() colorWithAlphaComponent:0.72];
+    self.backgroundColor = MADBlack50();
     self.layer.cornerRadius = 7.0;
     self.layer.cornerCurve = kCACornerCurveContinuous;
     self.layer.borderWidth = 0.8;
-    self.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.9].CGColor;
+    self.layer.borderColor = UIColor.darkGrayColor.CGColor;
     [self setTitle:title forState:UIControlStateNormal];
-    [self setTitleColor:DSColorTextSecondary() forState:UIControlStateNormal];
-    self.titleLabel.font = italic ? MADItalicFont(10.0) : MADBtnFont();
+    [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    self.titleLabel.font = italic ? MADItalicFont(11.0) : MADBtnFont();
     self.titleLabel.adjustsFontSizeToFitWidth = YES;
     self.titleLabel.minimumScaleFactor = 0.62;
     self.titleLabel.textAlignment = NSTextAlignmentRight;
@@ -39,7 +39,7 @@ UIFont *MADItalicFont(CGFloat size) {
     // LED rail on the left edge marks the toggle state without a checkbox.
     self.led = [[UIView alloc] initWithFrame:CGRectMake(6.0, (frame.size.height - 6.0) / 2.0, 6.0, 6.0)];
     self.led.userInteractionEnabled = NO;
-    self.led.backgroundColor = DSColorTextTertiary();
+    self.led.backgroundColor = UIColor.darkGrayColor;
     self.led.layer.cornerRadius = 3.0;
     [self addSubview:self.led];
 
@@ -71,19 +71,19 @@ UIFont *MADItalicFont(CGFloat size) {
 
 - (void)applyState {
     if (self.on) {
-        self.backgroundColor = [DSColorAccent() colorWithAlphaComponent:0.14];
-        self.layer.borderColor = [DSColorAccent() colorWithAlphaComponent:0.65].CGColor;
-        [self setTitleColor:DSColorAccent() forState:UIControlStateNormal];
-        self.led.backgroundColor = DSColorAccent();
-        self.led.layer.shadowColor = DSColorAccent().CGColor;
+        self.backgroundColor = MADBlack50();
+        self.layer.borderColor = UIColor.yellowColor.CGColor;
+        [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        self.led.backgroundColor = UIColor.yellowColor;
+        self.led.layer.shadowColor = UIColor.yellowColor.CGColor;
         self.led.layer.shadowOpacity = 0.9f;
         self.led.layer.shadowRadius = 4.0f;
         self.led.layer.shadowOffset = CGSizeZero;
     } else {
-        self.backgroundColor = [DSColorSurface() colorWithAlphaComponent:0.72];
-        self.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.9].CGColor;
-        [self setTitleColor:DSColorTextSecondary() forState:UIControlStateNormal];
-        self.led.backgroundColor = [DSColorTextTertiary() colorWithAlphaComponent:0.7];
+        self.backgroundColor = MADBlack50();
+        self.layer.borderColor = UIColor.darkGrayColor.CGColor;
+        [self setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        self.led.backgroundColor = UIColor.darkGrayColor;
         self.led.layer.shadowOpacity = 0.0f;
     }
 }
@@ -120,17 +120,17 @@ UIFont *MADItalicFont(CGFloat size) {
     CGFloat sliderW = frame.size.width - nameW - 12.0f;
     _s = [[UISlider alloc] initWithFrame:CGRectMake(0, (frame.size.height - 18.0) / 2.0, sliderW, 18.0)];
     _s.minimumValue = min; _s.maximumValue = max; _s.value = value;
-    _s.minimumTrackTintColor = DSColorAccent();
-    _s.maximumTrackTintColor = [DSColorHairline() colorWithAlphaComponent:0.9];
-    _s.thumbTintColor = DSColorAccent();
+    _s.minimumTrackTintColor = UIColor.yellowColor;
+    _s.maximumTrackTintColor = UIColor.whiteColor;
+    _s.thumbTintColor = UIColor.clearColor;
     _s.continuous = YES;
     [_s addTarget:self action:@selector(changed) forControlEvents:UIControlEventValueChanged];
     [self addSubview:_s];
 
     _bubble = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 36, 16)];
-    _bubble.backgroundColor = DSColorAccent();
-    _bubble.textColor = DSColorOnAccent();
-    _bubble.font = DSFontBody(9.5, UIFontWeightHeavy);
+    _bubble.backgroundColor = UIColor.yellowColor;
+    _bubble.textColor = UIColor.blackColor;
+    _bubble.font = [UIFont boldSystemFontOfSize:10];
     _bubble.textAlignment = NSTextAlignmentCenter;
     _bubble.layer.cornerRadius = 8.0;
     _bubble.layer.cornerCurve = kCACornerCurveContinuous;
@@ -139,8 +139,8 @@ UIFont *MADItalicFont(CGFloat size) {
 
     _name = [[UILabel alloc] initWithFrame:CGRectMake(frame.size.width - nameW, (frame.size.height - 16.0) / 2.0, nameW, 16.0)];
     _name.text = name;
-    _name.textColor = DSColorTextTertiary();
-    _name.font = DSFontBody(9.5, UIFontWeightHeavy);
+    _name.textColor = UIColor.yellowColor;
+    _name.font = MADItalicFont(10);
     _name.textAlignment = NSTextAlignmentRight;
     _name.adjustsFontSizeToFitWidth = YES;
     _name.minimumScaleFactor = 0.7;
@@ -173,18 +173,18 @@ UIFont *MADItalicFont(CGFloat size) {
 - (instancetype)initWithFrame:(CGRect)frame placeholder:(NSString *)ph {
     if (!(self = [super initWithFrame:frame])) return nil;
     self.borderStyle = UITextBorderStyleNone;
-    self.backgroundColor = [DSColorSurfaceHi() colorWithAlphaComponent:0.9];
-    self.textColor = DSColorTextPrimary();
-    self.font = DSFontBody(12.0, UIFontWeightSemibold);
+    self.backgroundColor = MADFieldYellow();
+    self.textColor = UIColor.blackColor;
+    self.font = MADItalicFont(12.0);
     self.layer.cornerRadius = 8.0;
     self.layer.borderWidth = 1.0;
-    self.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.9].CGColor;
+    self.layer.borderColor = UIColor.darkGrayColor.CGColor;
     self.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
     self.leftViewMode = UITextFieldViewModeAlways;
     self.attributedPlaceholder = [[NSAttributedString alloc] initWithString:ph
                                                                  attributes:@{
-        NSForegroundColorAttributeName: DSColorTextTertiary(),
-        NSFontAttributeName: DSFontBody(12.0, UIFontWeightMedium),
+        NSForegroundColorAttributeName: UIColor.blackColor,
+        NSFontAttributeName: MADItalicFont(12.0),
     }];
     self.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
     self.clearButtonMode = UITextFieldViewModeWhileEditing;
@@ -197,14 +197,14 @@ UIFont *MADItalicFont(CGFloat size) {
     if (!(self = [super initWithFrame:CGRectMake(origin.x, origin.y, 260, 24)])) return nil;
 
     UIView *rail = [[UIView alloc] initWithFrame:CGRectMake(0, 4, 3, 14)];
-    rail.backgroundColor = DSColorAccent();
+    rail.backgroundColor = UIColor.yellowColor;
     rail.layer.cornerRadius = 1.5;
     [self addSubview:rail];
 
     UILabel *tit = [[UILabel alloc] initWithFrame:CGRectMake(10, 1, 240, 18)];
     tit.text = title;
-    tit.textColor = DSColorTextPrimary();
-    tit.font = DSFontBody(10.5, UIFontWeightHeavy);
+    tit.textColor = UIColor.whiteColor;
+    tit.font = [UIFont boldSystemFontOfSize:12.0];
     tit.adjustsFontSizeToFitWidth = YES;
     tit.minimumScaleFactor = 0.8;
     [self addSubview:tit];
