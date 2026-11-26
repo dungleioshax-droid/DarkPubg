@@ -155,6 +155,7 @@ static std::vector<uint64_t> s_trackedLevelVehicles;
 static uint64_t s_lastMatchWorld = 0;
 static uint64_t s_lastMatchLevel = 0;
 static bool s_lastMatchMapIsLobby = false;
+static uint64_t g_dspubgWorldLevelsOff = 0;
 
 static inline uint32_t ds_pubg_actor_cache_hash(uint64_t actor) {
     return (uint32_t)((actor >> 4) ^ (actor >> 13)) & (uint32_t)(kDSPUBGActorCacheSize - 1);
@@ -3037,7 +3038,6 @@ static bool ds_pubg_actor_array_plausible(uint64_t arr, uint64_t *outData, uint3
 // ULevel body for a {ptr,count} pair whose elements are real UObjects, and the
 // winning offset is cached for the session.
 static uint64_t g_dspubgLevelActorsOff = 0;
-static uint64_t g_dspubgWorldLevelsOff = 0;
 
 static uint32_t ds_pubg_find_world_levels(uint64_t world, uint64_t persistentLevel, uint64_t *outLevels, uint32_t maxLevels) {
     if (!outLevels || maxLevels == 0) return 0;
