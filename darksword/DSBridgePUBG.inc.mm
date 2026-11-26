@@ -113,6 +113,7 @@ struct DSPUBGActorCacheEntry {
     uint64_t actor;
     bool isScenery;
     bool isPawn;
+    bool isTrainingTarget;
     DSPUBGItemCategory itemCat;
     char itemName[36];
     uint64_t vCommon;
@@ -170,12 +171,23 @@ static inline bool ds_pubg_is_pet_name(const char *name) {
             strcasestr(name, "Pigeon") != NULL);
 }
 
+static inline bool ds_pubg_is_training_target_name(const char *name) {
+    if (!name || !name[0]) return false;
+    return (strcasestr(name, "ModelTarget") != NULL ||
+            strcasestr(name, "TrainingTarget") != NULL ||
+            strcasestr(name, "TrainingDummy") != NULL ||
+            strcasestr(name, "TargetDummy") != NULL ||
+            strcasestr(name, "ShootTarget") != NULL ||
+            strcasestr(name, "PracticeTarget") != NULL ||
+            strcasestr(name, "MoveTarget") != NULL);
+}
+
 // Fast check for static scenery / non-loot / non-character engine classes
 static inline bool ds_pubg_is_scenery_name(const char *name) {
     if (!name || !name[0]) return false;
     if (ds_pubg_is_pet_name(name)) return true;
     // Keep training range humanoid targets eligible for pawn detection.
-    if (strstr(name, "ModelTarget")) return false;
+    if (ds_pubg_is_training_target_name(name)) return false;
     return (strstr(name, "StaticMesh") || strstr(name, "Foliage") ||
             strstr(name, "Landscape") || strstr(name, "Building") ||
             strstr(name, "House") || strstr(name, "Tree") ||
@@ -2950,6 +2962,7 @@ static void ds_pubg_reset_match_caches(void) {
     s_lastMatchWorld = 0;
     s_lastMatchLevel = 0;
     s_lastMatchMapIsLobby = false;
+    g_dspubgWorldLevelsOff = 0;
 }
 
 static void ds_pubg_overlay_reset(void) {
@@ -2993,11 +3006,12 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
     if (!ds_pubg_actors_array_at(arr, &data, &count)) return 0;
     if (!data || count == 0) return 0;
 
-    const uint32_t probe = count < 8 ? count : 8;
+    const uint32_t probe = count < 16 ? count : 16;
     int score = 0;
     for (uint32_t i = 0; i < probe; i++) {
         uint64_t a = ds_pubg_read_ptr(data + (uint64_t)i * sizeof(uint64_t));
-        if (!a || !ds_pubg_valid(a)) return 0;
+        if (!a) continue; // UE4 leaves nullptr slots in ULevel::Actors between GC cycles
+        if (!ds_pubg_valid(a)) return 0;
         score++;
         // A live UObject carries ClassPrivate at 0x10; that second hop is what
         // separates an actor list from an array of random in-range pointers.
@@ -3023,12 +3037,103 @@ static bool ds_pubg_actor_array_plausible(uint64_t arr, uint64_t *outData, uint3
 // ULevel body for a {ptr,count} pair whose elements are real UObjects, and the
 // winning offset is cached for the session.
 static uint64_t g_dspubgLevelActorsOff = 0;
+static uint64_t g_dspubgWorldLevelsOff = 0;
+
+static uint32_t ds_pubg_find_world_levels(uint64_t world, uint64_t persistentLevel, uint64_t *outLevels, uint32_t maxLevels) {
+    if (!outLevels || maxLevels == 0) return 0;
+    uint32_t outCount = 0;
+    if (persistentLevel && ds_pubg_valid(persistentLevel)) {
+        outLevels[outCount++] = persistentLevel;
+    }
+    if (!world || !ds_pubg_valid(world) || !persistentLevel || !ds_pubg_valid(persistentLevel)) {
+        return outCount;
+    }
+
+    auto readLevelsAt = [&](uint64_t off) -> bool {
+        uint8_t hdr[16] = {0};
+        if (!ds_pubg_read(world + off, hdr, sizeof(hdr))) return false;
+        uint64_t data = 0;
+        uint32_t count = 0, maxc = 0;
+        memcpy(&data, hdr, 8);
+        memcpy(&count, hdr + 8, 4);
+        memcpy(&maxc, hdr + 12, 4);
+        data &= 0x0000FFFFFFFFFFFFULL;
+        if (!data || !ds_pubg_valid(data) || (data & 0x7ULL) != 0) return false;
+        if (count < 1 || count > 128 || maxc < count || maxc > 512) return false;
+
+        uint32_t readCnt = (count > 64) ? 64 : count;
+        uint64_t lvls[64] = {0};
+        if (!ds_pubg_read(data, lvls, readCnt * sizeof(uint64_t))) return false;
+        if ((lvls[0] & 0x0000FFFFFFFFFFFFULL) != persistentLevel) return false;
+
+        if (readCnt > 1) {
+            bool subOk = false;
+            uint32_t checkN = (readCnt > 4) ? 4 : readCnt;
+            for (uint32_t i = 1; i < checkN; i++) {
+                uint64_t sl = lvls[i] & 0x0000FFFFFFFFFFFFULL;
+                if (sl && ds_pubg_valid(sl)) {
+                    uint64_t owning = ds_pubg_read_ptr(sl + 0xC0ULL);
+                    if (owning == world) {
+                        subOk = true;
+                        break;
+                    }
+                }
+            }
+            if (!subOk) return false;
+        }
+
+        for (uint32_t i = 0; i < readCnt && outCount < maxLevels; i++) {
+            uint64_t sl = lvls[i] & 0x0000FFFFFFFFFFFFULL;
+            if (!sl || !ds_pubg_valid(sl)) continue;
+            bool dup = false;
+            for (uint32_t k = 0; k < outCount; k++) {
+                if (outLevels[k] == sl) { dup = true; break; }
+            }
+            if (!dup) outLevels[outCount++] = sl;
+        }
+        return true;
+    };
+
+    if (g_dspubgWorldLevelsOff) {
+        if (readLevelsAt(g_dspubgWorldLevelsOff)) return outCount;
+        g_dspubgWorldLevelsOff = 0;
+    }
+
+    const uint64_t kScanBase = 0x100ULL;
+    const uint64_t kScanSize = 0x400ULL;
+    uint8_t body[kScanSize];
+    if (!ds_pubg_read(world + kScanBase, body, sizeof(body))) {
+        return outCount;
+    }
+
+    for (uint64_t off = 0; off + 0x10 <= sizeof(body); off += 0x8) {
+        uint64_t data = 0;
+        uint32_t count = 0, maxc = 0;
+        memcpy(&data, body + off, 8);
+        memcpy(&count, body + off + 8, 4);
+        memcpy(&maxc, body + off + 12, 4);
+        data &= 0x0000FFFFFFFFFFFFULL;
+        if (!data || !ds_pubg_valid(data) || (data & 0x7ULL) != 0) continue;
+        if (count < 1 || count > 128 || maxc < count || maxc > 512) continue;
+        uint64_t candidateOff = kScanBase + off;
+        if (readLevelsAt(candidateOff)) {
+            g_dspubgWorldLevelsOff = candidateOff;
+            break;
+        }
+    }
+    return outCount;
+}
 
 static bool ds_pubg_find_level_actors(uint64_t lvl, uint64_t *outData, uint32_t *outCount) {
     if (!lvl || !ds_pubg_valid(lvl)) return false;
 
     if (g_dspubgLevelActorsOff) {
-        if (ds_pubg_actor_array_plausible(lvl + g_dspubgLevelActorsOff, outData, outCount)) return true;
+        uint64_t cachedData = 0;
+        uint32_t cachedCount = 0;
+        if (ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &cachedData, &cachedCount)) {
+            if (cachedCount == 0) return false; // Empty sublevel; keep cached offset
+            if (ds_pubg_actor_array_plausible(lvl + g_dspubgLevelActorsOff, outData, outCount)) return true;
+        }
         g_dspubgLevelActorsOff = 0;
     }
 
@@ -5396,9 +5501,13 @@ static void ds_pubg_tick_impl(void) {
 
         uint32_t cSlot = ds_pubg_actor_cache_hash(pawn);
         DSPUBGActorCacheEntry &cEntry = g_dspubgActorCache[cSlot];
+        bool isTrainingTarget = false;
         if (cEntry.actor == pawn) {
             if (cEntry.isScenery) {
                 return false;
+            }
+            if (cEntry.isPawn) {
+                isTrainingTarget = cEntry.isTrainingTarget;
             }
         }
 
@@ -5407,58 +5516,63 @@ static void ds_pubg_tick_impl(void) {
             char pawnName[64] = {0};
             bool hasPawnName = ds_pubg_get_actor_name(pawn, pawnName, sizeof(pawnName));
             if (hasPawnName) {
-                bool isScenery = (strstr(pawnName, "StaticMesh") || strstr(pawnName, "Foliage") ||
-                    strstr(pawnName, "Landscape") || strstr(pawnName, "Building") ||
-                    strstr(pawnName, "House") || strstr(pawnName, "Tree") ||
-                    strstr(pawnName, "Rock") || strstr(pawnName, "Wall") ||
-                    strstr(pawnName, "Fence") || strstr(pawnName, "Door") ||
-                    strstr(pawnName, "Window") || strstr(pawnName, "Floor") ||
-                    strstr(pawnName, "Roof") || strstr(pawnName, "Brush") ||
-                    strstr(pawnName, "SM_") || strstr(pawnName, "Mesh") ||
-                    strstr(pawnName, "BP_Building") || strstr(pawnName, "BP_House") ||
-                    strstr(pawnName, "BP_Wall") || strstr(pawnName, "BP_Door") ||
-                    strstr(pawnName, "BP_Fence") || strstr(pawnName, "BP_Stair") ||
-                    strstr(pawnName, "Arch") || strstr(pawnName, "Prop") ||
-                    strstr(pawnName, "Stair") || strstr(pawnName, "Tower") ||
-                    strstr(pawnName, "Shed") || strstr(pawnName, "Gate") ||
-                    strstr(pawnName, "Container") || strstr(pawnName, "Obstacle"));
-                if (isScenery) {
-                    cEntry.actor = pawn;
-                    cEntry.isScenery = true;
-                    cEntry.isPawn = false;
-                    cEntry.itemCat = DSPUBGItemCategoryNone;
-                    cEntry.vCommon = 0;
-                    return false;
-                }
+                isTrainingTarget = ds_pubg_is_training_target_name(pawnName);
+                if (!isTrainingTarget) {
+                    bool isScenery = (strstr(pawnName, "StaticMesh") || strstr(pawnName, "Foliage") ||
+                        strstr(pawnName, "Landscape") || strstr(pawnName, "Building") ||
+                        strstr(pawnName, "House") || strstr(pawnName, "Tree") ||
+                        strstr(pawnName, "Rock") || strstr(pawnName, "Wall") ||
+                        strstr(pawnName, "Fence") || strstr(pawnName, "Door") ||
+                        strstr(pawnName, "Window") || strstr(pawnName, "Floor") ||
+                        strstr(pawnName, "Roof") || strstr(pawnName, "Brush") ||
+                        strstr(pawnName, "SM_") || strstr(pawnName, "Mesh") ||
+                        strstr(pawnName, "BP_Building") || strstr(pawnName, "BP_House") ||
+                        strstr(pawnName, "BP_Wall") || strstr(pawnName, "BP_Door") ||
+                        strstr(pawnName, "BP_Fence") || strstr(pawnName, "BP_Stair") ||
+                        strstr(pawnName, "Arch") || strstr(pawnName, "Prop") ||
+                        strstr(pawnName, "Stair") || strstr(pawnName, "Tower") ||
+                        strstr(pawnName, "Shed") || strstr(pawnName, "Gate") ||
+                        strstr(pawnName, "Container") || strstr(pawnName, "Obstacle"));
+                    if (isScenery) {
+                        cEntry.actor = pawn;
+                        cEntry.isScenery = true;
+                        cEntry.isPawn = false;
+                        cEntry.isTrainingTarget = false;
+                        cEntry.itemCat = DSPUBGItemCategoryNone;
+                        cEntry.vCommon = 0;
+                        return false;
+                    }
 
-                if (ds_pubg_is_pet_name(pawnName) ||
-                    strcasestr(pawnName, "Particle") || strcasestr(pawnName, "Effect") ||
-                    strcasestr(pawnName, "Decal") || strcasestr(pawnName, "Camera") ||
-                    strcasestr(pawnName, "Volume") || strcasestr(pawnName, "Trigger") ||
-                    strcasestr(pawnName, "Light") || strcasestr(pawnName, "Audio") ||
-                    strcasestr(pawnName, "Sound") || strcasestr(pawnName, "Zone") ||
-                    strcasestr(pawnName, "Fog") || strcasestr(pawnName, "Lobby") ||
-                    strcasestr(pawnName, "MainCity") || strcasestr(pawnName, "PetAvatar") ||
-                    strcasestr(pawnName, "LobbyModel") || strcasestr(pawnName, "Avatar") ||
-                    strcasestr(pawnName, "Preview")) {
-                    cEntry.actor = pawn;
-                    cEntry.isScenery = true;
-                    cEntry.isPawn = false;
-                    cEntry.itemCat = DSPUBGItemCategoryNone;
-                    cEntry.vCommon = 0;
-                    return false;
-                }
+                    if (ds_pubg_is_pet_name(pawnName) ||
+                        strcasestr(pawnName, "Particle") || strcasestr(pawnName, "Effect") ||
+                        strcasestr(pawnName, "Decal") || strcasestr(pawnName, "Camera") ||
+                        strcasestr(pawnName, "Volume") || strcasestr(pawnName, "Trigger") ||
+                        strcasestr(pawnName, "Light") || strcasestr(pawnName, "Audio") ||
+                        strcasestr(pawnName, "Sound") || strcasestr(pawnName, "Zone") ||
+                        strcasestr(pawnName, "Fog") || strcasestr(pawnName, "Lobby") ||
+                        strcasestr(pawnName, "MainCity") || strcasestr(pawnName, "PetAvatar") ||
+                        strcasestr(pawnName, "LobbyModel") || strcasestr(pawnName, "Avatar") ||
+                        strcasestr(pawnName, "Preview")) {
+                        cEntry.actor = pawn;
+                        cEntry.isScenery = true;
+                        cEntry.isPawn = false;
+                        cEntry.isTrainingTarget = false;
+                        cEntry.itemCat = DSPUBGItemCategoryNone;
+                        cEntry.vCommon = 0;
+                        return false;
+                    }
 
-                if (strcasestr(pawnName, "Bullet") || strcasestr(pawnName, "Proj") || strcasestr(pawnName, "Weapon") ||
-                    strcasestr(pawnName, "PickUp") || strcasestr(pawnName, "Vehicle") || strcasestr(pawnName, "VH_") ||
-                    strcasestr(pawnName, "Drop") || strcasestr(pawnName, "Tomb") || strcasestr(pawnName, "Box") ||
-                    strcasestr(pawnName, "Supply") || strcasestr(pawnName, "AirDrop") || strcasestr(pawnName, "Item") ||
-                    strcasestr(pawnName, "Controller") || strcasestr(pawnName, "Shell") ||
-                    strcasestr(pawnName, "Cartridge") || strcasestr(pawnName, "Trace") ||
-                    strcasestr(pawnName, "Grenade") || strcasestr(pawnName, "Smoke") ||
-                    strcasestr(pawnName, "Explosion") || strcasestr(pawnName, "Shoulei") ||
-                    strcasestr(pawnName, "Molotov") || strcasestr(pawnName, "Burn")) {
-                    return false;
+                    if (strcasestr(pawnName, "Bullet") || strcasestr(pawnName, "Proj") || strcasestr(pawnName, "Weapon") ||
+                        strcasestr(pawnName, "PickUp") || strcasestr(pawnName, "Vehicle") || strcasestr(pawnName, "VH_") ||
+                        strcasestr(pawnName, "Drop") || strcasestr(pawnName, "Tomb") || strcasestr(pawnName, "Box") ||
+                        strcasestr(pawnName, "Supply") || strcasestr(pawnName, "AirDrop") || strcasestr(pawnName, "Item") ||
+                        strcasestr(pawnName, "Controller") || strcasestr(pawnName, "Shell") ||
+                        strcasestr(pawnName, "Cartridge") || strcasestr(pawnName, "Trace") ||
+                        strcasestr(pawnName, "Grenade") || strcasestr(pawnName, "Smoke") ||
+                        strcasestr(pawnName, "Explosion") || strcasestr(pawnName, "Shoulei") ||
+                        strcasestr(pawnName, "Molotov") || strcasestr(pawnName, "Burn")) {
+                        return false;
+                    }
                 }
             }
         }
@@ -5466,7 +5580,7 @@ static void ds_pubg_tick_impl(void) {
         // 1. Reject local player's own bullets, weapons, projectiles
         uint64_t owner = ds_pubg_read_ptr(pawn + 0x140ULL);
         uint64_t instigator = ds_pubg_read_ptr(pawn + 0x138ULL);
-        if (localPawn && (owner == localPawn || instigator == localPawn)) {
+        if (!isTrainingTarget && localPawn && (owner == localPawn || instigator == localPawn)) {
             return false;
         }
 
@@ -5474,7 +5588,7 @@ static void ds_pubg_tick_impl(void) {
         uint8_t aHidden = ds_pubg_read_u8(pawn + 0xE8ULL);
         if (aHidden & 0x1) return false;
 
-        // 3. Dead check - STExtraCharacter.bDead at 0xE7C
+        // 3. Dead check - STExtraCharacter.bDead at 0xE8C
         uint8_t isDead = ds_pubg_read_u8(pawn + kDSPUBGCharacterDeadOffset) & 1;
         if (isDead) return false;
 
@@ -5488,15 +5602,25 @@ static void ds_pubg_tick_impl(void) {
         if (!meshComp || !ds_pubg_valid(meshComp)) return false;
 
         // 5. Strict Health validation (Reject all non-characters and dead bodies):
+        // Training target dummies may use > 2000 HP (e.g. 5000 / 10000) or 0 max HP.
         float health = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthOffset);
         float healthMax = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthMaxOffset);
-        if (isnan(health) || isinf(health) || isnan(healthMax) || isinf(healthMax)) return false;
-
-        if (healthMax < 50.0f || healthMax > 2000.0f) return false;
+        if (isTrainingTarget) {
+            if (isnan(healthMax) || isinf(healthMax) || healthMax < 50.0f || healthMax > 1000000.0f) {
+                healthMax = 100.0f;
+            }
+            if (isnan(health) || isinf(health)) {
+                health = healthMax;
+            }
+        } else {
+            if (isnan(health) || isinf(health) || isnan(healthMax) || isinf(healthMax)) return false;
+            if (healthMax < 50.0f || healthMax > 1000000.0f) return false;
+        }
 
         cEntry.actor = pawn;
         cEntry.isPawn = true;
         cEntry.isScenery = false;
+        cEntry.isTrainingTarget = isTrainingTarget;
         cEntry.itemCat = DSPUBGItemCategoryNone;
         cEntry.vCommon = 0;
         cEntry.rootComp = rootComp;
@@ -5515,15 +5639,19 @@ static void ds_pubg_tick_impl(void) {
             gh = ds_pubg_read_f32(pawn + 0xE84ULL);
         }
 
-        // If bDead (offset 0xE7C) is 0, but standard health <= 0, the player is knocked down (gục ngã)!
+        // If bDead (offset 0xE8C) is 0, but standard health <= 0, the player is knocked down (gục ngã)!
         if (health <= 0.0f) {
-            isKnocked = true;
-            if (!isnan(gh) && !isinf(gh) && gh > 0.0f && gh <= 200.0f) {
-                health = gh;
+            if (isTrainingTarget) {
+                health = healthMax;
             } else {
-                health = 100.0f; // Default knocked health if groggy offset shifted
+                isKnocked = true;
+                if (!isnan(gh) && !isinf(gh) && gh > 0.0f && gh <= 200.0f) {
+                    health = gh;
+                } else {
+                    health = 100.0f; // Default knocked health if groggy offset shifted
+                }
             }
-        } else if (!isnan(gh) && !isinf(gh) && gh > 0.0f && gh <= 200.0f && gh < health) {
+        } else if (!isTrainingTarget && !isnan(gh) && !isinf(gh) && gh > 0.0f && gh <= 200.0f && gh < health) {
             // Some versions update groggy health before main health
             isKnocked = true;
             health = gh;
@@ -5533,7 +5661,7 @@ static void ds_pubg_tick_impl(void) {
 
         // 6. Team filter:
         int32_t teamId = ds_pubg_read_i32(pawn + kDSPUBGCharacterTeamIDOffset);
-        if (localTeamId > 0 && teamId == localTeamId) {
+        if (!isTrainingTarget && localTeamId > 0 && teamId == localTeamId) {
             ds_pubg_smart_skip(pawn);
             return false;
         }
@@ -5543,22 +5671,49 @@ static void ds_pubg_tick_impl(void) {
 
         seenPawns.push_back(pawn);
 
+        // Resolve world-space location BEFORE rejecting near-(0,0), because pawns attached to
+        // moving platforms/tracks (e.g. Training Ground moving mannequins) have RelativeLocation == (0,0,Z).
         DSPUBGVector rootLoc = {};
-        if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
-            return false;
-        }
-        if (isnan(rootLoc.X) || isinf(rootLoc.X) || (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
-            return false;
-        }
-
         uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
+        bool haveWorldLoc = false;
         if (parent && ds_pubg_valid(parent)) {
-            DSPUBGVector parentLoc = {};
-            if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
-                rootLoc.X += parentLoc.X;
-                rootLoc.Y += parentLoc.Y;
-                rootLoc.Z += parentLoc.Z;
+            DSPUBGVector ax = {}, ay = {}, az = {}, sc = {};
+            if (ds_pubg_component_world_pose(rootComp, rootLoc, ax, ay, az, sc) &&
+                (fabsf(rootLoc.X) >= 1.0f || fabsf(rootLoc.Y) >= 1.0f)) {
+                haveWorldLoc = true;
             }
+        }
+        if (!haveWorldLoc) {
+            if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
+                return false;
+            }
+            if (isnan(rootLoc.X) || isinf(rootLoc.X) || (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
+                // Fallback to ComponentToWorld translation (+0x210 quat, +0x220 translation)
+                uint8_t rc2w[32] = {0};
+                if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
+                    float qx = 0, qy = 0, qz = 0, qw = 1.0f;
+                    DSPUBGVector c2wLoc = {};
+                    memcpy(&qx, rc2w + 0x0, 4);
+                    memcpy(&qy, rc2w + 0x4, 4);
+                    memcpy(&qz, rc2w + 0x8, 4);
+                    memcpy(&qw, rc2w + 0xC, 4);
+                    memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
+                    float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+                    if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
+                        !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
+                        !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
+                        !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
+                        (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
+                        rootLoc = c2wLoc;
+                    }
+                }
+            }
+        }
+        if (isnan(rootLoc.X) || isinf(rootLoc.X) ||
+            isnan(rootLoc.Y) || isinf(rootLoc.Y) ||
+            isnan(rootLoc.Z) || isinf(rootLoc.Z) ||
+            (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
+            return false;
         }
 
         DSPUBGRotator actorRot = {};
@@ -5577,7 +5732,7 @@ static void ds_pubg_tick_impl(void) {
         }
 
         uint64_t ps = psHint ? psHint : ds_pubg_read_ptr(pawn + 0x4D0ULL);
-        bool isAI = knownBot;
+        bool isAI = knownBot || isTrainingTarget;
         char readNation[16] = {0};
         bool hasNation = false;
 
@@ -6723,7 +6878,7 @@ static void ds_pubg_tick_impl(void) {
 
         if (actorsData && actorsCount > 0) {
             g_dspubgLastActorsCount = (int)actorsCount;
-            if (actorsCount > 8192) actorsCount = 8192;
+            if (actorsCount > 16384) actorsCount = 16384;
             static std::vector<uint64_t> s_levelActors;
             if (s_levelActors.size() < actorsCount) s_levelActors.resize(actorsCount);
             if (ds_pubg_read(actorsData, s_levelActors.data(), actorsCount * sizeof(uint64_t))) {
@@ -6774,7 +6929,11 @@ static void ds_pubg_tick_impl(void) {
     if (needFullLevelScan && level) {
         s_trackedLevelVehicles.clear();
         int beforeCount = itemStagingCount;
-        collectActorsFromLevel(level);
+        uint64_t worldLevels[32] = {0};
+        uint32_t worldLevelCount = ds_pubg_find_world_levels(world, level, worldLevels, 32);
+        for (uint32_t li = 0; li < worldLevelCount; li++) {
+            collectActorsFromLevel(worldLevels[li]);
+        }
         // Cache discovered static loot items with their 3D world coordinates for smooth reprojection
         s_cachedLootCount = 0;
         for (int i = beforeCount; i < itemStagingCount && s_cachedLootCount < (int)(sizeof(s_cachedLoot)/sizeof(s_cachedLoot[0])); i++) {
