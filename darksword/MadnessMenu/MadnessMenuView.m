@@ -156,7 +156,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
 - (UILabel *)addSectionHeader:(NSString *)title atY:(CGFloat)y {
     UIImageView *chevron = [[UIImageView alloc] initWithFrame:CGRectMake(12, y + 3, 12, 12)];
-    chevron.image = MADChevronIconImage(NO, 12.0, UIColor.whiteColor, UIColor.yellowColor);
+    chevron.image = MADChevronIconImage(NO, 12.0, UIColor.whiteColor, UIColor.whiteColor);
     chevron.contentMode = UIViewContentModeScaleAspectFit;
     [self.scroll addSubview:chevron];
 
@@ -185,9 +185,9 @@ static const CGFloat kMadnessPanelH = 325.0f;
         }
     }
 
-    // Panel container: start collapsed (160 x 30)
+    // Panel container: start collapsed (182 x 30)
     self.panel = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.panel.frame = CGRectMake(startX, startY, 160, 30);
+    self.panel.frame = CGRectMake(startX, startY, 182, 30);
     self.panel.backgroundColor = UIColor.clearColor;
     self.panel.layer.cornerRadius = 14.0;
     self.panel.layer.cornerCurve = kCACornerCurveContinuous;
@@ -218,13 +218,13 @@ static const CGFloat kMadnessPanelH = 325.0f;
     [self.handle addTarget:self action:@selector(handleTapped:) forControlEvents:UIControlEventTouchUpInside];
 
     self.handleIconView = [[UIImageView alloc] initWithFrame:CGRectMake(5, 5, 14, 14)];
-    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.yellowColor);
+    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.whiteColor);
     self.handleIconView.contentMode = UIViewContentModeScaleAspectFit;
     self.handleIconView.userInteractionEnabled = NO;
     [self.handle addSubview:self.handleIconView];
 
-    // Top Dark Header Capsule Bar: collapsed (32, 3, 122, 24)
-    self.titleBox = [[UIView alloc] initWithFrame:CGRectMake(32, 3, 122, 24)];
+    // Top Dark Header Capsule Bar: collapsed (32, 3, 144, 24)
+    self.titleBox = [[UIView alloc] initWithFrame:CGRectMake(32, 3, 144, 24)];
     self.titleBox.backgroundColor = MADBlack50();
     self.titleBox.layer.cornerRadius = 12.0;
     self.titleBox.layer.cornerCurve = kCACornerCurveContinuous;
@@ -242,15 +242,15 @@ static const CGFloat kMadnessPanelH = 325.0f;
     UITapGestureRecognizer *titleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(titleBoxTapped:)];
     [self.titleBox addGestureRecognizer:titleTap];
 
-    // 1. Pixel-art Title Logo: DARKSWORD
-    self.titleLogoView = [[UIImageView alloc] initWithFrame:CGRectMake(9, 6.5, 83, 11)];
-    self.titleLogoView.image = MADPixelTextImage(@"DARKSWORD", UIColor.yellowColor, 1.55);
+    // 1. Pixel-art Title Logo: DARKSWORD (bold 7x7 pixel font)
+    self.titleLogoView = [[UIImageView alloc] initWithFrame:CGRectMake(9, 6.5, 108, 11)];
+    self.titleLogoView.image = MADPixelTextImage(@"DARKSWORD", UIColor.yellowColor, 1.52);
     self.titleLogoView.contentMode = UIViewContentModeScaleAspectFit;
     self.titleLogoView.userInteractionEnabled = NO;
     [self.titleBox addSubview:self.titleLogoView];
 
     // 2. Mascot icon
-    self.mascotView = [[UIImageView alloc] initWithFrame:CGRectMake(96, 2, 20, 20)];
+    self.mascotView = [[UIImageView alloc] initWithFrame:CGRectMake(120, 2, 20, 20)];
     self.mascotView.image = MadnessMascotImage();
     self.mascotView.contentMode = UIViewContentModeScaleAspectFit;
     self.mascotView.userInteractionEnabled = NO;
@@ -586,12 +586,12 @@ static const CGFloat kMadnessPanelH = 325.0f;
     if (isVie) {
         self.btnVie.backgroundColor = UIColor.yellowColor;
         [self.btnVie setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
-        self.btnEng.backgroundColor = MADBlack50();
+        self.btnEng.backgroundColor = UIColor.clearColor;
         [self.btnEng setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     } else {
         self.btnEng.backgroundColor = UIColor.yellowColor;
         [self.btnEng setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
-        self.btnVie.backgroundColor = MADBlack50();
+        self.btnVie.backgroundColor = UIColor.clearColor;
         [self.btnVie setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     }
 }
@@ -1133,53 +1133,46 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllview1)];
     [self.handle addGestureRecognizer:self.handleTap];
 
-    self.handleIconView.image = MADChevronIconImage(YES, 14.0, UIColor.whiteColor, UIColor.yellowColor);
+    self.handleIconView.image = MADChevronIconImage(YES, 14.0, UIColor.whiteColor, UIColor.whiteColor);
 
-    // Header row packs from the right edge so it survives narrow panels:
-    // [ handle ] [ DARKSWORD ] ... [ ENG | VIE ] [ DLX07 ] [ @DLX07 ] [ kernel ]
-    // Chips are grouped so the language pair is never split, and any group
-    // that no longer fits is hidden instead of overlapping the title.
+    // Header row left-to-right matching reference:
+    // [ handle ] [ DARKSWORD 😈 | ENG VIE | contact | @handle | kernel ]
     self.titleBox.frame = CGRectMake(34, 4, targetW - 42, 24);
-    const CGFloat titleInset = 124.0f;   // handle circle + title + mascot
-    const CGFloat chipGap = 4.0f;
-    const CGFloat wEng = 30.0f, wVie = 28.0f, wContact = 54.0f;
-    const CGFloat wHandle = 62.0f, wKernel = 118.0f;
+    const CGFloat maxRight = self.titleBox.bounds.size.width - 8.0f;
+    const CGFloat chipGap = 6.0f;
+    const CGFloat wEng = 28.0f, wVie = 26.0f, wContact = 56.0f;
+    const CGFloat wHandle = 54.0f, wKernel = 112.0f;
 
-    // Right-to-left cursor; each group is placed only if it fully fits.
-    CGFloat cursor = self.titleBox.bounds.size.width - 6.0f;
-    BOOL roomLeft = YES;
+    CGFloat cursor = 144.0f;
 
-    // Group 1: language pair (right-most, always kept when possible).
-    roomLeft = roomLeft && (cursor - (wEng + chipGap + wVie) >= titleInset);
-    self.btnEng.hidden = !roomLeft;
-    self.btnVie.hidden = !roomLeft;
-    if (roomLeft) {
-        self.btnVie.frame = CGRectMake(cursor - wVie, 3, wVie, 18);
-        self.btnEng.frame = CGRectMake(cursor - wVie - chipGap - wEng, 3, wEng, 18);
-        cursor -= (wEng + chipGap + wVie + chipGap);
+    BOOL showLang = (cursor + wEng + 3.0f + wVie <= maxRight);
+    self.btnEng.hidden = !showLang;
+    self.btnVie.hidden = !showLang;
+    if (showLang) {
+        self.btnEng.frame = CGRectMake(cursor, 3, wEng, 18);
+        self.btnVie.frame = CGRectMake(cursor + wEng + 3.0f, 3, wVie, 18);
+        cursor += wEng + 3.0f + wVie + chipGap;
     }
 
-    // Group 2: contact chip.
-    roomLeft = roomLeft && (cursor - wContact >= titleInset);
-    self.contactBtn.hidden = !roomLeft;
-    if (roomLeft) {
-        self.contactBtn.frame = CGRectMake(cursor - wContact, 3, wContact, 18);
-        cursor -= (wContact + chipGap);
+    BOOL showContact = showLang && (cursor + wContact <= maxRight);
+    self.contactBtn.hidden = !showContact;
+    if (showContact) {
+        self.contactBtn.frame = CGRectMake(cursor, 3, wContact, 18);
+        cursor += wContact + chipGap;
     }
 
-    // Group 3: handles.
-    roomLeft = roomLeft && (cursor - wHandle >= titleInset);
-    self.handleMajed.hidden = !roomLeft;
-    if (roomLeft) {
-        self.handleMajed.frame = CGRectMake(cursor - wHandle, 3, wHandle, 18);
-        cursor -= (wHandle + chipGap);
+    BOOL showHandle = showContact && (cursor + wHandle <= maxRight);
+    self.handleMajed.hidden = !showHandle;
+    if (showHandle) {
+        self.handleMajed.frame = CGRectMake(cursor, 3, wHandle, 18);
+        cursor += wHandle + chipGap;
     }
 
-    roomLeft = roomLeft && (cursor - wKernel >= titleInset);
-    self.handleChan.hidden = !roomLeft;
-    if (roomLeft) {
-        self.handleChan.frame = CGRectMake(cursor - wKernel, 3, wKernel, 18);
-        cursor -= (wKernel + chipGap);
+    BOOL showKernel = showHandle && (cursor + wKernel <= maxRight);
+    self.handleChan.hidden = !showKernel;
+    if (showKernel) {
+        self.handleChan.frame = CGRectMake(maxRight - wKernel, 3, wKernel, 18);
+        self.handleChan.textAlignment = NSTextAlignmentRight;
     }
 
     self.clockLabel.hidden = NO;
@@ -1201,7 +1194,7 @@ static const CGFloat kMadnessPanelH = 325.0f;
     g_hostedMenuExpanded = NO;
 
     CGRect pf = self.panel.frame;
-    self.panel.frame = CGRectMake(pf.origin.x, pf.origin.y, 160, 30);
+    self.panel.frame = CGRectMake(pf.origin.x, pf.origin.y, 182, 30);
     self.panel.backgroundColor = UIColor.clearColor;
     self.panel.layer.borderWidth = 0.0;
     self.scroll.hidden = YES;
@@ -1220,8 +1213,8 @@ static const CGFloat kMadnessPanelH = 325.0f;
     self.handleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(controllview)];
     [self.handle addGestureRecognizer:self.handleTap];
 
-    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.yellowColor);
-    self.titleBox.frame = CGRectMake(32, 3, 122, 24);
+    self.handleIconView.image = MADChevronIconImage(NO, 14.0, UIColor.whiteColor, UIColor.whiteColor);
+    self.titleBox.frame = CGRectMake(32, 3, 144, 24);
 }
 
 - (void)titleBoxTapped:(UITapGestureRecognizer *)gr {
