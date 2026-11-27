@@ -1038,7 +1038,21 @@ static inline bool ds_pubg_is_item_type_enabled(DSPUBGItemCategory cat, const ch
         return g_pubgEspVehicle;
     }
 
-    // 2. AirDrop / DeathBox / Ammo
+    // 2. Flare Gun / Flare Ammo
+    if (strstr(name, "Flare")) {
+        return g_pubgEspFlareGun;
+    }
+
+    // 3. Drugs / Medicine (checked BEFORE Crate because medicals use Crate category)
+    if (strstr(name, "Nước") || strstr(name, "Thuốc") || strstr(name, "Máu") ||
+        strstr(name, "Băng Gạc") || strstr(name, "Giảm Đau") ||
+        strstr(name, "Adrenaline") || strstr(name, "FirstAid") || strstr(name, "First Aid") ||
+        strstr(name, "MedKit") || strstr(name, "Med Kit") ||
+        strstr(name, "Bandage") || strstr(name, "Painkiller") || strstr(name, "EnergyDrink")) {
+        return g_pubgEspDrug;
+    }
+
+    // 4. AirDrop / DeathBox / Ammo
     if (cat == DSPUBGItemCategoryCrate) {
         if (strstr(name, "Đạn") || strstr(name, "Ammo") || strstr(name, "9mm") ||
             strstr(name, "7.62") || strstr(name, "5.56") || strstr(name, "12G") ||
@@ -1047,18 +1061,6 @@ static inline bool ds_pubg_is_item_type_enabled(DSPUBGItemCategory cat, const ch
             return g_pubgEspAmmo;
         }
         return g_pubgEspCrate;
-    }
-
-    // 3. Flare Gun / Flare Ammo
-    if (strstr(name, "Flare")) {
-        return g_pubgEspFlareGun;
-    }
-
-    // 4. Drugs / Medicine
-    if (strstr(name, "Nước") || strstr(name, "Thuốc") || strstr(name, "Máu") ||
-        strstr(name, "Adrenaline") || strstr(name, "FirstAid") || strstr(name, "MedKit") ||
-        strstr(name, "Bandage") || strstr(name, "Painkiller") || strstr(name, "EnergyDrink")) {
-        return g_pubgEspDrug;
     }
 
     // 5. Scopes / Accessories

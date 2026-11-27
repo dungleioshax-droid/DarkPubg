@@ -226,7 +226,8 @@ static inline bool ds_pubg_is_scenery_name(const char *name) {
             strstr(name, "Stand") || strstr(name, "Table") ||
             strstr(name, "Board") || strstr(name, "Target") ||
             strstr(name, "Guide") || strstr(name, "Button") ||
-            strstr(name, "Widget") || strstr(name, "UI") ||
+            strstr(name, "Widget") || strstr(name, "UI_") ||
+            strstr(name, "_UI") ||
             strstr(name, "SeatComponent") || strstr(name, "WheelComponent"));
 }
 
@@ -1780,13 +1781,22 @@ static DSPUBGItemCategory ds_pubg_classify_vehicle_shape(uint8_t shape, char *ou
     return DSPUBGItemCategoryNone;
 }
 
+static int ds_pubg_read_pickup_item_id(uint64_t actor) {
+    static const uint64_t kItemIdOffsets[] = {
+        0x5FCULL, 0x60CULL, 0x61CULL, 0x758ULL, 0x768ULL, 0x5ECULL
+    };
+    for (uint64_t off : kItemIdOffsets) {
+        int val = ds_pubg_read_i32(actor + off);
+        if (val >= 101001 && val <= 699999) {
+            return val;
+        }
+    }
+    return 0;
+}
+
 static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *preloadedName, char *outDisplay, size_t outCap) {
     if (!actor || !outDisplay || outCap < 4 || !ds_pubg_valid(actor)) return DSPUBGItemCategoryNone;
     outDisplay[0] = '\0';
-
-    // 0. Check bHidden in AActor (offset 0xE8)
-    uint8_t aHidden = ds_pubg_read_u8(actor + 0xE8ULL);
-    if (aHidden & 0x1) return DSPUBGItemCategoryNone;
 
     // Optional: Get actor name via GNames if available (reuse preloadedName if caller already resolved it)
     char actorName[64] = {0};
@@ -1829,7 +1839,7 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
             strcasestr(actorName, "Stand") || strcasestr(actorName, "Table") ||
             strcasestr(actorName, "Board") || strcasestr(actorName, "Target") ||
             strcasestr(actorName, "Guide") || strcasestr(actorName, "Button") ||
-            strcasestr(actorName, "Widget") || strcasestr(actorName, "UI") ||
+            strcasestr(actorName, "Widget") || strstr(actorName, "UI_") || strstr(actorName, "_UI") ||
             strcasestr(actorName, "Seat") || strcasestr(actorName, "Wheel") ||
             strcasestr(actorName, "Collision") || strcasestr(actorName, "Physics")) {
             return DSPUBGItemCategoryNone;
@@ -1856,7 +1866,8 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
                             (strcasestr(actorName, "Target") != nullptr) ||
                             (strcasestr(actorName, "Guide") != nullptr) ||
                             (strcasestr(actorName, "Button") != nullptr) ||
-                            (strcasestr(actorName, "UI") != nullptr) ||
+                            (strstr(actorName, "UI_") != nullptr) ||
+                            (strstr(actorName, "_UI") != nullptr) ||
                             (strcasestr(actorName, "Widget") != nullptr);
 
         if (!isNonVehicle) {
@@ -1969,13 +1980,10 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
 
         // 4. Wrapper Actor check
         if (strstr(actorName, "Wrapper") || strstr(actorName, "PickUp") || strstr(actorName, "Pickup")) {
-            uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
-            if (pickedUp) return DSPUBGItemCategoryNone;
+            uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
+            if (own && ds_pubg_valid(own)) return DSPUBGItemCategoryNone;
 
-            int typeSpecificID = ds_pubg_read_i32(actor + 0x5FCULL);
-            int itemId = ds_pubg_read_i32(actor + 0x758ULL);
-            int targetId = (typeSpecificID >= 101001 && typeSpecificID <= 699999) ? typeSpecificID :
-                           ((itemId >= 101001 && itemId <= 699999) ? itemId : 0);
+            int targetId = ds_pubg_read_pickup_item_id(actor);
             if (targetId > 0) {
                 DSPUBGItemCategory idCat = ds_pubg_classify_item_id(targetId, outDisplay, outCap);
                 if (idCat != DSPUBGItemCategoryNone) return idCat;
@@ -1987,16 +1995,11 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
     }
 
     // Name resolution failed (hasName == false) - Use strict multi-field memory checks
-    // Check if it's already picked up
-    uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
-    if (pickedUp) return DSPUBGItemCategoryNone;
-
-    // Check Ground Item ID at 0x5FC or 0x758
-    int typeSpecificID = ds_pubg_read_i32(actor + 0x5FCULL);
-    int itemId = ds_pubg_read_i32(actor + 0x758ULL);
-    int targetId = (typeSpecificID >= 101001 && typeSpecificID <= 699999) ? typeSpecificID :
-                   ((itemId >= 101001 && itemId <= 699999) ? itemId : 0);
+    // Check Ground Item ID across supported PickUpWrapper offsets
+    int targetId = ds_pubg_read_pickup_item_id(actor);
     if (targetId > 0) {
+        uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
+        if (own && ds_pubg_valid(own)) return DSPUBGItemCategoryNone;
         DSPUBGItemCategory idCat = ds_pubg_classify_item_id(targetId, outDisplay, outCap);
         if (idCat != DSPUBGItemCategoryNone) return idCat;
     }
@@ -6740,7 +6743,7 @@ static void ds_pubg_tick_impl(void) {
         // [A3] Smart filter: never list self or a teammate as loot.
         if (ds_pubg_smart_is_skipped(actor)) return;
 
-        // 1. Fast RootComponent and Location check FIRST (filters out 95% of non-spatial/offscreen actors without GNames)
+        // 1. Fast RootComponent and Location check FIRST (ComponentToWorld then RelativeLocation)
         DSPUBGVector rootLoc = {};
         bool hasLoc = false;
         uint64_t rootComp = ds_pubg_read_ptr(actor + kDSPUBGActorRootComponentOffset);
@@ -6748,11 +6751,30 @@ static void ds_pubg_tick_impl(void) {
             rootComp = ds_pubg_read_ptr(actor + 0x180ULL);
         }
         if (rootComp && ds_pubg_valid(rootComp)) {
-            if (ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
+            uint8_t rc2w[32] = {0};
+            if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
+                float qx = 0, qy = 0, qz = 0, qw = 1.0f;
+                DSPUBGVector c2wLoc = {};
+                memcpy(&qx, rc2w + 0x0, 4);
+                memcpy(&qy, rc2w + 0x4, 4);
+                memcpy(&qz, rc2w + 0x8, 4);
+                memcpy(&qw, rc2w + 0xC, 4);
+                memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
+                float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+                if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
+                    !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
+                    !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
+                    !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
+                    (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
+                    rootLoc = c2wLoc;
+                    hasLoc = true;
+                }
+            }
+            if (!hasLoc && ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
                 if (!isnan(rootLoc.X) && !isinf(rootLoc.X) &&
                     !isnan(rootLoc.Y) && !isinf(rootLoc.Y) &&
                     !isnan(rootLoc.Z) && !isinf(rootLoc.Z) &&
-                    (rootLoc.X != 0.0f || rootLoc.Y != 0.0f || rootLoc.Z != 0.0f)) {
+                    (fabsf(rootLoc.X) >= 1.0f || fabsf(rootLoc.Y) >= 1.0f)) {
                     hasLoc = true;
                 }
             }
@@ -6798,9 +6820,9 @@ static void ds_pubg_tick_impl(void) {
         if (itemCacheValid && cEntry.itemCat != DSPUBGItemCategoryNone) {
             cat = cEntry.itemCat;
             strncpy(displayName, cEntry.itemName, sizeof(displayName) - 1);
-            if (cat != DSPUBGItemCategoryVehicle) {
-                uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
-                if (pickedUp) {
+            if (cat != DSPUBGItemCategoryVehicle && cat != DSPUBGItemCategoryCrate) {
+                uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
+                if (own && ds_pubg_valid(own)) {
                     cEntry.actor = 0;
                     cEntry.classPrivate = 0;
                     cEntry.nameIndex = 0;
@@ -7012,7 +7034,7 @@ static void ds_pubg_tick_impl(void) {
                             continue;
                         }
                         if (cEntry.itemCat != DSPUBGItemCategoryNone) {
-                            if (isPersistent) processItemOrVehicle(actor);
+                            processItemOrVehicle(actor);
                             continue;
                         }
                         if (cEntry.isPawn) {
@@ -7027,7 +7049,7 @@ static void ds_pubg_tick_impl(void) {
 
                     if (!processPawn(actor, 0, false)) {
                         if (!processGrenade(actor)) {
-                            if (isPersistent) processItemOrVehicle(actor);
+                            processItemOrVehicle(actor);
                         } else {
                             bool alreadyG = false;
                             for (uint64_t tg : s_trackedLevelGrenades) { if (tg == actor) { alreadyG = true; break; } }

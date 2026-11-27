@@ -819,7 +819,10 @@ static const CGFloat kMadnessPanelH = 325.0f;
 
     // Row 0 (y = 142): [ ENABLE ], [ VEHICLE ], [ GRENADE WARN ], [ LOOT BOX ]
     self.btnMatEnable = [self btn:@"ENABLE" frame:CGRectMake(x0, 142, colW, btnH) inView:self.scroll italic:YES];
-    self.btnMatEnable.on = (g_pubgEspWeaponAR || g_pubgEspArmorLv1 || g_pubgEspScope);
+    self.btnMatEnable.on = (g_pubgEspWeaponAR || g_pubgEspWeaponSMG || g_pubgEspWeaponShotgun ||
+                            g_pubgEspWeaponSniper || g_pubgEspArmorLv1 || g_pubgEspArmorLv2 ||
+                            g_pubgEspArmorLv3 || g_pubgEspScope || g_pubgEspVehicle ||
+                            g_pubgEspCrate || g_pubgEspDrug || g_pubgEspFlareGun || g_pubgEspAmmo);
     self.btnMatEnable.onToggle = ^(BOOL isOn) {
         weakSelf.btnVeh.on = isOn;
         weakSelf.btnGrenade.on = isOn;

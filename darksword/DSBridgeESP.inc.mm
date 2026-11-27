@@ -1741,6 +1741,9 @@ static void ds_hosted_apply_pubg(void) {
             CGFloat strW = 120.0f;
             CGFloat strH = 14.0f;
             ds_layer_set_frame(lbl, CGRectMake(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
+            if (lbl.fontSize != 9.5) lbl.fontSize = 9.5;
+            CGColorRef vehColor = ds_pubg_cgcolor_from_rgba(it.colorRGBA);
+            if (lbl.foregroundColor != vehColor) lbl.foregroundColor = vehColor;
             ds_layer_set_string(lbl, titleStr);
             ds_layer_set_hidden(lbl, NO);
         } else {
