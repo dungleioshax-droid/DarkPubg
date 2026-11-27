@@ -38,7 +38,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-NSString * const DSBridgeProgressNotification = @"com.huami.darkpubg.dsbridge.progress";
+NSString * const DSBridgeProgressNotification = @"vn.pubgmobile.darksword.dsbridge.progress";
 
 static os_unfair_lock g_errorLock = OS_UNFAIR_LOCK_INIT;
 static NSString *g_dsLastError = @"";
@@ -56,7 +56,7 @@ static NSString *ds_localized(NSString *key) {
 }
 
 static void ds_post_progress(void) {
-    notify_post("com.huami.darkpubg.dsbridge.progress");
+    notify_post("vn.pubgmobile.darksword.dsbridge.progress");
     dispatch_async(dispatch_get_main_queue(), ^{
         [[NSNotificationCenter defaultCenter] postNotificationName:DSBridgeProgressNotification object:nil];
     });
@@ -255,7 +255,7 @@ static dispatch_queue_t ds_bridge_queue(void) {
     dispatch_once(&onceToken, ^{
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
             DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
-        queue = dispatch_queue_create("com.huami.darkpubg.darksword", attr);
+        queue = dispatch_queue_create("vn.pubgmobile.darksword.darksword", attr);
     });
     return queue;
 }

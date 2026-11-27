@@ -777,7 +777,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkpubg;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.pubgmobile.darksword;
 				PRODUCT_NAME = DarkPubg;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphonesimulator;
@@ -821,7 +821,7 @@
 					"$(PROJECT_DIR)/libraries",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkpubg;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.pubgmobile.darksword;
 				PRODUCT_NAME = DarkPubg;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphonesimulator;
@@ -1023,7 +1023,7 @@
 					"-lgrabkernel2",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkpubg;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.pubgmobile.darksword;
 				PRODUCT_NAME = DarkPubg;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphoneos;
@@ -1080,7 +1080,7 @@
 					"-lgrabkernel2",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkpubg;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.pubgmobile.darksword;
 				PRODUCT_NAME = DarkPubg;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SUPPORTED_PLATFORMS = iphoneos;

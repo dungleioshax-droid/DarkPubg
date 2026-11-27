@@ -36,6 +36,10 @@ verify_bridge_fragments() {
 
 verify_bridge_fragments
 
+if command -v sips >/dev/null 2>&1 && [ -f "$PWD/supports/Assets.xcassets/AppIcon.appiconset/AppIcon.jpg" ]; then
+    sips -s format png -z 180 180 "$PWD/supports/Assets.xcassets/AppIcon.appiconset/AppIcon.jpg" --out "$PWD/Resources/icon.png" >/dev/null
+fi
+
 set -- clean archive \
     -scheme DarkPubg \
     -project DarkPubg.xcodeproj \
@@ -44,7 +48,7 @@ set -- clean archive \
     -destination 'generic/platform=iOS' \
     -archivePath "$archive_path" \
     -xcconfig supports/darksword.xcconfig \
-    PRODUCT_BUNDLE_IDENTIFIER=com.huami.darkpubg \
+    PRODUCT_BUNDLE_IDENTIFIER=vn.pubgmobile.darksword \
     CODE_SIGN_ENTITLEMENTS=supports/entitlements-darksword.plist \
     IPHONEOS_DEPLOYMENT_TARGET=16.0
 

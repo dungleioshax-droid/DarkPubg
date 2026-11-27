@@ -28,7 +28,7 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>com.huami.darkpubg</string>
+			<string>vn.pubgmobile.darksword</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>darkpubg</string>

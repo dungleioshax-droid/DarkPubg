@@ -15,7 +15,7 @@ LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks
 // DarkPubg development signing.
 DEVELOPMENT_TEAM = 6LMF23FAGL
 CODE_SIGN_STYLE = Automatic
-PRODUCT_BUNDLE_IDENTIFIER = com.huami.darkpubg
+PRODUCT_BUNDLE_IDENTIFIER = vn.pubgmobile.darksword
 IPHONEOS_DEPLOYMENT_TARGET = 16.0
 SKIP_APPINTENTSSSU_VALIDATION = YES
 
