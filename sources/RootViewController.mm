@@ -798,7 +798,7 @@ static BOOL IsPUBGProcessRunning(void) {
     cardSep2.backgroundColor = [DSColorHairline() colorWithAlphaComponent:0.55];
     [statusCard addSubview:cardSep2];
 
-    auto makeFeatureChip = ^UIView *(NSString *iconName, UIColor *tint, UILabel **outLabel) {
+    auto makeFeatureChip = ^UIView *(NSString *iconName, UIColor *tint, UILabel * __strong *outLabel) {
         UIView *chip = [[UIView alloc] init];
         chip.translatesAutoresizingMaskIntoConstraints = NO;
         chip.backgroundColor = [tint colorWithAlphaComponent:0.10];
