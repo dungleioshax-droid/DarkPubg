@@ -15,61 +15,52 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Palette
 
-// Deep obsidian-navy surfaces with cool indigo undertones so luminous gold
-// and electric cyan accents pop cleanly with high contrast.
-#define DSColorInk()        [UIColor colorWithRed:0.027 green:0.035 blue:0.059 alpha:1.0]   // #07090F
-#define DSColorSurface()    [UIColor colorWithRed:0.063 green:0.078 blue:0.122 alpha:1.0]   // #10141F
-#define DSColorSurfaceHi()  [UIColor colorWithRed:0.094 green:0.118 blue:0.180 alpha:1.0]   // #181E2E
-#define DSColorHairline()   [UIColor colorWithRed:0.165 green:0.204 blue:0.298 alpha:1.0]   // #2A344C
+// Native Apple iOS Dark Mode system colors (HIG InsetGrouped palette).
+#define DSColorInk()        [UIColor colorWithRed:0.000 green:0.000 blue:0.000 alpha:1.0]   // systemGroupedBackground (#000000)
+#define DSColorSurface()    [UIColor colorWithRed:0.110 green:0.110 blue:0.118 alpha:1.0]   // secondarySystemGroupedBackground (#1C1C1E)
+#define DSColorSurfaceHi()  [UIColor colorWithRed:0.173 green:0.173 blue:0.180 alpha:1.0]   // tertiarySystemGroupedBackground (#2C2C2E)
+#define DSColorHairline()   [UIColor colorWithRed:0.220 green:0.220 blue:0.227 alpha:1.0]   // separator (#38383A)
 
-// Signature accent: luminous tactical gold-amber paired with cool sky cyan.
-#define DSColorAccent()     [UIColor colorWithRed:0.980 green:0.780 blue:0.220 alpha:1.0]   // #FAC738
-#define DSColorAccentHi()   [UIColor colorWithRed:0.996 green:0.878 blue:0.420 alpha:1.0]   // #FEE06B
-#define DSColorAccentLo()   [UIColor colorWithRed:0.945 green:0.580 blue:0.080 alpha:1.0]   // #F19414
-#define DSColorAccentDim()  [UIColor colorWithRed:0.980 green:0.780 blue:0.220 alpha:0.16]
+// Signature accent: Apple iOS System Blue.
+#define DSColorAccent()     [UIColor colorWithRed:0.039 green:0.518 blue:1.000 alpha:1.0]   // systemBlue (#0A84FF)
+#define DSColorAccentHi()   [UIColor colorWithRed:0.251 green:0.612 blue:1.000 alpha:1.0]   // #409CFF
+#define DSColorAccentLo()   [UIColor colorWithRed:0.000 green:0.439 blue:0.961 alpha:1.0]   // #0070F5
+#define DSColorAccentDim()  [UIColor colorWithRed:0.039 green:0.518 blue:1.000 alpha:0.18]
 
-#define DSColorSuccess()    [UIColor colorWithRed:0.204 green:0.827 blue:0.600 alpha:1.0]   // #34D399
-#define DSColorWarning()    [UIColor colorWithRed:0.984 green:0.749 blue:0.141 alpha:1.0]   // #FBBF24
-#define DSColorDanger()     [UIColor colorWithRed:0.957 green:0.247 blue:0.369 alpha:1.0]   // #F43F5E
-#define DSColorDangerLo()   [UIColor colorWithRed:0.840 green:0.120 blue:0.280 alpha:1.0]   // #D61F47
-#define DSColorInfo()       [UIColor colorWithRed:0.220 green:0.741 blue:0.973 alpha:1.0]   // #38BDF8
-#define DSColorViolet()     [UIColor colorWithRed:0.545 green:0.361 blue:0.965 alpha:1.0]   // #8B5CF6
+#define DSColorSuccess()    [UIColor colorWithRed:0.188 green:0.820 blue:0.345 alpha:1.0]   // systemGreen (#30D158)
+#define DSColorWarning()    [UIColor colorWithRed:1.000 green:0.624 blue:0.039 alpha:1.0]   // systemOrange (#FF9F0A)
+#define DSColorDanger()     [UIColor colorWithRed:1.000 green:0.271 blue:0.227 alpha:1.0]   // systemRed (#FF453A)
+#define DSColorDangerLo()   [UIColor colorWithRed:0.863 green:0.196 blue:0.176 alpha:1.0]   // #DC322D
+#define DSColorInfo()       [UIColor colorWithRed:0.392 green:0.824 blue:1.000 alpha:1.0]   // systemCyan (#64D2FF)
+#define DSColorViolet()     [UIColor colorWithRed:0.369 green:0.361 blue:0.902 alpha:1.0]   // systemIndigo (#5E5CE6)
 
-// Ink used for text/icons sitting on the bright accent fill.
-#define DSColorOnAccent()   [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0]   // #0B0D12
+// Ink used for text/icons sitting on the filled accent button.
+#define DSColorOnAccent()   UIColor.whiteColor
 
 #define DSColorTextPrimary()   UIColor.whiteColor
-#define DSColorTextSecondary() [UIColor colorWithRed:0.686 green:0.733 blue:0.816 alpha:1.0] // #AFBBD0
-#define DSColorTextTertiary()  [UIColor colorWithRed:0.439 green:0.494 blue:0.592 alpha:1.0] // #707E97
+#define DSColorTextSecondary() [UIColor colorWithRed:0.922 green:0.922 blue:0.961 alpha:0.60] // secondaryLabel
+#define DSColorTextTertiary()  [UIColor colorWithRed:0.922 green:0.922 blue:0.961 alpha:0.38] // tertiaryLabel
 
 #pragma mark - Metrics
 
-#define DSRadiusCard      18.0
-#define DSRadiusControl   12.0
-#define DSGutter          18.0
-#define DSSectionGap      14.0
+#define DSRadiusCard      12.0
+#define DSRadiusControl   10.0
+#define DSGutter          16.0
+#define DSSectionGap      22.0
 
 #pragma mark - Type
 
-// Headings use SF Rounded for a friendlier silhouette; body stays on the
-// system face so Vietnamese diacritics render correctly at small sizes.
-// The rounded design is requested through the system descriptor so it works
-// even on devices that do not expose an "SFProRounded-*" PostScript name.
+// Native iOS San Francisco Pro typography across headings, body, and mono.
 static inline UIFont *DSRoundedFont(CGFloat size, UIFontWeight weight) {
-    UIFont *base = [UIFont systemFontOfSize:size weight:weight];
-    UIFontDescriptor *descriptor = [base.fontDescriptor
-        fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
-    if (!descriptor) return base;
-    UIFont *rounded = [UIFont fontWithDescriptor:descriptor size:size];
-    return rounded ?: base;
+    return [UIFont systemFontOfSize:size weight:weight];
 }
 
 static inline UIFont *DSFontDisplay(CGFloat size) {
-    return DSRoundedFont(size, UIFontWeightHeavy);
+    return [UIFont systemFontOfSize:size weight:UIFontWeightBold];
 }
 
 static inline UIFont *DSFontTitle(CGFloat size) {
-    return DSRoundedFont(size, UIFontWeightBold);
+    return [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];
 }
 
 static inline UIFont *DSFontBody(CGFloat size, UIFontWeight weight) {
@@ -87,32 +78,25 @@ static inline UIFont *DSFontMono(CGFloat size, UIFontWeight weight) {
 
 #pragma mark - Surface helpers
 
-/// Card chrome: frosted obsidian fill, subtle top-lit border, soft drop shadow.
+/// Native iOS InsetGrouped card surface (clean #1C1C1E without heavy glow/shadows).
 static inline void DSApplyCard(UIView *view, CGFloat radius) {
     if (!view) return;
-    view.backgroundColor = [DSColorSurface() colorWithAlphaComponent:0.94];
+    view.backgroundColor = DSColorSurface();
     view.layer.cornerRadius = radius;
     view.layer.cornerCurve = kCACornerCurveContinuous;
-    view.layer.borderWidth = 1.0;
-    view.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.85].CGColor;
-    view.layer.shadowColor = UIColor.blackColor.CGColor;
-    view.layer.shadowOpacity = 0.42f;
-    view.layer.shadowRadius = 20.0f;
-    view.layer.shadowOffset = CGSizeMake(0, 10);
-    view.layer.masksToBounds = NO;
+    view.layer.borderWidth = 0.0;
+    view.layer.shadowOpacity = 0.0f;
+    view.layer.masksToBounds = YES;
 }
 
-/// Primary CTA styling shared by the shell and in-game menu.
+/// Primary iOS filled button styling.
 static inline void DSApplyPrimaryButton(UIButton *button, BOOL destructive) {
     if (!button) return;
     UIColor *fill = destructive ? DSColorDanger() : DSColorAccent();
     button.backgroundColor = fill;
-    button.layer.cornerRadius = DSRadiusControl + 6.0;
+    button.layer.cornerRadius = 14.0;
     button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.shadowColor = fill.CGColor;
-    button.layer.shadowOpacity = 0.35f;
-    button.layer.shadowRadius = 20.0f;
-    button.layer.shadowOffset = CGSizeMake(0, 8);
+    button.layer.shadowOpacity = 0.0f;
     [button setTitleColor:DSColorOnAccent() forState:UIControlStateNormal];
     button.titleLabel.font = DSFontTitle(17.0);
 }

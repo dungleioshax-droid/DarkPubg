@@ -16,12 +16,10 @@
 {
     if (_gradientLayer) return;
     _gradientLayer = [CAGradientLayer layer];
-    _gradientLayer.startPoint = CGPointMake(0.0, 0.2);
-    _gradientLayer.endPoint = CGPointMake(1.0, 0.8);
+    _gradientLayer.startPoint = CGPointMake(0.5, 0.0);
+    _gradientLayer.endPoint = CGPointMake(0.5, 1.0);
     _gradientLayer.cornerCurve = kCACornerCurveContinuous;
     _gradientLayer.masksToBounds = YES;
-    _gradientLayer.borderWidth = 1.0;
-    _gradientLayer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
     [self.layer insertSublayer:_gradientLayer atIndex:0];
 }
 
