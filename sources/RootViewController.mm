@@ -150,11 +150,12 @@ static BOOL CheckPUBGViaSysctl(void) {
     int count = (int)(size / sizeof(struct kinfo_proc));
     BOOL found = NO;
     for (int i = 0; i < count; i++) {
+        if (procs[i].kp_proc.p_pid <= 1 || procs[i].kp_proc.p_pid == getpid()) continue;
         const char *name = procs[i].kp_proc.p_comm;
         if (!name || !name[0]) continue;
+        if (strcasestr(name, "DarkPubg") != NULL) continue;
         if (strcasestr(name, "ShadowTracker") != NULL ||
-            strcasestr(name, "Shadow") != NULL ||
-            strcasestr(name, "PUBG") != NULL ||
+            strcasestr(name, "PUBGM") != NULL ||
             strcasestr(name, "pubgmobile") != NULL ||
             strcasestr(name, "vn.vng") != NULL) {
             found = YES;
@@ -178,25 +179,25 @@ static BOOL CheckPUBGViaLibProc(void) {
         char path[1024];
         for (int i = 0; i < got; i++) {
             pid_t p = pids[i];
-            if (p <= 0) continue;
+            if (p <= 1 || p == getpid()) continue;
             memset(name, 0, sizeof(name));
             if (proc_name(p, name, sizeof(name) - 1) > 0) {
-                if (strcasestr(name, "ShadowTracker") != NULL ||
-                    strcasestr(name, "Shadow") != NULL ||
-                    strcasestr(name, "PUBG") != NULL ||
-                    strcasestr(name, "pubgmobile") != NULL ||
-                    strcasestr(name, "vn.vng") != NULL) {
+                if (strcasestr(name, "DarkPubg") == NULL &&
+                    (strcasestr(name, "ShadowTracker") != NULL ||
+                     strcasestr(name, "PUBGM") != NULL ||
+                     strcasestr(name, "pubgmobile") != NULL ||
+                     strcasestr(name, "vn.vng") != NULL)) {
                     found = YES;
                     break;
                 }
             }
             memset(path, 0, sizeof(path));
             if (proc_pidpath(p, path, sizeof(path) - 1) > 0) {
-                if (strcasestr(path, "ShadowTracker") != NULL ||
-                    strcasestr(path, "Shadow") != NULL ||
-                    strcasestr(path, "PUBG") != NULL ||
-                    strcasestr(path, "pubgmobile") != NULL ||
-                    strcasestr(path, "vn.vng") != NULL) {
+                if (strcasestr(path, "DarkPubg") == NULL &&
+                    (strcasestr(path, "ShadowTracker") != NULL ||
+                     strcasestr(path, "PUBGM") != NULL ||
+                     strcasestr(path, "pubgmobile") != NULL ||
+                     strcasestr(path, "vn.vng") != NULL)) {
                     found = YES;
                     break;
                 }

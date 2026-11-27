@@ -2359,6 +2359,18 @@ static bool ds_pubg_scan_for_engine_and_world(uint64_t vmMap, uint64_t base) {
 // so "ShadowTrackerExtra" (18 chars) truncates to "ShadowTrackerEx".
 static void ds_pubg_overlay_reset(void);
 
+static inline bool ds_pubg_is_excluded_process(const char *name, pid_t pid) {
+    if (pid <= 1 || pid == getpid()) return true;
+    if (!name || !name[0]) return true;
+    if (strcasestr(name, "DarkPubg") != NULL ||
+        strcasestr(name, "DarkSpeed") != NULL ||
+        strcasestr(name, "TrollSpeed") != NULL ||
+        strcasestr(name, "WebContent") != NULL) {
+        return true;
+    }
+    return false;
+}
+
 static uint64_t ds_pubg_find_proc(pid_t *outPid) {
     if (outPid) *outPid = 0;
     if (!ds_is_ready()) return 0;
@@ -2373,31 +2385,34 @@ static uint64_t ds_pubg_find_proc(pid_t *outPid) {
         if (!proc) proc = procbyname("PUBGMOBILE");
         if (!proc) proc = procbyname("pubgmobile");
         if (!proc) proc = procbyname("PUBGM");
-        if (!proc) proc = procbyname("pubg");
 
         if (proc) {
-            if (outPid) {
-                pid_t pid = (pid_t)(off_proc_p_pid ? ds_kread32(proc + off_proc_p_pid) : 0);
-                if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x60);
-                if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x28);
-                *outPid = pid;
+            pid_t pid = (pid_t)(off_proc_p_pid ? ds_kread32(proc + off_proc_p_pid) : 0);
+            if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x60);
+            if (pid <= 0) pid = (pid_t)ds_kread32(proc + 0x28);
+            if (pid > 1 && pid != getpid()) {
+                if (outPid) *outPid = pid;
+                return proc;
             }
-            return proc;
+            proc = 0;
         }
 
-        // 2. Full proclist search with case-insensitive substring
+        // 2. Full proclist search with case-insensitive substring (never match self)
         int count = 0;
         list = proclist("", &count);
         if (list && count > 0) {
             for (int i = 0; i < count; i++) {
                 const char *name = list[i].name;
-                if (!name || !name[0]) continue;
-                if (strcasestr(name, "Shadow") != NULL || strcasestr(name, "PUBG") != NULL) {
+                if (ds_pubg_is_excluded_process(name, (pid_t)list[i].pid)) continue;
+                if (strcasestr(name, "ShadowTracker") != NULL ||
+                    strcasestr(name, "PUBGM") != NULL ||
+                    strcasestr(name, "pubgmobile") != NULL ||
+                    strcasestr(name, "PUBG") != NULL) {
                     uint64_t p = list[i].kaddr;
                     if (p && ds_isvalid(p)) {
                         pid_t pid = off_proc_p_pid ? (pid_t)ds_kread32(p + off_proc_p_pid) : (pid_t)list[i].pid;
                         if (pid <= 0) pid = (pid_t)list[i].pid;
-                        if (pid > 0) {
+                        if (!ds_pubg_is_excluded_process(name, pid)) {
                             if (outPid) *outPid = pid;
                             proc = p;
                             break;
@@ -2984,6 +2999,11 @@ static void ds_pubg_overlay_reset(void) {
     ++g_dspubgItemEpoch;
     ++g_dspubgGrenadeEpoch;
     os_unfair_lock_unlock(&g_dspubgSnapshotLock);
+
+    g_dspubgGNames = 0;
+    g_dspubgNamesCalibrated = false;
+    g_dspubgEngineViewportOffset = kDSPUBGEngineGameViewportOffset;
+    g_dspubgNextScan = 0;
 
     ds_pubg_reset_match_caches();
     s_crateCache.clear();
@@ -5290,10 +5310,26 @@ static void ds_pubg_tick_impl(void) {
         }
     }
 
-    // Dynamic scan fallback if world is lost or unlocated
+    // Dynamic scan fallback if world is lost or unlocated (common during cold launch)
     if (!world) {
         if (now >= g_dspubgNextScan) {
             g_dspubgNextScan = now + 1.5;
+            // Guard against catching a process mid-exec before its final vm_map is live.
+            if (ds_debug_target_alive()) {
+                uint64_t curTask = proc_task(g_dspubgProc);
+                uint64_t curMap = ds_isvalid(curTask) ? task_get_vm_map(curTask) : 0;
+                if (ds_isvalid(curMap) && curMap != g_dspubgVmMap) {
+                    ds_debug_shmem_flush_ex(YES);
+                    ds_pubg_overlay_reset();
+                    g_dspubgTargetActive.store(false, std::memory_order_release);
+                    g_dspubgBase = 0;
+                    g_dspubgVmMap = 0;
+                    g_dspubgEngineRva = 0;
+                    g_dspubgWorldRva = 0;
+                    return;
+                }
+            }
+            ds_debug_vm_regions_request_async(g_dspubgVmMap, (pid_t)g_dspubgPid);
             if (ds_pubg_scan_for_engine_and_world(g_dspubgVmMap, g_dspubgBase)) {
                 world = g_dspubgCachedWorld;
             }
@@ -5308,6 +5344,23 @@ static void ds_pubg_tick_impl(void) {
         g_dspubgLastEnemyCount = 0;
         g_dspubgLastBotCount = 0;
         return;
+    }
+
+    // If World came online during cold launch before GNames finished initializing
+    // or before GNames' heap block entered the VM-region index, keep retrying.
+    if (!g_dspubgGNames || !g_dspubgNamesCalibrated) {
+        static CFAbsoluteTime s_nextGNamesRetry = 0;
+        if (now >= s_nextGNamesRetry) {
+            s_nextGNamesRetry = now + 1.5;
+            ds_debug_vm_regions_request_async(g_dspubgVmMap, (pid_t)g_dspubgPid);
+            ds_pubg_try_known_gnames(g_dspubgVmMap, g_dspubgBase);
+            if (!g_dspubgGNames) {
+                std::vector<ScanRange> ranges;
+                if (ds_pubg_get_data_ranges(g_dspubgVmMap, g_dspubgBase, ranges)) {
+                    ds_pubg_scan_for_gnames(g_dspubgVmMap, ranges);
+                }
+            }
+        }
     }
 
     // 2. Resolve LocalPlayer, PlayerController, CameraManager
