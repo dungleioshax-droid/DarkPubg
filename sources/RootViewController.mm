@@ -268,7 +268,11 @@ static BOOL IsPUBGProcessRunning(void) {
     // Setting localized labels
     UILabel *_settingTitleLabel;
     UILabel *_langHeaderLabel;
-    UISegmentedControl *_langSegmentedControl;
+    UIView *_langThumbView;
+    UIButton *_langViButton;
+    UIButton *_langEnButton;
+    NSLayoutConstraint *_langThumbViLeading;
+    NSLayoutConstraint *_langThumbEnLeading;
 
     // Developer Card
     UILabel *_aboutHeaderLabel;
@@ -910,30 +914,63 @@ static BOOL IsPUBGProcessRunning(void) {
     DSApplyCard(langCard, DSRadiusCard);
     [_settingContentView addSubview:langCard];
 
-    _langSegmentedControl = [[UISegmentedControl alloc] initWithItems:@[ @"Tiếng Việt", @"English" ]];
-    _langSegmentedControl.translatesAutoresizingMaskIntoConstraints = NO;
-    _langSegmentedControl.selectedSegmentIndex = IsEnglish() ? 1 : 0;
-    _langSegmentedControl.selectedSegmentTintColor = [UIColor colorWithWhite:0.38 alpha:1.0];
-    _langSegmentedControl.backgroundColor = DSColorSurfaceHi();
-    NSDictionary *segNormal = @{
-        NSForegroundColorAttributeName: DSColorTextSecondary(),
-        NSFontAttributeName: DSFontBody(13.0, UIFontWeightMedium),
-    };
-    NSDictionary *segSelected = @{
-        NSForegroundColorAttributeName: DSColorTextPrimary(),
-        NSFontAttributeName: DSFontBody(13.0, UIFontWeightSemibold),
-    };
-    [_langSegmentedControl setTitleTextAttributes:segNormal forState:UIControlStateNormal];
-    [_langSegmentedControl setTitleTextAttributes:segSelected forState:UIControlStateSelected];
-    [_langSegmentedControl addTarget:self action:@selector(langSegmentChanged:) forControlEvents:UIControlEventValueChanged];
-    [langCard addSubview:_langSegmentedControl];
+    UIView *langTrack = [[UIView alloc] init];
+    langTrack.translatesAutoresizingMaskIntoConstraints = NO;
+    langTrack.backgroundColor = DSColorSurfaceHi();
+    langTrack.layer.cornerRadius = 9.0;
+    langTrack.layer.cornerCurve = kCACornerCurveContinuous;
+    langTrack.layer.masksToBounds = YES;
+    [langCard addSubview:langTrack];
+
+    _langThumbView = [[UIView alloc] init];
+    _langThumbView.translatesAutoresizingMaskIntoConstraints = NO;
+    _langThumbView.backgroundColor = [UIColor colorWithWhite:0.38 alpha:1.0];
+    _langThumbView.layer.cornerRadius = 7.0;
+    _langThumbView.layer.cornerCurve = kCACornerCurveContinuous;
+    _langThumbView.layer.masksToBounds = YES;
+    _langThumbView.userInteractionEnabled = NO;
+    [langTrack addSubview:_langThumbView];
+
+    _langViButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _langViButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _langViButton.tag = 0;
+    [_langViButton setTitle:@"Tiếng Việt" forState:UIControlStateNormal];
+    [_langViButton addTarget:self action:@selector(langPillTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [langTrack addSubview:_langViButton];
+
+    _langEnButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    _langEnButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _langEnButton.tag = 1;
+    [_langEnButton setTitle:@"English" forState:UIControlStateNormal];
+    [_langEnButton addTarget:self action:@selector(langPillTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [langTrack addSubview:_langEnButton];
+
+    _langThumbViLeading = [_langThumbView.leadingAnchor constraintEqualToAnchor:_langViButton.leadingAnchor];
+    _langThumbEnLeading = [_langThumbView.leadingAnchor constraintEqualToAnchor:_langEnButton.leadingAnchor];
+    BOOL startEN = IsEnglish();
+    _langThumbViLeading.active = !startEN;
+    _langThumbEnLeading.active = startEN;
 
     [NSLayoutConstraint activateConstraints:@[
-        [_langSegmentedControl.topAnchor constraintEqualToAnchor:langCard.topAnchor constant:10.0],
-        [_langSegmentedControl.leadingAnchor constraintEqualToAnchor:langCard.leadingAnchor constant:12.0],
-        [_langSegmentedControl.trailingAnchor constraintEqualToAnchor:langCard.trailingAnchor constant:-12.0],
-        [_langSegmentedControl.heightAnchor constraintEqualToConstant:34.0],
-        [_langSegmentedControl.bottomAnchor constraintEqualToAnchor:langCard.bottomAnchor constant:-10.0],
+        [langTrack.topAnchor constraintEqualToAnchor:langCard.topAnchor constant:8.0],
+        [langTrack.leadingAnchor constraintEqualToAnchor:langCard.leadingAnchor constant:10.0],
+        [langTrack.trailingAnchor constraintEqualToAnchor:langCard.trailingAnchor constant:-10.0],
+        [langTrack.heightAnchor constraintEqualToConstant:36.0],
+        [langTrack.bottomAnchor constraintEqualToAnchor:langCard.bottomAnchor constant:-8.0],
+
+        [_langViButton.leadingAnchor constraintEqualToAnchor:langTrack.leadingAnchor constant:2.0],
+        [_langViButton.topAnchor constraintEqualToAnchor:langTrack.topAnchor constant:2.0],
+        [_langViButton.bottomAnchor constraintEqualToAnchor:langTrack.bottomAnchor constant:-2.0],
+        [_langViButton.widthAnchor constraintEqualToAnchor:langTrack.widthAnchor multiplier:0.5 constant:-2.0],
+
+        [_langEnButton.leadingAnchor constraintEqualToAnchor:_langViButton.trailingAnchor],
+        [_langEnButton.trailingAnchor constraintEqualToAnchor:langTrack.trailingAnchor constant:-2.0],
+        [_langEnButton.topAnchor constraintEqualToAnchor:langTrack.topAnchor constant:2.0],
+        [_langEnButton.bottomAnchor constraintEqualToAnchor:langTrack.bottomAnchor constant:-2.0],
+
+        [_langThumbView.topAnchor constraintEqualToAnchor:langTrack.topAnchor constant:2.0],
+        [_langThumbView.bottomAnchor constraintEqualToAnchor:langTrack.bottomAnchor constant:-2.0],
+        [_langThumbView.widthAnchor constraintEqualToAnchor:_langViButton.widthAnchor],
     ]];
 
     // --------------------------------------------------------- system section
@@ -1258,16 +1295,34 @@ static BOOL IsPUBGProcessRunning(void) {
     [self appendConsoleLog:@"SYS" message:(isEN ? @"Console cleared. System ready." : @"Đã xoá nhật ký. Hệ thống sẵn sàng.") tagColor:DSColorInfo()];
 }
 
+- (void)syncLanguageControlAnimated:(BOOL)animated
+{
+    BOOL isEN = IsEnglish();
+    _langThumbViLeading.active = !isEN;
+    _langThumbEnLeading.active = isEN;
+
+    [_langViButton setTitleColor:(isEN ? DSColorTextSecondary() : DSColorTextPrimary()) forState:UIControlStateNormal];
+    [_langEnButton setTitleColor:(isEN ? DSColorTextPrimary() : DSColorTextSecondary()) forState:UIControlStateNormal];
+    _langViButton.titleLabel.font = DSFontBody(13.0, isEN ? UIFontWeightMedium : UIFontWeightSemibold);
+    _langEnButton.titleLabel.font = DSFontBody(13.0, isEN ? UIFontWeightSemibold : UIFontWeightMedium);
+
+    if (animated) {
+        [UIView animateWithDuration:DSMotionFast
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{ [self.view layoutIfNeeded]; }
+                         completion:nil];
+    }
+}
+
 - (void)quickLangTapped:(id)sender
 {
     NSString *newLang = IsEnglish() ? @"vi" : @"en";
     [[NSUserDefaults standardUserDefaults] setObject:newLang forKey:@"AppLanguage"];
     [[NSUserDefaults standardUserDefaults] synchronize];
-    if (_langSegmentedControl) {
-        _langSegmentedControl.selectedSegmentIndex = [newLang isEqualToString:@"en"] ? 1 : 0;
-    }
     if (_impactFeedbackGenerator) [_impactFeedbackGenerator impactOccurred];
-    [UIView transitionWithView:self.view duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+    [self syncLanguageControlAnimated:NO];
+    [UIView transitionWithView:self.view duration:0.22 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
         [self applyLanguageTexts];
     } completion:nil];
 }
@@ -1288,9 +1343,11 @@ static BOOL IsPUBGProcessRunning(void) {
 
 #pragma mark - Language Change
 
-- (void)langSegmentChanged:(UISegmentedControl *)sender
+- (void)langPillTapped:(UIButton *)sender
 {
-    NSString *newLang = (sender.selectedSegmentIndex == 1) ? @"en" : @"vi";
+    NSString *newLang = (sender.tag == 1) ? @"en" : @"vi";
+    if ([CurrentLanguage() isEqualToString:newLang]) return;
+
     [[NSUserDefaults standardUserDefaults] setObject:newLang forKey:@"AppLanguage"];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
@@ -1298,7 +1355,8 @@ static BOOL IsPUBGProcessRunning(void) {
         [_impactFeedbackGenerator impactOccurred];
     }
 
-    [UIView transitionWithView:self.view duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+    [self syncLanguageControlAnimated:YES];
+    [UIView transitionWithView:self.view duration:0.22 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
         [self applyLanguageTexts];
     } completion:nil];
 }
@@ -1357,6 +1415,7 @@ static BOOL IsPUBGProcessRunning(void) {
     // Setting tab
     _settingTitleLabel.text = isEN ? @"Settings" : @"Cài đặt";
     _langHeaderLabel.text = isEN ? @"LANGUAGE" : @"NGÔN NGỮ";
+    [self syncLanguageControlAnimated:NO];
 
     // Developer
     _devNameLabel.text = @"Dũng Lê";
