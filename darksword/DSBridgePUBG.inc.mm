@@ -163,19 +163,6 @@ static inline uint32_t ds_pubg_actor_cache_hash(uint64_t actor) {
     return (uint32_t)((actor >> 4) ^ (actor >> 13)) & (uint32_t)(kDSPUBGActorCacheSize - 1);
 }
 
-static inline bool ds_pubg_cache_entry_valid(const DSPUBGActorCacheEntry &entry, uint64_t actor) {
-    if (entry.actor != actor || !actor) return false;
-    uint64_t cls = ds_pubg_read_ptr(actor + 0x10ULL);
-    uint32_t nid = ds_pubg_read_u32(actor + 0x18ULL);
-    return (cls == entry.classPrivate && nid == entry.nameIndex);
-}
-
-static inline void ds_pubg_cache_stamp(DSPUBGActorCacheEntry &entry, uint64_t actor) {
-    entry.actor = actor;
-    entry.classPrivate = ds_pubg_read_ptr(actor + 0x10ULL);
-    entry.nameIndex = ds_pubg_read_u32(actor + 0x18ULL);
-}
-
 static void ds_pubg_smart_reset(void);
 
 static inline bool ds_pubg_is_pet_name(const char *name) {
@@ -397,6 +384,19 @@ static uint32_t ds_pubg_read_u32(uint64_t address) {
     if (!g_dspubgVmMap || !ds_pubg_valid(address) || (address & 0x3ULL) != 0) return 0;
     ds_debug_read_bytes(g_dspubgVmMap, address, &value, sizeof(value));
     return value;
+}
+
+static inline bool ds_pubg_cache_entry_valid(const DSPUBGActorCacheEntry &entry, uint64_t actor) {
+    if (entry.actor != actor || !actor) return false;
+    uint64_t cls = ds_pubg_read_ptr(actor + 0x10ULL);
+    uint32_t nid = ds_pubg_read_u32(actor + 0x18ULL);
+    return (cls == entry.classPrivate && nid == entry.nameIndex);
+}
+
+static inline void ds_pubg_cache_stamp(DSPUBGActorCacheEntry &entry, uint64_t actor) {
+    entry.actor = actor;
+    entry.classPrivate = ds_pubg_read_ptr(actor + 0x10ULL);
+    entry.nameIndex = ds_pubg_read_u32(actor + 0x18ULL);
 }
 
 static int32_t ds_pubg_read_i32(uint64_t address) {
