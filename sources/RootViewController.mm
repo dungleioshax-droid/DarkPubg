@@ -506,10 +506,11 @@ static BOOL IsPUBGProcessRunning(void) {
     [_homeView addLayoutGuide:_contentColumn];
     NSLayoutConstraint *contentColumnWidth =
         [_contentColumn.widthAnchor constraintEqualToAnchor:_homeView.widthAnchor];
-    contentColumnWidth.priority = UILayoutPriorityDefaultHigh;
+    contentColumnWidth.priority = UILayoutPriorityRequired - 1;
     [NSLayoutConstraint activateConstraints:@[
         contentColumnWidth,
         [_contentColumn.centerXAnchor constraintEqualToAnchor:_homeView.centerXAnchor],
+        [_contentColumn.widthAnchor constraintLessThanOrEqualToAnchor:_homeView.widthAnchor],
         [_contentColumn.widthAnchor constraintLessThanOrEqualToConstant:560.0 + 2 * DSGutter],
         [_contentColumn.topAnchor constraintEqualToAnchor:_homeView.topAnchor],
         [_contentColumn.bottomAnchor constraintEqualToAnchor:_homeView.bottomAnchor],
@@ -813,10 +814,11 @@ static BOOL IsPUBGProcessRunning(void) {
     [_settingView addLayoutGuide:_settingsColumn];
     NSLayoutConstraint *settingsColumnWidth =
         [_settingsColumn.widthAnchor constraintEqualToAnchor:_settingView.widthAnchor];
-    settingsColumnWidth.priority = UILayoutPriorityDefaultHigh;
+    settingsColumnWidth.priority = UILayoutPriorityRequired - 1;
     [NSLayoutConstraint activateConstraints:@[
         settingsColumnWidth,
         [_settingsColumn.centerXAnchor constraintEqualToAnchor:_settingView.centerXAnchor],
+        [_settingsColumn.widthAnchor constraintLessThanOrEqualToAnchor:_settingView.widthAnchor],
         [_settingsColumn.widthAnchor constraintLessThanOrEqualToConstant:560.0 + 2 * DSGutter],
         [_settingsColumn.topAnchor constraintEqualToAnchor:_settingView.topAnchor],
         [_settingsColumn.bottomAnchor constraintEqualToAnchor:_settingView.bottomAnchor],
@@ -1009,15 +1011,19 @@ static BOOL IsPUBGProcessRunning(void) {
 
         titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
         titleLbl.textColor = DSColorTextPrimary();
-        titleLbl.font = DSFontBody(16.0, UIFontWeightRegular);
+        titleLbl.font = DSFontBody(15.0, UIFontWeightRegular);
+        titleLbl.adjustsFontSizeToFitWidth = YES;
+        titleLbl.minimumScaleFactor = 0.78;
+        [titleLbl setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
         [row addSubview:titleLbl];
 
         valueLbl.translatesAutoresizingMaskIntoConstraints = NO;
         valueLbl.textColor = DSColorTextSecondary();
-        valueLbl.font = DSFontBody(15.0, UIFontWeightRegular);
+        valueLbl.font = DSFontBody(14.0, UIFontWeightRegular);
         valueLbl.textAlignment = NSTextAlignmentRight;
         valueLbl.adjustsFontSizeToFitWidth = YES;
         valueLbl.minimumScaleFactor = 0.75;
+        [valueLbl setContentCompressionResistancePriority:UILayoutPriorityDefaultLow + 1 forAxis:UILayoutConstraintAxisHorizontal];
         [row addSubview:valueLbl];
 
         [NSLayoutConstraint activateConstraints:@[
@@ -1093,6 +1099,9 @@ static BOOL IsPUBGProcessRunning(void) {
         titleLbl.translatesAutoresizingMaskIntoConstraints = NO;
         titleLbl.textColor = DSColorTextPrimary();
         titleLbl.font = DSFontBody(16.0, UIFontWeightRegular);
+        titleLbl.adjustsFontSizeToFitWidth = YES;
+        titleLbl.minimumScaleFactor = 0.80;
+        [titleLbl setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
         [row addSubview:titleLbl];
 
         UILabel *vLabel = [[UILabel alloc] init];
@@ -1101,6 +1110,9 @@ static BOOL IsPUBGProcessRunning(void) {
         vLabel.textColor = DSColorTextSecondary();
         vLabel.font = DSFontBody(15.0, UIFontWeightRegular);
         vLabel.textAlignment = NSTextAlignmentRight;
+        vLabel.adjustsFontSizeToFitWidth = YES;
+        vLabel.minimumScaleFactor = 0.80;
+        [vLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow + 1 forAxis:UILayoutConstraintAxisHorizontal];
         [row addSubview:vLabel];
 
         [NSLayoutConstraint activateConstraints:@[
@@ -1298,6 +1310,8 @@ static BOOL IsPUBGProcessRunning(void) {
 - (void)syncLanguageControlAnimated:(BOOL)animated
 {
     BOOL isEN = IsEnglish();
+    _langThumbViLeading.active = NO;
+    _langThumbEnLeading.active = NO;
     _langThumbViLeading.active = !isEN;
     _langThumbEnLeading.active = isEN;
 
