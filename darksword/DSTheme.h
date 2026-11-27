@@ -15,29 +15,32 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Palette
 
-// Deep, slightly blue-black surfaces. Values are deliberately desaturated so
-// the neon accent stays the only saturated colour on screen.
-#define DSColorInk()        [UIColor colorWithRed:0.035 green:0.043 blue:0.059 alpha:1.0]   // #090B0F
-#define DSColorSurface()    [UIColor colorWithRed:0.067 green:0.078 blue:0.102 alpha:1.0]   // #11141A
-#define DSColorSurfaceHi()  [UIColor colorWithRed:0.094 green:0.110 blue:0.141 alpha:1.0]   // #181C24
-#define DSColorHairline()   [UIColor colorWithRed:0.180 green:0.204 blue:0.250 alpha:1.0]   // #2E3440
+// Deep obsidian-navy surfaces with cool indigo undertones so luminous gold
+// and electric cyan accents pop cleanly with high contrast.
+#define DSColorInk()        [UIColor colorWithRed:0.027 green:0.035 blue:0.059 alpha:1.0]   // #07090F
+#define DSColorSurface()    [UIColor colorWithRed:0.063 green:0.078 blue:0.122 alpha:1.0]   // #10141F
+#define DSColorSurfaceHi()  [UIColor colorWithRed:0.094 green:0.118 blue:0.180 alpha:1.0]   // #181E2E
+#define DSColorHairline()   [UIColor colorWithRed:0.165 green:0.204 blue:0.298 alpha:1.0]   // #2A344C
 
-// Signature accent: electric mint. Used for primary actions, live state and
-// focus rings only.
-#define DSColorAccent()     [UIColor colorWithRed:0.180 green:0.980 blue:0.800 alpha:1.0]   // #2EFACC
-#define DSColorAccentDim()  [UIColor colorWithRed:0.180 green:0.980 blue:0.800 alpha:0.16]
+// Signature accent: luminous tactical gold-amber paired with cool sky cyan.
+#define DSColorAccent()     [UIColor colorWithRed:0.980 green:0.780 blue:0.220 alpha:1.0]   // #FAC738
+#define DSColorAccentHi()   [UIColor colorWithRed:0.996 green:0.878 blue:0.420 alpha:1.0]   // #FEE06B
+#define DSColorAccentLo()   [UIColor colorWithRed:0.945 green:0.580 blue:0.080 alpha:1.0]   // #F19414
+#define DSColorAccentDim()  [UIColor colorWithRed:0.980 green:0.780 blue:0.220 alpha:0.16]
 
-#define DSColorSuccess()    [UIColor colorWithRed:0.290 green:0.870 blue:0.502 alpha:1.0]   // #4ADE80
-#define DSColorWarning()    [UIColor colorWithRed:0.980 green:0.749 blue:0.180 alpha:1.0]   // #FABF2E
-#define DSColorDanger()     [UIColor colorWithRed:0.973 green:0.443 blue:0.408 alpha:1.0]   // #F87168
-#define DSColorInfo()       [UIColor colorWithRed:0.400 green:0.647 blue:0.973 alpha:1.0]   // #66A5F8
+#define DSColorSuccess()    [UIColor colorWithRed:0.204 green:0.827 blue:0.600 alpha:1.0]   // #34D399
+#define DSColorWarning()    [UIColor colorWithRed:0.984 green:0.749 blue:0.141 alpha:1.0]   // #FBBF24
+#define DSColorDanger()     [UIColor colorWithRed:0.957 green:0.247 blue:0.369 alpha:1.0]   // #F43F5E
+#define DSColorDangerLo()   [UIColor colorWithRed:0.840 green:0.120 blue:0.280 alpha:1.0]   // #D61F47
+#define DSColorInfo()       [UIColor colorWithRed:0.220 green:0.741 blue:0.973 alpha:1.0]   // #38BDF8
+#define DSColorViolet()     [UIColor colorWithRed:0.545 green:0.361 blue:0.965 alpha:1.0]   // #8B5CF6
 
 // Ink used for text/icons sitting on the bright accent fill.
-#define DSColorOnAccent()   [UIColor colorWithRed:0.02 green:0.06 blue:0.06 alpha:1.0] // #050F0F
+#define DSColorOnAccent()   [UIColor colorWithRed:0.043 green:0.051 blue:0.071 alpha:1.0]   // #0B0D12
 
 #define DSColorTextPrimary()   UIColor.whiteColor
-#define DSColorTextSecondary() [UIColor colorWithRed:0.647 green:0.694 blue:0.769 alpha:1.0] // #A5B1C4
-#define DSColorTextTertiary()  [UIColor colorWithRed:0.416 green:0.463 blue:0.541 alpha:1.0] // #6A768A
+#define DSColorTextSecondary() [UIColor colorWithRed:0.686 green:0.733 blue:0.816 alpha:1.0] // #AFBBD0
+#define DSColorTextTertiary()  [UIColor colorWithRed:0.439 green:0.494 blue:0.592 alpha:1.0] // #707E97
 
 #pragma mark - Metrics
 
@@ -84,17 +87,17 @@ static inline UIFont *DSFontMono(CGFloat size, UIFontWeight weight) {
 
 #pragma mark - Surface helpers
 
-/// Card chrome: tinted glass fill, hairline border, soft drop shadow.
+/// Card chrome: frosted obsidian fill, subtle top-lit border, soft drop shadow.
 static inline void DSApplyCard(UIView *view, CGFloat radius) {
     if (!view) return;
-    view.backgroundColor = DSColorSurface();
+    view.backgroundColor = [DSColorSurface() colorWithAlphaComponent:0.94];
     view.layer.cornerRadius = radius;
     view.layer.cornerCurve = kCACornerCurveContinuous;
     view.layer.borderWidth = 1.0;
-    view.layer.borderColor = DSColorHairline().CGColor;
+    view.layer.borderColor = [DSColorHairline() colorWithAlphaComponent:0.85].CGColor;
     view.layer.shadowColor = UIColor.blackColor.CGColor;
-    view.layer.shadowOpacity = 0.35f;
-    view.layer.shadowRadius = 18.0f;
+    view.layer.shadowOpacity = 0.42f;
+    view.layer.shadowRadius = 20.0f;
     view.layer.shadowOffset = CGSizeMake(0, 10);
     view.layer.masksToBounds = NO;
 }

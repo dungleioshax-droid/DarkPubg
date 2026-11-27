@@ -10,6 +10,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface MainButton : UIButton
+- (void)applyGradientColors:(NSArray<UIColor *> *)colors;
 @end
 
 NS_ASSUME_NONNULL_END
