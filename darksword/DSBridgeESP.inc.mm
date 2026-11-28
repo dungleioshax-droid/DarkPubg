@@ -1279,12 +1279,23 @@ static void ds_hosted_apply_pubg(void) {
         ds_hosted_pubg_hide_all();
         return;
     }
+    auto showEmptyDiagnostics = [&](NSString *extra) {
+        if (!g_hostedPUBGStatusLabel) return;
+        const char *dbg = ds_pubg_get_debug_status();
+        NSString *msg = (dbg && dbg[0])
+            ? [NSString stringWithFormat:@"%s%@", dbg, extra ?: @""]
+            : [NSString stringWithFormat:@"PUBG: waiting%@", extra ?: @""];
+        ds_layer_set_frame(g_hostedPUBGStatusLabel, CGRectMake(60.0f, 8.0f, 420.0f, 16.0f));
+        ds_layer_set_string(g_hostedPUBGStatusLabel, msg);
+        ds_layer_set_hidden(g_hostedPUBGStatusLabel, NO);
+    };
     UIInterfaceOrientation orientation = ds_active_orientation();
     if (!UIInterfaceOrientationIsLandscape(orientation)) {
         if (ds_pubg_has_render_source()) {
             orientation = UIInterfaceOrientationLandscapeRight;
         } else {
             ds_hosted_pubg_hide_all();
+            showEmptyDiagnostics([NSString stringWithFormat:@" | ori=%d", (int)orientation]);
             return;
         }
     }
@@ -1370,6 +1381,7 @@ static void ds_hosted_apply_pubg(void) {
 
     if (count == 0 && itemCount == 0 && grenadeCount == 0 && (totalEnemies + totalBots) <= 0) {
         ds_hosted_pubg_hide_all();
+        showEmptyDiagnostics(@"");
         return;
     }
 
@@ -2760,6 +2772,10 @@ static void ds_hosted_overlay_frame(void) {
     if (now - s_lastMenuEnsureAt >= 1.0) {
         s_lastMenuEnsureAt = now;
         ds_hosted_menu_ensure();
+        if (g_hostedLayerReady.load(std::memory_order_acquire) &&
+            g_hostedContextId && !g_hostedRemoteController) {
+            ds_hosted_overlay_register(g_hostedContextId);
+        }
     }
     if (!g_hostedLayerReady.load(std::memory_order_acquire)) {
         if (now - g_hostedLastSetupTryAt >= 2.0) {

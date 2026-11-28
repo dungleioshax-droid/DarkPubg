@@ -89,6 +89,7 @@ static int g_dspubgLastActorsCount = 0;
 static int g_dspubgLastEnemyCount = 0;
 static int g_dspubgLastBotCount = 0;
 static uint32_t g_dspubgLastBoneOff = 0;
+static char g_dspubgStatusBuf[192] = "PUBG: init";
 
 // Snapshot storage
 static os_unfair_lock g_dspubgSnapshotLock = OS_UNFAIR_LOCK_INIT;
@@ -2011,6 +2012,7 @@ static bool ds_pubg_attach(void) {
     uint64_t proc = ds_pubg_find_proc(&targetPid);
 
     if (!ds_isvalid(proc) || targetPid <= 0) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: not found");
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgProc = g_dspubgVmMap = g_dspubgBase = 0;
@@ -2022,6 +2024,7 @@ static bool ds_pubg_attach(void) {
     uint64_t task = proc_task(proc);
     uint64_t vmMap = ds_isvalid(task) ? task_get_vm_map(task) : 0;
     if (!ds_isvalid(vmMap)) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d vmMap=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
@@ -2040,6 +2043,7 @@ static bool ds_pubg_attach(void) {
     g_dspubgVmMap = vmMap;
 
     if (!ds_debug_shmem_claim_target(DSDebugShmemOwner::PUBG, targetPid, proc, vmMap)) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d claim=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
@@ -2055,6 +2059,7 @@ static bool ds_pubg_attach(void) {
     }
 
     if (!g_dspubgBase) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d base=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
         return false;
@@ -2636,9 +2641,8 @@ static bool ds_pubg_read_world_loc(uint64_t rootComp, DSPUBGVector &outLoc, bool
 
 
 
-// Live informative diagnostic HUD string (disabled per user request)
 static const char* ds_pubg_get_debug_status(void) {
-    return "";
+    return g_dspubgStatusBuf;
 }
 
 static inline bool ds_pubg_is_lobby_name(const char *name) {
@@ -2886,6 +2890,8 @@ static void ds_pubg_tick_impl(void) {
     }
 
     if (!world) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
+                 "PUBG: pid=%u base=1 world=0 gn=%d", g_dspubgPid, g_dspubgNamesCalibrated ? 1 : 0);
         ds_pubg_reset_match_caches();
         g_dspubgLastActorsCount = 0;
         g_dspubgLastEnemyCount = 0;
@@ -2964,6 +2970,10 @@ static void ds_pubg_tick_impl(void) {
 
     // Check if player is actually in an active match (filters out Lobby, MainCity, Frontend)
     if (!ds_pubg_is_in_match(world, playerController, localPawn)) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
+                 "PUBG: pid=%u w=1 gn=%d pc=%d lp=%d inM=0",
+                 g_dspubgPid, g_dspubgNamesCalibrated ? 1 : 0,
+                 playerController ? 1 : 0, localPawn ? 1 : 0);
         os_unfair_lock_lock(&g_dspubgSnapshotLock);
         g_dspubgPlayerCount = 0;
         g_dspubgItemCount = 0;
@@ -3072,6 +3082,8 @@ static void ds_pubg_tick_impl(void) {
 
     DSPUBGCamBasis basis = {};
     if (!ds_pubg_cam_basis_build(camLoc, camRot, camFOV, screenW, screenH, basis)) {
+        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
+                 "PUBG: inM=1 cam=0 cm=%d fov=%.1f", cameraManager ? 1 : 0, camFOV);
         return;
     }
 
@@ -4676,6 +4688,12 @@ static void ds_pubg_tick_impl(void) {
     g_dspubgGrenadeCount = copyGrenadeCount;
     ++g_dspubgGrenadeEpoch;
     os_unfair_lock_unlock(&g_dspubgSnapshotLock);
+
+    snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
+             "PUBG: gn=%d pa=%zu act=%d sl=%u p=%d e=%d",
+             g_dspubgNamesCalibrated ? 1 : 0, paEntries.size(),
+             g_dspubgLastActorsCount, (unsigned)s_cachedWorldLevelCount,
+             publishedCount, total360EnemyCount + total360BotCount);
 
     // Garbage collect stale grenade histories (> 3 ticks unseen)
     for (int h = 0; h < 16; h++) {
