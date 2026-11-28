@@ -144,7 +144,6 @@ static uint64_t s_lastMatchWorld = 0;
 static uint64_t s_lastMatchLevel = 0;
 static bool s_lastMatchMapIsLobby = false;
 static uint64_t g_dspubgWorldLevelsOff = 0;
-static uint32_t s_cachedBoneReadIdxOff = 0;
 static uint64_t s_cachedWorldLevels[64] = {};
 static uint32_t s_cachedWorldLevelCount = 0;
 static uint32_t s_sublevelCursor = 1;
@@ -1553,23 +1552,41 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
             return DSPUBGItemCategoryCrate;
         }
 
-        // 3. Direct Item Name classification
-        DSPUBGItemCategory strCat = ds_pubg_classify_item(actorName, outDisplay, outCap);
-        if (strCat != DSPUBGItemCategoryNone) {
-            return strCat;
+        // 3. Item define ID. Ground loot is an APickUpWrapperActor holding an
+        // item ID; that ID is authoritative and needs no name heuristics.
+        // Containers and characters are excluded because 0x5FC/0x758 hold
+        // unrelated state on them.
+        static const char *const kNonLootTokens[] = {
+            "Character", "Pawn", "Player", "Bot", "STExtra", "Controller",
+            "Camera", "Vehicle", "VH_", "InventoryBox", "TombBox", "DeadBox"
+        };
+        int targetId = 0;
+        if (!ds_pubg_contains_any(actorName, kNonLootTokens,
+                                  sizeof(kNonLootTokens) / sizeof(kNonLootTokens[0]), true)) {
+            targetId = ds_pubg_read_pickup_item_id(actor);
         }
 
-        // 4. Wrapper Actor check
-        if (strstr(actorName, "Wrapper") || strstr(actorName, "PickUp") || strstr(actorName, "Pickup")) {
+        // 4. Pick-up wrapper: the class name is only trusted here. Matching item
+        // keywords against every actor's name painted weapon meshes, armour
+        // props and set dressing ("Pan", "HD", "2X" are ordinary substrings)
+        // as ground loot.
+        const bool wrapperName = (strstr(actorName, "Wrapper") != NULL ||
+                                  strstr(actorName, "PickUp") != NULL ||
+                                  strstr(actorName, "Pickup") != NULL ||
+                                  strstr(actorName, "DroppedItem") != NULL);
+        if (wrapperName || targetId > 0) {
             uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
             if (pickedUp) return DSPUBGItemCategoryNone;
             uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
             if (own && ds_pubg_valid(own)) return DSPUBGItemCategoryNone;
 
-            int targetId = ds_pubg_read_pickup_item_id(actor);
             if (targetId > 0) {
                 DSPUBGItemCategory idCat = ds_pubg_classify_item_id(targetId, outDisplay, outCap);
                 if (idCat != DSPUBGItemCategoryNone) return idCat;
+            }
+            if (wrapperName) {
+                DSPUBGItemCategory strCat = ds_pubg_classify_item(actorName, outDisplay, outCap);
+                if (strCat != DSPUBGItemCategoryNone) return strCat;
             }
         }
 
@@ -2210,17 +2227,15 @@ static void ds_pubg_bone_world_from_local(const uint8_t *c2w,
 // Tests verified double buffer offsets (0xA30/0xA40), eval-context (0xE18/0xE28), cached (0xCE0/0xCD0),
 // and bone-space (0xC98).
 static int32_t ds_pubg_read_bone_idx(uint64_t meshComp) {
-    if (s_cachedBoneReadIdxOff) {
-        int32_t v = ds_pubg_read_i32(meshComp + (uint64_t)s_cachedBoneReadIdxOff);
-        if (v == 0 || v == 1) return v;
-    }
+    // Do not latch the offset process-wide: different skeletal mesh subclasses
+    // in the same match park CurrentReadIndex at different members (0xA50 vs
+    // 0xA74). A cached hit from one component then read a bogus 0/1 byte on
+    // every other pawn, which silently picked the stale half of the double
+    // buffer and produced broken skeletons.
     static const uint32_t kIdxOffs[] = { 0xA50U, 0xA54U, 0xA74U, 0xA78U };
     for (uint32_t off : kIdxOffs) {
         int32_t v = ds_pubg_read_i32(meshComp + (uint64_t)off);
-        if (v == 0 || v == 1) {
-            s_cachedBoneReadIdxOff = off;
-            return v;
-        }
+        if (v == 0 || v == 1) return v;
     }
     return -1;
 }
@@ -2261,39 +2276,6 @@ static bool ds_pubg_find_bone_array(uint64_t meshComp, uint64_t *outData, uint32
     if (testOffset(0xE28)) return true;
 
     return false;
-}
-
-static bool ds_pubg_read_live_bone_array(uint64_t meshComp, uint32_t cachedOff,
-                                         uint64_t *outData, uint32_t *outCount, uint32_t *outOffset) {
-    if (!meshComp || !ds_pubg_valid(meshComp)) return false;
-
-    auto testOffset = [&](uint32_t off) -> bool {
-        uint8_t hdr[16] = {0};
-        if (!ds_pubg_read(meshComp + (uint64_t)off, hdr, sizeof(hdr))) return false;
-        uint64_t d = 0;
-        uint32_t c = 0, maxc = 0;
-        memcpy(&d, hdr, 8);
-        memcpy(&c, hdr + 8, 4);
-        memcpy(&maxc, hdr + 12, 4);
-        d &= 0x0000FFFFFFFFFFFFULL;
-        if (!ds_pubg_valid(d) || (d & 0x7ULL) != 0) return false;
-        if (c < 20 || c > 800 || maxc < c || maxc > 2000) return false;
-        if (outData) *outData = d;
-        if (outCount) *outCount = c;
-        if (outOffset) *outOffset = off;
-        return true;
-    };
-
-    if (cachedOff == 0xA30U || cachedOff == 0xA40U) {
-        int32_t rd = ds_pubg_read_bone_idx(meshComp);
-        uint32_t first = (rd == 1) ? 0xA40U : 0xA30U;
-        uint32_t second = (rd == 1) ? 0xA30U : 0xA40U;
-        if (testOffset(first) || testOffset(second)) return true;
-    } else if (cachedOff == 0xCE0U || cachedOff == 0xE18U || cachedOff == 0xE28U) {
-        if (testOffset(cachedOff)) return true;
-    }
-
-    return ds_pubg_find_bone_array(meshComp, outData, outCount, outOffset);
 }
 
 static int g_dspubgTotalEnemies = 0;
@@ -2355,7 +2337,6 @@ static void ds_pubg_reset_match_caches(void) {
     s_lastMatchLevel = 0;
     s_lastMatchMapIsLobby = false;
     g_dspubgWorldLevelsOff = 0;
-    s_cachedBoneReadIdxOff = 0;
     s_cachedWorldLevelCount = 0;
     s_sublevelCursor = 1;
     ds_pubg_smart_reset();
@@ -2427,10 +2408,15 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
             if (++validObjects >= 8) break;
         }
     }
-    // A live ULevel::Actors array can begin with a run of null slots after a GC
-    // pass, so one resolvable UObject inside the probe window is enough proof.
-    // Requiring two silently dropped the real actor list on streamed matches.
-    if (validObjects < 1 || score < 2) return 0;
+    // Decoy {pointer, small-count} pairs scattered through the level body used
+    // to win the scan once a single resolvable object was enough, and every
+    // actor in those arrays was reported as a phantom enemy or ground item.
+    // ULevel::Actors is by far the longest UObject list in a level, so a large
+    // count plus one live object is still accepted -- that keeps streamed
+    // matches from losing enemies after a GC pass leaves null slots up front.
+    const bool largeArray = (count >= 512);
+    if (validObjects < 2 && !(largeArray && validObjects >= 1) &&
+        !(count <= 8 && validObjects >= 1)) return 0;
     outData = data;
     outCount = count;
     return score;
@@ -2479,22 +2465,25 @@ static uint32_t ds_pubg_find_world_levels(uint64_t world, uint64_t persistentLev
         if ((lvls[0] & 0x0000FFFFFFFFFFFFULL) != persistentLevel) return false;
 
         if (readCnt > 1) {
-            bool subOk = false;
-            uint32_t checkN = (readCnt > 4) ? 4 : readCnt;
+            // Accept a level list with an unreadable owner field (offset drift),
+            // but reject one where every readable owner belongs to another
+            // world -- those levels are what produced ghost actors.
+            int ownersKnown = 0;
+            int unknownOwners = 0;
+            bool ownerMatch = false;
+            uint32_t checkN = (readCnt > 8) ? 8 : readCnt;
             for (uint32_t i = 1; i < checkN; i++) {
                 uint64_t sl = lvls[i] & 0x0000FFFFFFFFFFFFULL;
-                if (sl && ds_pubg_valid(sl)) {
-                    uint64_t owning = ds_pubg_read_ptr(sl + 0xC0ULL);
-                    // Accept "unknown" (unreadable Zero) as well: the offset
-                    // moves between builds and a hard mismatch test wiped the
-                    // whole sublevel list, taking every streamed enemy with it.
-                    if (!owning || owning == world) {
-                        subOk = true;
-                        break;
-                    }
-                }
+                if (!sl || !ds_pubg_valid(sl)) continue;
+                uint64_t owning = ds_pubg_read_ptr(sl + 0xC0ULL);
+                if (!owning) { unknownOwners++; continue; }
+                ownersKnown++;
+                if (owning == world) { ownerMatch = true; break; }
             }
-            if (!subOk) return false;
+            // Reject only a list whose every readable owner belongs to another
+            // world. An unreadable owner field still means "offset drifted",
+            // not "wrong world", so those levels stay in the scan.
+            if (ownersKnown > 0 && unknownOwners == 0 && !ownerMatch) return false;
         }
 
         for (uint32_t i = 0; i < readCnt && outCount < maxLevels; i++) {
@@ -3135,6 +3124,23 @@ static void ds_pubg_tick_impl(void) {
                     // A real character class always wins over the scenery list:
                     // PUBG characters wear meshes whose names carry "Mesh", and
                     // caching one as scenery permanently hid that pawn.
+                    // Death boxes and air drops are containers whose class
+                    // names still contain "Player" ("PlayerDeadInventoryBox"),
+                    // so they used to pass the character-name exemption above
+                    // and were drawn as enemies. These tokens are unambiguous,
+                    // and the check runs before the exemption on purpose.
+                    static const char *const kContainerTokens[] = {
+                        "TombBox", "DeadBox", "InventoryBox", "AirDrop",
+                        "PickUpListWrapper", "PickupWrapper", "ItemWrapper"
+                    };
+                    const bool isContainer =
+                        ds_pubg_contains_any(pawnName, kContainerTokens, sizeof(kContainerTokens) / sizeof(kContainerTokens[0]), true);
+                    if (isContainer) {
+                        // Not cached as scenery: the caller falls through to the
+                        // item scanner, which labels death boxes and air drops
+                        // with their crate name instead of an enemy box.
+                        return false;
+                    }
                     const bool sceneryHit =
                         ds_pubg_is_scenery_name(pawnName) ||
                         ds_pubg_contains_any(pawnName, kPawnSceneryExtraTokens, sizeof(kPawnSceneryExtraTokens) / sizeof(kPawnSceneryExtraTokens[0]), false);
@@ -3190,6 +3196,31 @@ static void ds_pubg_tick_impl(void) {
         uint64_t meshComp = (cacheValid && cEntry.meshComp) ? cEntry.meshComp : ds_pubg_read_ptr(pawn + kDSPUBGCharacterMeshOffset);
         if (!meshComp) meshComp = ds_pubg_read_ptr(pawn + 0x320ULL);
         if (!meshComp || !ds_pubg_valid(meshComp)) return false;
+
+        // Reject level candidates whose mesh component is provably not a
+        // skeletal mesh. Death boxes, air drops, pick-up wrappers and set
+        // dressing carry a StaticMeshComponent here and were the source of the
+        // phantom enemies. This is negative evidence only: an unresolvable or
+        // unfamiliar component class still passes, so streamed pawns are never
+        // dropped just because their class name has not replicated yet.
+        if (!(cacheValid && cEntry.isPawn) && !isTrainingTarget && !psHint) {
+            char meshClassName[64] = {0};
+            if (ds_pubg_get_actor_name(meshComp, meshClassName, sizeof(meshClassName)) &&
+                meshClassName[0] != '\0') {
+                static const char *const kNonSkeletalMeshTokens[] = {
+                    "StaticMesh", "InstancedStaticMesh", "ParticleSystem",
+                    "SplineMesh", "Billboard", "DecalComponent"
+                };
+                if (ds_pubg_contains_any(meshClassName, kNonSkeletalMeshTokens,
+                                         sizeof(kNonSkeletalMeshTokens) / sizeof(kNonSkeletalMeshTokens[0]),
+                                         true)) {
+                    // Do not cache as scenery: a static mesh is also how a
+                    // weapon or armour pick-up is drawn, and the caller needs
+                    // to reach the item scanner for those.
+                    return false;
+                }
+            }
+        }
 
         // 4. Health validation (Reject non-characters, pets/companions, and dead bodies, while
         // keeping PlayerArray pawns whose HealthMax has not replicated yet).
@@ -3555,19 +3586,20 @@ static void ds_pubg_tick_impl(void) {
             if (meshComp && ds_pubg_valid(meshComp)) {
                 uint32_t bCount = 0;
                 uint32_t resolvedOff = 0;
-                if (ds_pubg_read_live_bone_array(meshComp, cacheValid ? cEntry.boneOffset : 0,
-                                                 &boneData, &bCount, &resolvedOff) &&
+                if (ds_pubg_find_bone_array(meshComp, &boneData, &bCount, &resolvedOff) &&
                     boneData && bCount >= 20) {
                     cEntry.boneData = boneData;
                     cEntry.boneCount = bCount;
                     cEntry.boneOffset = resolvedOff;
                 }
-                // A short rig usually means a prop, but bots and streamed pawns
-                // can expose a partial transform array. Only drop it when the
-                // name is not already recognisable as a character.
-                if (!isTrainingTarget && !psHint && !isCharacterNamed &&
-                    bCount > 0 && bCount < 20) {
-                    return false;
+                // Player and bot rigs expose 67 transforms; the training dummy
+                // exposes a ~22-bone layout. A shorter array on a character is
+                // the wrong half of the double buffer and drawing it produced
+                // the mangled skeleton. Skip only the bones -- the enemy box,
+                // health bar and snapline must keep rendering.
+                if (!isTrainingTarget && !psHint && bCount > 0 && bCount < 35) {
+                    boneData = 0;
+                    skeletonDone = true;
                 }
 
                 if (boneData && bCount >= 20) {

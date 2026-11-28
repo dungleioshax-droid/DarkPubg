@@ -1617,8 +1617,12 @@ static void ds_hosted_apply_pubg(void) {
                     if (r < 0.6f) r = 0.6f;
                     if (r > 24.0f) r = 24.0f;
                     CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(r);
-                    CGPathMoveToPoint(sTarget, NULL, qx + qr, qy);
-                    CGPathAddArc(sTarget, NULL, qx, qy, qr, 0, 2.0f * (CGFloat)M_PI, true);
+                    // CGPathAddArc flattens a 0..2PI sweep to a zero-length arc
+                    // (start and end angle normalise to the same point), so the
+                    // head ring vanished once the skeleton moved to a batched
+                    // CGPath. An explicit ellipse subpath always closes.
+                    CGPathAddEllipseInRect(sTarget, NULL,
+                                           CGRectMake(qx - qr, qy - qr, qr * 2.0f, qr * 2.0f));
                     drewSkel = YES;
                 }
             }
@@ -1763,8 +1767,14 @@ static void ds_hosted_apply_pubg(void) {
             CGFloat strH = 14.0f;
             ds_layer_set_frame(lbl, ds_q1_rect(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
             if (lbl.fontSize != 9.5) lbl.fontSize = 9.5;
-            CGColorRef vehColor = ds_pubg_cgcolor_from_rgba(it.colorRGBA);
-            if (lbl.foregroundColor != vehColor) lbl.foregroundColor = vehColor;
+            // Vehicles were white in the build the user considers correct; the
+            // gold tint came from the per-item colour payload.
+            static CGColorRef s_vehicleWhite = NULL;
+            static dispatch_once_t s_vehicleWhiteOnce;
+            dispatch_once(&s_vehicleWhiteOnce, ^{
+                s_vehicleWhite = CGColorRetain([UIColor whiteColor].CGColor);
+            });
+            if (lbl.foregroundColor != s_vehicleWhite) lbl.foregroundColor = s_vehicleWhite;
             ds_layer_set_string(lbl, titleStr);
             ds_layer_set_hidden(lbl, NO);
         } else {
