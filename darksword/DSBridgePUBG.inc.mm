@@ -2586,9 +2586,9 @@ static bool ds_pubg_find_level_actors(uint64_t lvl, uint64_t *outData, uint32_t 
     return true;
 }
 
-// Resolve world-space translation for a SceneComponent, preferring
-// ComponentToWorld (+0x210 quat, +0x220 translation) so attached actors keep
-// true world coordinates instead of parent-relative local offsets.
+// ComponentToWorld (+0x210 quat, +0x220 translation) fallback: on some builds
+// the published relative pose is stale for attached actors (vehicle seats,
+// parachutes), but it is only trusted when the relative path has no usable XY.
 static bool ds_pubg_read_component_to_world(uint64_t rootComp, DSPUBGVector &outLoc) {
     uint8_t rc2w[32] = {0};
     if (!ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) return false;
