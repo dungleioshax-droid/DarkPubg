@@ -2089,7 +2089,7 @@ static void ds_hosted_publish_render_snapshot(const DSHostedRenderSnapshot &next
     g_hostedSnapshots[writeIndex] = next;
     g_hostedSnapshots[writeIndex].generation = ++g_hostedSnapshotGeneration;
     g_hostedPublishedSnapshot = writeIndex;
-    if (now - g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > 0.10 &&
+    if (now - g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > 0.032 &&
         !g_hostedFallbackApplyQueued) {
         g_hostedFallbackApplyQueued = YES;
         fallbackToken = ++g_hostedFallbackToken;

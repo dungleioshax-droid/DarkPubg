@@ -1783,7 +1783,7 @@ static DSPUBGItemCategory ds_pubg_classify_vehicle_shape(uint8_t shape, char *ou
 
 static int ds_pubg_read_pickup_item_id(uint64_t actor) {
     static const uint64_t kItemIdOffsets[] = {
-        0x5FCULL, 0x60CULL, 0x61CULL, 0x758ULL, 0x768ULL, 0x5ECULL
+        0x5FCULL, 0x758ULL
     };
     for (uint64_t off : kItemIdOffsets) {
         int val = ds_pubg_read_i32(actor + off);
@@ -1797,6 +1797,9 @@ static int ds_pubg_read_pickup_item_id(uint64_t actor) {
 static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *preloadedName, char *outDisplay, size_t outCap) {
     if (!actor || !outDisplay || outCap < 4 || !ds_pubg_valid(actor)) return DSPUBGItemCategoryNone;
     outDisplay[0] = '\0';
+
+    uint8_t aHidden = ds_pubg_read_u8(actor + 0xE8ULL);
+    if (aHidden & 0x1) return DSPUBGItemCategoryNone;
 
     // Optional: Get actor name via GNames if available (reuse preloadedName if caller already resolved it)
     char actorName[64] = {0};
@@ -1980,6 +1983,8 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
 
         // 4. Wrapper Actor check
         if (strstr(actorName, "Wrapper") || strstr(actorName, "PickUp") || strstr(actorName, "Pickup")) {
+            uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
+            if (pickedUp) return DSPUBGItemCategoryNone;
             uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
             if (own && ds_pubg_valid(own)) return DSPUBGItemCategoryNone;
 
@@ -1995,7 +2000,8 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
     }
 
     // Name resolution failed (hasName == false) - Use strict multi-field memory checks
-    // Check Ground Item ID across supported PickUpWrapper offsets
+    uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
+    if (pickedUp) return DSPUBGItemCategoryNone;
     int targetId = ds_pubg_read_pickup_item_id(actor);
     if (targetId > 0) {
         uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
@@ -5674,8 +5680,10 @@ static void ds_pubg_tick_impl(void) {
             return false;
         }
 
-        // 2. Dead check - STExtraCharacter.bDead at 0xE8C
+        // 2. Hidden / Dead check - AActor.bHidden (0xE8) and STExtraCharacter.bDead (0xE8C)
         if (!isTrainingTarget) {
+            uint8_t aHidden = ds_pubg_read_u8(pawn + 0xE8ULL);
+            if (aHidden & 0x1) return false;
             uint8_t isDead = ds_pubg_read_u8(pawn + kDSPUBGCharacterDeadOffset) & 1;
             if (isDead) return false;
         }
@@ -5689,8 +5697,8 @@ static void ds_pubg_tick_impl(void) {
         if (!meshComp) meshComp = ds_pubg_read_ptr(pawn + 0x320ULL);
         if (!meshComp || !ds_pubg_valid(meshComp)) return false;
 
-        // 4. Health validation (Reject non-characters and dead bodies, while keeping
-        // newly streamed characters whose HealthMax has not replicated yet).
+        // 4. Health validation (Reject non-characters, pets/companions, and dead bodies, while
+        // keeping PlayerArray pawns whose HealthMax has not replicated yet).
         float health = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthOffset);
         float healthMax = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthMaxOffset);
         if (isTrainingTarget) {
@@ -5703,8 +5711,7 @@ static void ds_pubg_tick_impl(void) {
         } else {
             if (isnan(health) || isinf(health) || isnan(healthMax) || isinf(healthMax)) return false;
             if (healthMax < 50.0f || healthMax > 1000000.0f) {
-                if ((psHint != 0 || isCharacterNamed || (cacheValid && cEntry.isPawn)) &&
-                    health > 0.0f && health <= 10000.0f) {
+                if (psHint != 0 && health > 0.0f && health <= 500.0f) {
                     healthMax = fmaxf(health, 100.0f);
                 } else {
                     return false;
@@ -6112,14 +6119,22 @@ static void ds_pubg_tick_impl(void) {
             if (meshComp && ds_pubg_valid(meshComp)) {
                 uint32_t bCount = 0;
                 uint32_t resolvedOff = 0;
-                if (cacheValid && cEntry.boneData && cEntry.boneCount >= 20) {
-                    boneData = cEntry.boneData;
-                    bCount = cEntry.boneCount;
-                    resolvedOff = cEntry.boneOffset;
-                } else if (ds_pubg_find_bone_array(meshComp, &boneData, &bCount, &resolvedOff) && boneData && bCount >= 20) {
+                if (cacheValid && (cEntry.boneOffset == 0xCE0ULL || cEntry.boneOffset == 0xE18ULL || cEntry.boneOffset == 0xE28ULL)) {
+                    uint64_t livePtr = ds_pubg_read_ptr(meshComp + cEntry.boneOffset);
+                    uint32_t liveCount = ds_pubg_read_u32(meshComp + cEntry.boneOffset + 8ULL);
+                    if (livePtr && ds_pubg_valid(livePtr) && liveCount >= 20 && liveCount <= 1024) {
+                        boneData = livePtr;
+                        bCount = liveCount;
+                        resolvedOff = cEntry.boneOffset;
+                    }
+                }
+                if (!boneData && ds_pubg_find_bone_array(meshComp, &boneData, &bCount, &resolvedOff) && boneData && bCount >= 20) {
                     cEntry.boneData = boneData;
                     cEntry.boneCount = bCount;
                     cEntry.boneOffset = resolvedOff;
+                }
+                if (!isTrainingTarget && !psHint && bCount > 0 && bCount < 35) {
+                    return false;
                 }
 
                 if (boneData && bCount >= 20) {
@@ -6821,8 +6836,9 @@ static void ds_pubg_tick_impl(void) {
             cat = cEntry.itemCat;
             strncpy(displayName, cEntry.itemName, sizeof(displayName) - 1);
             if (cat != DSPUBGItemCategoryVehicle && cat != DSPUBGItemCategoryCrate) {
+                uint8_t pickedUp = ds_pubg_read_u8(actor + 0x615ULL) & 1;
                 uint64_t own = ds_pubg_read_ptr(actor + 0x140ULL);
-                if (own && ds_pubg_valid(own)) {
+                if (pickedUp || (own && ds_pubg_valid(own))) {
                     cEntry.actor = 0;
                     cEntry.classPrivate = 0;
                     cEntry.nameIndex = 0;
@@ -7034,7 +7050,7 @@ static void ds_pubg_tick_impl(void) {
                             continue;
                         }
                         if (cEntry.itemCat != DSPUBGItemCategoryNone) {
-                            processItemOrVehicle(actor);
+                            if (isPersistent) processItemOrVehicle(actor);
                             continue;
                         }
                         if (cEntry.isPawn) {
@@ -7049,7 +7065,7 @@ static void ds_pubg_tick_impl(void) {
 
                     if (!processPawn(actor, 0, false)) {
                         if (!processGrenade(actor)) {
-                            processItemOrVehicle(actor);
+                            if (isPersistent) processItemOrVehicle(actor);
                         } else {
                             bool alreadyG = false;
                             for (uint64_t tg : s_trackedLevelGrenades) { if (tg == actor) { alreadyG = true; break; } }
@@ -7065,7 +7081,7 @@ static void ds_pubg_tick_impl(void) {
         }
     };
 
-    static const uint32_t kDSPUBGFullScanInterval = 10;
+    static const uint32_t kDSPUBGFullScanInterval = 15;
     bool needFullLevelScan = ((s_levelScanTick++ % kDSPUBGFullScanInterval) == 0);
     if (needFullLevelScan && level) {
         s_trackedLevelVehicles.clear();
