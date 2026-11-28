@@ -88,7 +88,6 @@ static int g_dspubgLastActorsCount = 0;
 static int g_dspubgLastEnemyCount = 0;
 static int g_dspubgLastBotCount = 0;
 static uint32_t g_dspubgLastBoneOff = 0;
-static char g_dspubgStatusBuf[384] = "PUBG: Waiting for game process...";
 
 // Snapshot storage
 static os_unfair_lock g_dspubgSnapshotLock = OS_UNFAIR_LOCK_INIT;
@@ -107,8 +106,7 @@ static uint64_t g_dspubgGrenadeEpoch = 1;
 static uint64_t g_dspubgGNames = 0;
 static uint32_t g_dspubgFNameEntryOffset = 0x0C;
 
-// Fast Actor Classification Cache: Caches scenery, pawn, and item classification
-// to eliminate repetitive GNames lookups and memory reads for thousands of level actors.
+// Fast Actor Classification Cache: eliminates repetitive GNames lookups and memory reads.
 struct DSPUBGActorCacheEntry {
     uint64_t actor;
     uint64_t classPrivate;
@@ -118,21 +116,11 @@ struct DSPUBGActorCacheEntry {
     bool isTrainingTarget;
     DSPUBGItemCategory itemCat;
     char itemName[36];
-    uint64_t vCommon;
-    float cachedHp;
-    float cachedHpMax;
-    float cachedFuel;
-    float cachedFuelMax;
     uint64_t rootComp;
     uint64_t meshComp;
     uint64_t boneData;
     uint32_t boneCount;
     uint32_t boneOffset;
-    // Name and nation are immutable for a pawn's lifetime, but they were
-    // re-read through GNames + FString every frame for every visible enemy.
-    // Weapon changes on pickup, so it gets a short refresh window instead.
-    // Identity fields are separate from `actor` on purpose: `actor` is
-    // rewritten mid-function, so it cannot tell a recycled hash slot apart.
     uint64_t infoActor;
     char cachedName[32];
     char cachedNation[16];
@@ -143,9 +131,6 @@ struct DSPUBGActorCacheEntry {
     bool cachedHasNation;
     bool cachedHasUID;
     char cachedMetaNation[16];
-    uint64_t weaponActor;
-    char cachedWeapon[32];
-    uint64_t weaponRefreshTick;
 };
 static const size_t kDSPUBGActorCacheSize = 16384;
 static DSPUBGActorCacheEntry g_dspubgActorCache[kDSPUBGActorCacheSize] = {};
@@ -170,70 +155,49 @@ static inline uint32_t ds_pubg_actor_cache_hash(uint64_t actor) {
 
 static void ds_pubg_smart_reset(void);
 
+static inline bool ds_pubg_contains_any(const char *haystack, const char *const *needles, size_t count, bool icase) {
+    if (!haystack || !haystack[0]) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (icase ? (strcasestr(haystack, needles[i]) != NULL) : (strstr(haystack, needles[i]) != NULL)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static inline bool ds_pubg_is_pet_name(const char *name) {
-    if (!name || !name[0]) return false;
-    return (strcasestr(name, "Pet") != NULL ||
-            strcasestr(name, "Companion") != NULL ||
-            strcasestr(name, "Buddy") != NULL ||
-            strcasestr(name, "Mascot") != NULL ||
-            strcasestr(name, "Partner") != NULL ||
-            strcasestr(name, "Falcon") != NULL ||
-            strcasestr(name, "Pigeon") != NULL);
+    static const char *const kPetTokens[] = {
+        "Pet", "Companion", "Buddy", "Mascot", "Partner", "Falcon", "Pigeon"
+    };
+    return ds_pubg_contains_any(name, kPetTokens, sizeof(kPetTokens) / sizeof(kPetTokens[0]), true);
 }
 
 static inline bool ds_pubg_is_training_target_name(const char *name) {
-    if (!name || !name[0]) return false;
-    return (strcasestr(name, "ModelTarget") != NULL ||
-            strcasestr(name, "TrainingTarget") != NULL ||
-            strcasestr(name, "TrainingDummy") != NULL ||
-            strcasestr(name, "TargetDummy") != NULL ||
-            strcasestr(name, "ShootTarget") != NULL ||
-            strcasestr(name, "PracticeTarget") != NULL ||
-            strcasestr(name, "MoveTarget") != NULL ||
-            strcasestr(name, "RangeTarget") != NULL ||
-            strcasestr(name, "HumanTarget") != NULL ||
-            strcasestr(name, "Target_") != NULL);
+    static const char *const kTargetTokens[] = {
+        "ModelTarget", "TrainingTarget", "TrainingDummy", "TargetDummy",
+        "ShootTarget", "PracticeTarget", "MoveTarget", "RangeTarget",
+        "HumanTarget", "Target_"
+    };
+    return ds_pubg_contains_any(name, kTargetTokens, sizeof(kTargetTokens) / sizeof(kTargetTokens[0]), true);
 }
 
-// Fast check for static scenery / non-loot / non-character engine classes
 static inline bool ds_pubg_is_scenery_name(const char *name) {
     if (!name || !name[0]) return false;
     if (ds_pubg_is_pet_name(name)) return true;
-    // Keep training range humanoid targets eligible for pawn detection.
     if (ds_pubg_is_training_target_name(name)) return false;
-    return (strstr(name, "StaticMesh") || strstr(name, "Foliage") ||
-            strstr(name, "Landscape") || strstr(name, "Building") ||
-            strstr(name, "House") || strstr(name, "Tree") ||
-            strstr(name, "Rock") || strstr(name, "Wall") ||
-            strstr(name, "Fence") || strstr(name, "Door") ||
-            strstr(name, "Window") || strstr(name, "Floor") ||
-            strstr(name, "Roof") || strstr(name, "Brush") ||
-            strstr(name, "Decal") || strstr(name, "Particle") ||
-            strstr(name, "Effect") || strstr(name, "Volume") ||
-            strstr(name, "Audio") || strstr(name, "Sound") ||
-            strstr(name, "Zone") || strstr(name, "Fog") ||
-            strstr(name, "Light") || strstr(name, "Camera") ||
-            strstr(name, "Trigger") || strstr(name, "Controller") ||
-            strstr(name, "Water") || strstr(name, "Sky") ||
-            strstr(name, "Cloud") || strstr(name, "Shadow") ||
-            strstr(name, "Nav") || strstr(name, "Navigation") ||
-            strstr(name, "Spline") || strstr(name, "Occlusion") ||
-            strstr(name, "Reflection") || strstr(name, "PostProcess") ||
-            strstr(name, "Wind") || strstr(name, "Emitter") ||
-            strstr(name, "Shell") || strstr(name, "Cartridge") ||
-            strstr(name, "Trace") || strstr(name, "Lobby") ||
-            strstr(name, "MainCity") || strstr(name, "Preview") ||
-            strstr(name, "Avatar") || strstr(name, "PetAvatar") ||
-            strstr(name, "LobbyModel") || strstr(name, "DefaultPhysicsVolume") ||
-            strstr(name, "Spawner") || strstr(name, "SpawnPoint") ||
-            strstr(name, "SpawnPad") || strstr(name, "Terminal") ||
-            strstr(name, "Station") || strstr(name, "Manager") ||
-            strstr(name, "Stand") || strstr(name, "Table") ||
-            strstr(name, "Board") || strstr(name, "Target") ||
-            strstr(name, "Guide") || strstr(name, "Button") ||
-            strstr(name, "Widget") || strstr(name, "UI_") ||
-            strstr(name, "_UI") ||
-            strstr(name, "SeatComponent") || strstr(name, "WheelComponent"));
+    static const char *const kSceneryTokens[] = {
+        "StaticMesh", "Foliage", "Landscape", "Building", "House", "Tree", "Rock",
+        "Wall", "Fence", "Door", "Window", "Floor", "Roof", "Brush", "Decal",
+        "Particle", "Effect", "Volume", "Audio", "Sound", "Zone", "Fog", "Light",
+        "Camera", "Trigger", "Controller", "Water", "Sky", "Cloud", "Shadow",
+        "Nav", "Navigation", "Spline", "Occlusion", "Reflection", "PostProcess",
+        "Wind", "Emitter", "Shell", "Cartridge", "Trace", "Lobby", "MainCity",
+        "Preview", "Avatar", "PetAvatar", "LobbyModel", "DefaultPhysicsVolume",
+        "Spawner", "SpawnPoint", "SpawnPad", "Terminal", "Station", "Manager",
+        "Stand", "Table", "Board", "Target", "Guide", "Button", "Widget",
+        "UI_", "_UI", "SeatComponent", "WheelComponent"
+    };
+    return ds_pubg_contains_any(name, kSceneryTokens, sizeof(kSceneryTokens) / sizeof(kSceneryTokens[0]), false);
 }
 
 // Precomputes RGBA color and priority for 120 FPS zero-overhead rendering
@@ -355,16 +319,6 @@ struct DSPUBGGrenadeHistory {
 };
 static DSPUBGGrenadeHistory s_grenadeHistories[16] = {};
 static uint64_t s_grenadeTickCounter = 0;
-
-struct DSPUBGVisHistory {
-    uint64_t actor;
-    uint64_t lastSeenTick;
-    int visibleStreak;
-    int occludedStreak;
-    bool isOccluded;
-};
-static DSPUBGVisHistory s_visHistories[128] = {};
-static uint64_t s_visTickCounter = 0;
 
 static inline bool ds_pubg_valid(uint64_t address) {
     uint64_t clean = address & 0x0000FFFFFFFFFFFFULL;
@@ -954,375 +908,143 @@ static bool ds_pubg_get_actor_name(uint64_t actor, char *outBuf, size_t outCap) 
     return false;
 }
 
+static DSPUBGItemCategory ds_pubg_classify_vehicle_name(const char *name, char *outDisplay, size_t outCap) {
+    if (!name || !name[0] || !outDisplay || outCap < 4) return DSPUBGItemCategoryNone;
+    static const char *const kNonVehTokens[] = {
+        "Wheel", "Seat", "Spawner", "SpawnPoint", "SpawnPad", "Spawn",
+        "Terminal", "Station", "Manager", "Stand", "Table", "Board",
+        "Audio", "Sound", "Decal", "Weapon", "Trigger", "Target",
+        "Guide", "Button", "Widget"
+    };
+    if (ds_pubg_contains_any(name, kNonVehTokens, sizeof(kNonVehTokens) / sizeof(kNonVehTokens[0]), true) ||
+        strstr(name, "UI_") || strstr(name, "_UI") ||
+        ((strcasestr(name, "PickUp") || strcasestr(name, "Pickup") || strcasestr(name, "Wrapper")) && !strcasestr(name, "VH_"))) {
+        return DSPUBGItemCategoryNone;
+    }
+
+    static const struct { const char *kw; const char *label; } kVehTable[] = {
+        { "Jeep", "Xe UAZ" }, { "UAZ", "Xe UAZ" },
+        { "Sedan", "Xe Dacia" }, { "Dacia", "Xe Dacia" },
+        { "Buggy", "Xe Buggy" },
+        { "VH_PickUp", "Xe Bán Tải" }, { "VH_Pickup", "Xe Bán Tải" }, { "Rony", "Xe Bán Tải" },
+        { "Motorcycle", "Xe Máy" }, { "Motorbike", "Xe Máy" }, { "VH_Motor", "Xe Máy" }, { "Bike", "Xe Máy" },
+        { "Scooter", "Xe Scooter" },
+        { "TukTuk", "Xe TukTuk" },
+        { "MiniBus", "Xe MiniBus" }, { "Bus_", "Xe MiniBus" },
+        { "PG117", "Thuyền Cano" }, { "Boat", "Thuyền Cano" }, { "Cano", "Thuyền Cano" },
+        { "AquaRail", "Moto Nước" }, { "JetSki", "Moto Nước" },
+        { "BRDM", "Xe BRDM" },
+        { "CoupeRB", "Xe Coupe RB" }, { "Coupe", "Xe Coupe RB" },
+        { "MonsterTruck", "Xe Quái Thú" }, { "BigFoot", "Xe Quái Thú" },
+        { "Mirado", "Xe Mirado" },
+        { "Lada", "Xe Lada Niva" },
+        { "Snowmobile", "Xe Tuyết" }, { "Snowbike", "Xe Tuyết" },
+        { "Bicycle", "Xe Đạp" },
+        { "Tank", "Xe Tăng" },
+        { "Helicopter", "Trực Thăng" }, { "DirectFly", "Trực Thăng" },
+        { "Lamborghini", "Xe Lamborghini" },
+        { "Tesla", "Xe Model Y" }, { "ModelY", "Xe Model Y" },
+        { "UTV", "Xe UTV" },
+        { "ATV", "Xe ATV" },
+    };
+    if (strcasestr(name, "Truck") && !strcasestr(name, "Monster")) {
+        snprintf(outDisplay, outCap, "Xe Bán Tải");
+        return DSPUBGItemCategoryVehicle;
+    }
+    for (const auto &entry : kVehTable) {
+        if (strcasestr(name, entry.kw)) {
+            snprintf(outDisplay, outCap, "%s", entry.label);
+            return DSPUBGItemCategoryVehicle;
+        }
+    }
+    return DSPUBGItemCategoryNone;
+}
+
 static DSPUBGItemCategory ds_pubg_classify_item(const char *name, char *outDisplay, size_t outCap) {
     if (!name || !outDisplay || outCap < 4) return DSPUBGItemCategoryNone;
     outDisplay[0] = '\0';
 
-    // 0. Fast reject non-item actors (bullets, effects, cameras, players)
-    if (strcasestr(name, "Bullet") || strcasestr(name, "Proj") || strcasestr(name, "Shell") ||
-        strcasestr(name, "Cartridge") || strcasestr(name, "Trace") || strcasestr(name, "Particle") ||
-        strcasestr(name, "Emitter") || strcasestr(name, "Effect") || strcasestr(name, "Decal") ||
-        strcasestr(name, "Camera") || strcasestr(name, "Controller") || strcasestr(name, "Player") ||
-        strcasestr(name, "Character") || strcasestr(name, "Volume") || strcasestr(name, "Trigger") ||
-        strcasestr(name, "Light") || strcasestr(name, "Audio") || strcasestr(name, "Sound") ||
-        strcasestr(name, "Landscape") || strcasestr(name, "WorldSettings") || strcasestr(name, "GameMode") ||
-        strcasestr(name, "Grenade") || strcasestr(name, "Smoke") || strcasestr(name, "Flash") ||
-        strcasestr(name, "Explo") || strcasestr(name, "Fire") || strcasestr(name, "Flame")) {
+    static const char *const kNonItemTokens[] = {
+        "Bullet", "Proj", "Shell", "Cartridge", "Trace", "Particle", "Emitter", "Effect",
+        "Decal", "Camera", "Controller", "Player", "Character", "Volume", "Trigger",
+        "Light", "Audio", "Sound", "Landscape", "WorldSettings", "GameMode",
+        "Grenade", "Smoke", "Flash", "Explo", "Fire", "Flame"
+    };
+    if (ds_pubg_contains_any(name, kNonItemTokens, sizeof(kNonItemTokens) / sizeof(kNonItemTokens[0]), true)) {
         return DSPUBGItemCategoryNone;
     }
 
-    // 1. Vehicles
-    bool isNonVehicle = (strcasestr(name, "Wrapper") != nullptr) ||
-                        (strcasestr(name, "PickUp") != nullptr && strcasestr(name, "VH_") == nullptr) ||
-                        (strcasestr(name, "Pickup") != nullptr && strcasestr(name, "VH_") == nullptr) ||
-                        (strcasestr(name, "WheelComponent") != nullptr) ||
-                        (strcasestr(name, "VehicleWheel") != nullptr) ||
-                        (strcasestr(name, "SeatComponent") != nullptr) ||
-                        (strcasestr(name, "VehicleSeat") != nullptr) ||
-                        (strcasestr(name, "Spawner") != nullptr) ||
-                        (strcasestr(name, "SpawnPoint") != nullptr) ||
-                        (strcasestr(name, "SpawnPad") != nullptr) ||
-                        (strcasestr(name, "Spawn") != nullptr) ||
-                        (strcasestr(name, "Terminal") != nullptr) ||
-                        (strcasestr(name, "Station") != nullptr) ||
-                        (strcasestr(name, "Manager") != nullptr) ||
-                        (strcasestr(name, "Stand") != nullptr) ||
-                        (strcasestr(name, "Table") != nullptr) ||
-                        (strcasestr(name, "Board") != nullptr) ||
-                        (strcasestr(name, "Audio") != nullptr) ||
-                        (strcasestr(name, "Sound") != nullptr) ||
-                        (strcasestr(name, "Decal") != nullptr) ||
-                        (strcasestr(name, "Weapon") != nullptr) ||
-                        (strcasestr(name, "Trigger") != nullptr) ||
-                        (strcasestr(name, "Target") != nullptr) ||
-                        (strcasestr(name, "Guide") != nullptr) ||
-                        (strcasestr(name, "Button") != nullptr) ||
-                        (strcasestr(name, "UI") != nullptr) ||
-                        (strcasestr(name, "Widget") != nullptr);
-    if (!isNonVehicle) {
-        if (strcasestr(name, "Jeep") || strcasestr(name, "UAZ")) {
-            snprintf(outDisplay, outCap, "Xe UAZ");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Sedan") || strcasestr(name, "Dacia")) {
-            snprintf(outDisplay, outCap, "Xe Dacia");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Buggy")) {
-            snprintf(outDisplay, outCap, "Xe Buggy");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "VH_PickUp") || strcasestr(name, "VH_Pickup") || (strcasestr(name, "Truck") && !strcasestr(name, "Monster")) || strcasestr(name, "Rony")) {
-            snprintf(outDisplay, outCap, "Xe Bán Tải");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Motorcycle") || strcasestr(name, "Motorbike") || strcasestr(name, "VH_Motor") || strcasestr(name, "Bike")) {
-            snprintf(outDisplay, outCap, "Xe Máy");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Scooter")) {
-            snprintf(outDisplay, outCap, "Xe Scooter");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "TukTuk")) {
-            snprintf(outDisplay, outCap, "Xe TukTuk");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "MiniBus") || strcasestr(name, "Bus_")) {
-            snprintf(outDisplay, outCap, "Xe MiniBus");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "PG117") || strcasestr(name, "Boat") || strcasestr(name, "Cano")) {
-            snprintf(outDisplay, outCap, "Thuyền Cano");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "AquaRail") || strcasestr(name, "JetSki")) {
-            snprintf(outDisplay, outCap, "Moto Nước");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "BRDM")) {
-            snprintf(outDisplay, outCap, "Xe BRDM");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "CoupeRB") || strcasestr(name, "Coupe")) {
-            snprintf(outDisplay, outCap, "Xe Coupe RB");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "MonsterTruck") || strcasestr(name, "BigFoot")) {
-            snprintf(outDisplay, outCap, "Xe Quái Thú");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Mirado")) {
-            snprintf(outDisplay, outCap, "Xe Mirado");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Lada")) {
-            snprintf(outDisplay, outCap, "Xe Lada Niva");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Snowmobile") || strcasestr(name, "Snowbike")) {
-            snprintf(outDisplay, outCap, "Xe Tuyết");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Bicycle")) {
-            snprintf(outDisplay, outCap, "Xe Đạp");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Tank")) {
-            snprintf(outDisplay, outCap, "Xe Tăng");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Helicopter") || strcasestr(name, "DirectFly")) {
-            snprintf(outDisplay, outCap, "Trực Thăng");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Lamborghini")) {
-            snprintf(outDisplay, outCap, "Xe Lamborghini");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "Tesla") || strcasestr(name, "ModelY")) {
-            snprintf(outDisplay, outCap, "Xe Model Y");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "UTV")) {
-            snprintf(outDisplay, outCap, "Xe UTV");
-            return DSPUBGItemCategoryVehicle;
-        }
-        if (strcasestr(name, "ATV")) {
-            snprintf(outDisplay, outCap, "Xe ATV");
-            return DSPUBGItemCategoryVehicle;
+    DSPUBGItemCategory vehCat = ds_pubg_classify_vehicle_name(name, outDisplay, outCap);
+    if (vehCat != DSPUBGItemCategoryNone) return vehCat;
+
+    static const struct { const char *kw; const char *label; DSPUBGItemCategory cat; } kNamedItems[] = {
+        // Scopes
+        { "8X", "Scope 8x", DSPUBGItemCategoryScope },
+        { "6X", "Scope 6x", DSPUBGItemCategoryScope },
+        { "4X", "Scope 4x", DSPUBGItemCategoryScope },
+        { "3X", "Scope 3x", DSPUBGItemCategoryScope },
+        { "2X", "Scope 2x", DSPUBGItemCategoryScope },
+        { "RedDot", "Red Dot", DSPUBGItemCategoryScope }, { "HD", "Red Dot", DSPUBGItemCategoryScope },
+        { "Holo", "Holo", DSPUBGItemCategoryScope }, { "MZJ_QX", "Holo", DSPUBGItemCategoryScope },
+        // Armor & Helmets
+        { "Armor_Lv3", "Giáp 3", DSPUBGItemCategoryArmor }, { "Armor3", "Giáp 3", DSPUBGItemCategoryArmor },
+        { "Armor_Lv2", "Giáp 2", DSPUBGItemCategoryArmor }, { "Armor2", "Giáp 2", DSPUBGItemCategoryArmor },
+        { "Armor_Lv1", "Giáp 1", DSPUBGItemCategoryArmor }, { "Armor1", "Giáp 1", DSPUBGItemCategoryArmor },
+        { "Head_Lv3", "Mũ 3", DSPUBGItemCategoryArmor }, { "Helmet_Lv3", "Mũ 3", DSPUBGItemCategoryArmor }, { "Head3", "Mũ 3", DSPUBGItemCategoryArmor },
+        { "Head_Lv2", "Mũ 2", DSPUBGItemCategoryArmor }, { "Helmet_Lv2", "Mũ 2", DSPUBGItemCategoryArmor }, { "Head2", "Mũ 2", DSPUBGItemCategoryArmor },
+        { "Head_Lv1", "Mũ 1", DSPUBGItemCategoryArmor }, { "Helmet_Lv1", "Mũ 1", DSPUBGItemCategoryArmor }, { "Head1", "Mũ 1", DSPUBGItemCategoryArmor },
+        // Backpacks
+        { "Bag_Lv3", "Balo 3", DSPUBGItemCategoryBag }, { "Bag3", "Balo 3", DSPUBGItemCategoryBag },
+        { "Bag_Lv2", "Balo 2", DSPUBGItemCategoryBag }, { "Bag2", "Balo 2", DSPUBGItemCategoryBag },
+        { "Bag_Lv1", "Balo 1", DSPUBGItemCategoryBag }, { "Bag1", "Balo 1", DSPUBGItemCategoryBag },
+        // Weapons
+        { "Flare", "Flare Gun", DSPUBGItemCategoryWeapon },
+        { "AWM", "AWM", DSPUBGItemCategoryWeapon },
+        { "M416", "M416", DSPUBGItemCategoryWeapon },
+        { "AKM", "AKM", DSPUBGItemCategoryWeapon },
+        { "M24", "M24", DSPUBGItemCategoryWeapon },
+        { "Kar98", "Kar98k", DSPUBGItemCategoryWeapon },
+        { "Groza", "Groza", DSPUBGItemCategoryWeapon },
+        { "AUG", "AUG", DSPUBGItemCategoryWeapon },
+        { "M762", "M762", DSPUBGItemCategoryWeapon },
+        { "Mk14", "Mk14", DSPUBGItemCategoryWeapon },
+        { "SLR", "SLR", DSPUBGItemCategoryWeapon },
+        { "SKS", "SKS", DSPUBGItemCategoryWeapon },
+        { "Mini14", "Mini14", DSPUBGItemCategoryWeapon },
+        { "AMR", "Lynx AMR", DSPUBGItemCategoryWeapon },
+        { "MG3", "MG3", DSPUBGItemCategoryWeapon },
+        { "M249", "M249", DSPUBGItemCategoryWeapon },
+        { "DP28", "DP-28", DSPUBGItemCategoryWeapon }, { "DP-28", "DP-28", DSPUBGItemCategoryWeapon },
+        { "P90", "P90", DSPUBGItemCategoryWeapon },
+        { "Vector", "Vector", DSPUBGItemCategoryWeapon },
+        { "UMP", "UMP45", DSPUBGItemCategoryWeapon },
+        { "DBS", "DBS", DSPUBGItemCategoryWeapon },
+        { "SCAR", "SCAR-L", DSPUBGItemCategoryWeapon },
+        { "M16A4", "M16A4", DSPUBGItemCategoryWeapon }, { "M16", "M16A4", DSPUBGItemCategoryWeapon },
+        { "QBZ", "QBZ", DSPUBGItemCategoryWeapon },
+        { "G36", "G36C", DSPUBGItemCategoryWeapon },
+        { "ACE32", "ACE32", DSPUBGItemCategoryWeapon },
+        { "Honey", "Honey Badger", DSPUBGItemCategoryWeapon },
+        { "FAMAS", "FAMAS", DSPUBGItemCategoryWeapon },
+        { "Mosin", "Mosin", DSPUBGItemCategoryWeapon },
+        { "Mk12", "Mk12", DSPUBGItemCategoryWeapon },
+        { "QBU", "QBU", DSPUBGItemCategoryWeapon },
+        { "VSS", "VSS", DSPUBGItemCategoryWeapon },
+        { "S12K", "S12K", DSPUBGItemCategoryWeapon },
+        { "S686", "S686", DSPUBGItemCategoryWeapon },
+        { "S1897", "S1897", DSPUBGItemCategoryWeapon },
+        { "UZI", "Micro UZI", DSPUBGItemCategoryWeapon }, { "MicroUZI", "Micro UZI", DSPUBGItemCategoryWeapon },
+        { "Bizon", "PP-19 Bizon", DSPUBGItemCategoryWeapon }, { "PP19", "PP-19 Bizon", DSPUBGItemCategoryWeapon },
+        { "MP5K", "MP5K", DSPUBGItemCategoryWeapon }, { "MP5", "MP5K", DSPUBGItemCategoryWeapon },
+        { "Pan", "Chảo", DSPUBGItemCategoryWeapon },
+    };
+    for (const auto &entry : kNamedItems) {
+        if (strcasestr(name, entry.kw)) {
+            snprintf(outDisplay, outCap, "%s", entry.label);
+            return entry.cat;
         }
     }
 
-    // 2. Scopes
-    if (strcasestr(name, "8X")) {
-        snprintf(outDisplay, outCap, "Scope 8x");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "6X")) {
-        snprintf(outDisplay, outCap, "Scope 6x");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "4X")) {
-        snprintf(outDisplay, outCap, "Scope 4x");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "3X")) {
-        snprintf(outDisplay, outCap, "Scope 3x");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "2X")) {
-        snprintf(outDisplay, outCap, "Scope 2x");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "RedDot") || strcasestr(name, "HD")) {
-        snprintf(outDisplay, outCap, "Red Dot");
-        return DSPUBGItemCategoryScope;
-    }
-    if (strcasestr(name, "Holo") || strcasestr(name, "MZJ_QX")) {
-        snprintf(outDisplay, outCap, "Holo");
-        return DSPUBGItemCategoryScope;
-    }
-
-    // 3. Armor & Helmets
-    if (strcasestr(name, "Armor_Lv3") || strcasestr(name, "Armor3")) {
-        snprintf(outDisplay, outCap, "Giáp 3");
-        return DSPUBGItemCategoryArmor;
-    }
-    if (strcasestr(name, "Armor_Lv2") || strcasestr(name, "Armor2")) {
-        snprintf(outDisplay, outCap, "Giáp 2");
-        return DSPUBGItemCategoryArmor;
-    }
-    if (strcasestr(name, "Armor_Lv1") || strcasestr(name, "Armor1")) {
-        snprintf(outDisplay, outCap, "Giáp 1");
-        return DSPUBGItemCategoryArmor;
-    }
-    if (strcasestr(name, "Head_Lv3") || strcasestr(name, "Helmet_Lv3") || strcasestr(name, "Head3")) {
-        snprintf(outDisplay, outCap, "Mũ 3");
-        return DSPUBGItemCategoryArmor;
-    }
-    if (strcasestr(name, "Head_Lv2") || strcasestr(name, "Helmet_Lv2") || strcasestr(name, "Head2")) {
-        snprintf(outDisplay, outCap, "Mũ 2");
-        return DSPUBGItemCategoryArmor;
-    }
-    if (strcasestr(name, "Head_Lv1") || strcasestr(name, "Helmet_Lv1") || strcasestr(name, "Head1")) {
-        snprintf(outDisplay, outCap, "Mũ 1");
-        return DSPUBGItemCategoryArmor;
-    }
-
-    // 4. Backpacks
-    if (strcasestr(name, "Bag_Lv3") || strcasestr(name, "Bag3")) {
-        snprintf(outDisplay, outCap, "Balo 3");
-        return DSPUBGItemCategoryBag;
-    }
-    if (strcasestr(name, "Bag_Lv2") || strcasestr(name, "Bag2")) {
-        snprintf(outDisplay, outCap, "Balo 2");
-        return DSPUBGItemCategoryBag;
-    }
-    if (strcasestr(name, "Bag_Lv1") || strcasestr(name, "Bag1")) {
-        snprintf(outDisplay, outCap, "Balo 1");
-        return DSPUBGItemCategoryBag;
-    }
-
-    // 5. Weapons
-    if (strcasestr(name, "Flare")) {
-        snprintf(outDisplay, outCap, "Flare Gun");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "AWM")) {
-        snprintf(outDisplay, outCap, "AWM");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "M416")) {
-        snprintf(outDisplay, outCap, "M416");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "AKM")) {
-        snprintf(outDisplay, outCap, "AKM");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "M24")) {
-        snprintf(outDisplay, outCap, "M24");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Kar98")) {
-        snprintf(outDisplay, outCap, "Kar98k");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Groza")) {
-        snprintf(outDisplay, outCap, "Groza");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "AUG")) {
-        snprintf(outDisplay, outCap, "AUG");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "M762")) {
-        snprintf(outDisplay, outCap, "M762");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Mk14")) {
-        snprintf(outDisplay, outCap, "Mk14");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "SLR")) {
-        snprintf(outDisplay, outCap, "SLR");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "SKS")) {
-        snprintf(outDisplay, outCap, "SKS");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Mini14")) {
-        snprintf(outDisplay, outCap, "Mini14");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "AMR")) {
-        snprintf(outDisplay, outCap, "Lynx AMR");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "MG3")) {
-        snprintf(outDisplay, outCap, "MG3");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "M249")) {
-        snprintf(outDisplay, outCap, "M249");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "DP28") || strcasestr(name, "DP-28")) {
-        snprintf(outDisplay, outCap, "DP-28");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "P90")) {
-        snprintf(outDisplay, outCap, "P90");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Vector")) {
-        snprintf(outDisplay, outCap, "Vector");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "UMP")) {
-        snprintf(outDisplay, outCap, "UMP45");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "DBS")) {
-        snprintf(outDisplay, outCap, "DBS");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "SCAR")) {
-        snprintf(outDisplay, outCap, "SCAR-L");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "M16A4") || strcasestr(name, "M16")) {
-        snprintf(outDisplay, outCap, "M16A4");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "QBZ")) {
-        snprintf(outDisplay, outCap, "QBZ");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "G36")) {
-        snprintf(outDisplay, outCap, "G36C");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "ACE32")) {
-        snprintf(outDisplay, outCap, "ACE32");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Honey")) {
-        snprintf(outDisplay, outCap, "Honey Badger");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "FAMAS")) {
-        snprintf(outDisplay, outCap, "FAMAS");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Mosin")) {
-        snprintf(outDisplay, outCap, "Mosin");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Mk12")) {
-        snprintf(outDisplay, outCap, "Mk12");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "QBU")) {
-        snprintf(outDisplay, outCap, "QBU");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "VSS")) {
-        snprintf(outDisplay, outCap, "VSS");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "S12K")) {
-        snprintf(outDisplay, outCap, "S12K");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "S686")) {
-        snprintf(outDisplay, outCap, "S686");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "S1897")) {
-        snprintf(outDisplay, outCap, "S1897");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "UZI") || strcasestr(name, "MicroUZI")) {
-        snprintf(outDisplay, outCap, "Micro UZI");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Bizon") || strcasestr(name, "PP19")) {
-        snprintf(outDisplay, outCap, "PP-19 Bizon");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "MP5K") || strcasestr(name, "MP5")) {
-        snprintf(outDisplay, outCap, "MP5K");
-        return DSPUBGItemCategoryWeapon;
-    }
-    if (strcasestr(name, "Pan")) {
-        snprintf(outDisplay, outCap, "Chảo");
-        return DSPUBGItemCategoryWeapon;
-    }
-
-    // 6. Crates & AirDrops & Tokens
     if (strcasestr(name, "AirDrop")) {
         snprintf(outDisplay, outCap, (g_pubgLanguage == 1) ? "AirDrop" : "HÒM THÍNH");
         return DSPUBGItemCategoryCrate;
@@ -1348,95 +1070,58 @@ static DSPUBGItemCategory ds_pubg_classify_item(const char *name, char *outDispl
 }
 
 static inline uint32_t ds_pubg_read_grenade_id(uint64_t actor) {
-    // In ASTExtraGrenadeBase, ItemDefineID is at 0x678(0x18)
-    // FItemDefineID has Type at 0x0(0x4), TypeSpecificID at 0x4(0x4) -> 0x67C
-    uint32_t id = ds_pubg_read_u32(actor + 0x67CULL);
-    if (id == 602004 || id == 602003 || id == 602002 || id == 602001 || id == 602005) return id;
-    id = ds_pubg_read_u32(actor + 0x678ULL);
-    if (id == 602004 || id == 602003 || id == 602002 || id == 602001 || id == 602005) return id;
-    id = ds_pubg_read_u32(actor + 0x680ULL);
-    if (id == 602004 || id == 602003 || id == 602002 || id == 602001 || id == 602005) return id;
-    id = ds_pubg_read_u32(actor + 0x674ULL);
-    if (id == 602004 || id == 602003 || id == 602002 || id == 602001 || id == 602005) return id;
+    // ASTExtraGrenadeBase.ItemDefineID.TypeSpecificID at 0x67C (neighbours for minor struct alignment diffs)
+    static const uint64_t kGrenadeIdOffs[] = { 0x67CULL, 0x678ULL, 0x680ULL, 0x674ULL };
+    for (uint64_t off : kGrenadeIdOffs) {
+        uint32_t id = ds_pubg_read_u32(actor + off);
+        if (id >= 602001 && id <= 602005) return id;
+    }
     return 0;
 }
 
 static bool ds_pubg_identify_grenade(uint64_t actor, DSPUBGGrenadeType *outType, char *outDisplay, size_t outCap, float *outRadius) {
     if (!actor || !outType || !outDisplay || outCap < 8) return false;
-    bool isEn = (g_pubgLanguage == 1);
 
-    // 1. Direct ItemDefineID check (exact internal logic from metalbiew.txt)
-    uint32_t idbom = ds_pubg_read_grenade_id(actor);
-    if (idbom != 0) {
-        switch (idbom) {
-            case 602004: // Frag Grenade
-                *outType = DSPUBGGrenadeTypeFrag;
-                snprintf(outDisplay, outCap, isEn ? "LỰU ĐẠN" : "LỰU ĐẠN");
-                if (outRadius) *outRadius = 9.0f;
-                return true;
-            case 602003: // Molotov
-                *outType = DSPUBGGrenadeTypeBurn;
-                snprintf(outDisplay, outCap, isEn ? "BOM LỬA" : "BOM LỬA");
-                if (outRadius) *outRadius = 4.5f;
-                return true;
-            case 602002: // Smoke
-                *outType = DSPUBGGrenadeTypeSmoke;
-                snprintf(outDisplay, outCap, isEn ? "BOM KHÓI" : "BOM KHÓI");
-                if (outRadius) *outRadius = 6.0f;
-                return true;
-            case 602001: // Stun
-            case 602005:
-                *outType = DSPUBGGrenadeTypeStun;
-                snprintf(outDisplay, outCap, isEn ? "BOM CHOÁNG" : "BOM CHOÁNG");
-                if (outRadius) *outRadius = 8.0f;
-                return true;
-        }
+    auto setResult = [&](DSPUBGGrenadeType t, const char *label, float r) {
+        *outType = t;
+        snprintf(outDisplay, outCap, "%s", label);
+        if (outRadius) *outRadius = r;
+        return true;
+    };
+
+    switch (ds_pubg_read_grenade_id(actor)) {
+        case 602004: return setResult(DSPUBGGrenadeTypeFrag, "LỰU ĐẠN", 9.0f);
+        case 602003: return setResult(DSPUBGGrenadeTypeBurn, "BOM LỬA", 4.5f);
+        case 602002: return setResult(DSPUBGGrenadeTypeSmoke, "BOM KHÓI", 6.0f);
+        case 602001:
+        case 602005: return setResult(DSPUBGGrenadeTypeStun, "BOM CHOÁNG", 8.0f);
+        default: break;
     }
 
-    // 2. Class name and Actor name fallback
     char actorName[64] = {0};
-    if (ds_pubg_get_actor_name(actor, actorName, sizeof(actorName))) {
-        if (strcasestr(actorName, "PickUp") || strcasestr(actorName, "Character") ||
-            strcasestr(actorName, "Pawn") || strcasestr(actorName, "Camera")) {
-            return false;
-        }
-
-        if (strcasestr(actorName, "Shoulei") || strcasestr(actorName, "Frag") ||
-            strcasestr(actorName, "ProjFrag") || strcasestr(actorName, "BP_Grenade_Shoulei")) {
-            *outType = DSPUBGGrenadeTypeFrag;
-            snprintf(outDisplay, outCap, isEn ? "LỰU ĐẠN" : "LỰU ĐẠN");
-            if (outRadius) *outRadius = 9.0f;
-            return true;
-        }
-        if (strcasestr(actorName, "Burn") || strcasestr(actorName, "Molotov") ||
-            strcasestr(actorName, "RanShaoPing") || strcasestr(actorName, "ProjBurn")) {
-            *outType = DSPUBGGrenadeTypeBurn;
-            snprintf(outDisplay, outCap, isEn ? "BOM LỬA" : "BOM LỬA");
-            if (outRadius) *outRadius = 4.5f;
-            return true;
-        }
-        if (strcasestr(actorName, "Smoke") || strcasestr(actorName, "YanWuDan") ||
-            strcasestr(actorName, "ProjSmoke")) {
-            *outType = DSPUBGGrenadeTypeSmoke;
-            snprintf(outDisplay, outCap, isEn ? "BOM KHÓI" : "BOM KHÓI");
-            if (outRadius) *outRadius = 6.0f;
-            return true;
-        }
-        if (strcasestr(actorName, "Stun") || strcasestr(actorName, "Flash") ||
-            strcasestr(actorName, "ZhenBaoDan") || strcasestr(actorName, "ProjStun")) {
-            *outType = DSPUBGGrenadeTypeStun;
-            snprintf(outDisplay, outCap, isEn ? "BOM CHOÁNG" : "BOM CHOÁNG");
-            if (outRadius) *outRadius = 8.0f;
-            return true;
-        }
-        if (strcasestr(actorName, "STExtraGrenadeBase") || strcasestr(actorName, "STProjectileBase")) {
-            *outType = DSPUBGGrenadeTypeFrag;
-            snprintf(outDisplay, outCap, isEn ? "LỰU ĐẠN" : "LỰU ĐẠN");
-            if (outRadius) *outRadius = 9.0f;
-            return true;
-        }
+    if (!ds_pubg_get_actor_name(actor, actorName, sizeof(actorName))) return false;
+    if (strcasestr(actorName, "PickUp") || strcasestr(actorName, "Character") ||
+        strcasestr(actorName, "Pawn") || strcasestr(actorName, "Camera")) {
+        return false;
     }
-
+    if (strcasestr(actorName, "Shoulei") || strcasestr(actorName, "Frag") ||
+        strcasestr(actorName, "ProjFrag") || strcasestr(actorName, "BP_Grenade_Shoulei")) {
+        return setResult(DSPUBGGrenadeTypeFrag, "LỰU ĐẠN", 9.0f);
+    }
+    if (strcasestr(actorName, "Burn") || strcasestr(actorName, "Molotov") ||
+        strcasestr(actorName, "RanShaoPing") || strcasestr(actorName, "ProjBurn")) {
+        return setResult(DSPUBGGrenadeTypeBurn, "BOM LỬA", 4.5f);
+    }
+    if (strcasestr(actorName, "Smoke") || strcasestr(actorName, "YanWuDan") || strcasestr(actorName, "ProjSmoke")) {
+        return setResult(DSPUBGGrenadeTypeSmoke, "BOM KHÓI", 6.0f);
+    }
+    if (strcasestr(actorName, "Stun") || strcasestr(actorName, "Flash") ||
+        strcasestr(actorName, "ZhenBaoDan") || strcasestr(actorName, "ProjStun")) {
+        return setResult(DSPUBGGrenadeTypeStun, "BOM CHOÁNG", 8.0f);
+    }
+    if (strcasestr(actorName, "STExtraGrenadeBase") || strcasestr(actorName, "STProjectileBase")) {
+        return setResult(DSPUBGGrenadeTypeFrag, "LỰU ĐẠN", 9.0f);
+    }
     return false;
 }
 
@@ -1817,149 +1502,37 @@ static DSPUBGItemCategory ds_pubg_identify_item(uint64_t actor, const char *prel
     }
 
     if (hasName) {
-        // Fast reject scenery, props, systems, volumes, decals, bullets, character meshes
-        if (strcasestr(actorName, "StaticMesh") || strcasestr(actorName, "InstancedFoliage") ||
-            strcasestr(actorName, "Foliage") || strcasestr(actorName, "Landscape") ||
-            strcasestr(actorName, "Building") || strcasestr(actorName, "House") ||
-            strcasestr(actorName, "Tree") || strcasestr(actorName, "Rock") ||
-            strcasestr(actorName, "Wall") || strcasestr(actorName, "Fence") ||
-            strcasestr(actorName, "Door") || strcasestr(actorName, "Window") ||
-            strcasestr(actorName, "Stairs") || strcasestr(actorName, "Floor") ||
-            strcasestr(actorName, "Roof") || strcasestr(actorName, "Brush") ||
-            strcasestr(actorName, "Volume") || strcasestr(actorName, "NavMesh") ||
-            strcasestr(actorName, "Light") || strcasestr(actorName, "Audio") ||
-            strcasestr(actorName, "Sound") || strcasestr(actorName, "Particle") ||
-            strcasestr(actorName, "Emitter") || strcasestr(actorName, "Effect") ||
-            strcasestr(actorName, "Decal") || strcasestr(actorName, "Camera") ||
-            strcasestr(actorName, "Controller") || strcasestr(actorName, "Player") ||
-            strcasestr(actorName, "Character") || strcasestr(actorName, "Pawn") ||
-            strcasestr(actorName, "WorldSettings") || strcasestr(actorName, "GameMode") ||
-            strcasestr(actorName, "GameState") || strcasestr(actorName, "Bullet") ||
-            strcasestr(actorName, "Proj") || strcasestr(actorName, "Shell") ||
-            strcasestr(actorName, "Cartridge") || strcasestr(actorName, "Trace") ||
-            strcasestr(actorName, "Grenade") || strcasestr(actorName, "Smoke") ||
-            strcasestr(actorName, "Flash") || strcasestr(actorName, "Explo") ||
-            strcasestr(actorName, "Fire") || strcasestr(actorName, "Flame") ||
-            strcasestr(actorName, "Trigger") || strcasestr(actorName, "Spawner") ||
-            strcasestr(actorName, "SpawnPoint") || strcasestr(actorName, "SpawnPad") ||
-            strcasestr(actorName, "Spawn") || strcasestr(actorName, "Terminal") ||
-            strcasestr(actorName, "Station") || strcasestr(actorName, "Manager") ||
-            strcasestr(actorName, "Stand") || strcasestr(actorName, "Table") ||
-            strcasestr(actorName, "Board") || strcasestr(actorName, "Target") ||
-            strcasestr(actorName, "Guide") || strcasestr(actorName, "Button") ||
-            strcasestr(actorName, "Widget") || strstr(actorName, "UI_") || strstr(actorName, "_UI") ||
-            strcasestr(actorName, "Seat") || strcasestr(actorName, "Wheel") ||
-            strcasestr(actorName, "Collision") || strcasestr(actorName, "Physics")) {
+        static const char *const kIgnoreItemTokens[] = {
+            "StaticMesh", "InstancedFoliage", "Foliage", "Landscape", "Building", "House",
+            "Tree", "Rock", "Wall", "Fence", "Door", "Window", "Stairs", "Floor", "Roof",
+            "Brush", "Volume", "NavMesh", "Light", "Audio", "Sound", "Particle", "Emitter",
+            "Effect", "Decal", "Camera", "Controller", "Player", "Character", "Pawn",
+            "WorldSettings", "GameMode", "GameState", "Bullet", "Proj", "Shell", "Cartridge",
+            "Trace", "Grenade", "Smoke", "Flash", "Explo", "Fire", "Flame", "Trigger",
+            "Spawner", "SpawnPoint", "SpawnPad", "Spawn", "Terminal", "Station", "Manager",
+            "Stand", "Table", "Board", "Target", "Guide", "Button", "Widget",
+            "Seat", "Wheel", "Collision", "Physics"
+        };
+        if (ds_pubg_contains_any(actorName, kIgnoreItemTokens, sizeof(kIgnoreItemTokens) / sizeof(kIgnoreItemTokens[0]), true) ||
+            strstr(actorName, "UI_") || strstr(actorName, "_UI")) {
             return DSPUBGItemCategoryNone;
         }
 
-        // 1. Vehicle check by name
-        bool isNonVehicle = (strcasestr(actorName, "Wheel") != nullptr) ||
-                            (strcasestr(actorName, "Seat") != nullptr) ||
-                            (strcasestr(actorName, "Spawner") != nullptr) ||
-                            (strcasestr(actorName, "SpawnPoint") != nullptr) ||
-                            (strcasestr(actorName, "SpawnPad") != nullptr) ||
-                            (strcasestr(actorName, "Spawn") != nullptr) ||
-                            (strcasestr(actorName, "Terminal") != nullptr) ||
-                            (strcasestr(actorName, "Station") != nullptr) ||
-                            (strcasestr(actorName, "Manager") != nullptr) ||
-                            (strcasestr(actorName, "Stand") != nullptr) ||
-                            (strcasestr(actorName, "Table") != nullptr) ||
-                            (strcasestr(actorName, "Board") != nullptr) ||
-                            (strcasestr(actorName, "Audio") != nullptr) ||
-                            (strcasestr(actorName, "Sound") != nullptr) ||
-                            (strcasestr(actorName, "Decal") != nullptr) ||
-                            (strcasestr(actorName, "Weapon") != nullptr) ||
-                            (strcasestr(actorName, "Trigger") != nullptr) ||
-                            (strcasestr(actorName, "Target") != nullptr) ||
-                            (strcasestr(actorName, "Guide") != nullptr) ||
-                            (strcasestr(actorName, "Button") != nullptr) ||
-                            (strstr(actorName, "UI_") != nullptr) ||
-                            (strstr(actorName, "_UI") != nullptr) ||
-                            (strcasestr(actorName, "Widget") != nullptr);
-
-        if (!isNonVehicle) {
-            if (strcasestr(actorName, "Jeep") || strcasestr(actorName, "UAZ")) {
-                snprintf(outDisplay, outCap, "Xe UAZ");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Sedan") || strcasestr(actorName, "Dacia")) {
-                snprintf(outDisplay, outCap, "Xe Dacia");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Buggy")) {
-                snprintf(outDisplay, outCap, "Xe Buggy");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "VH_PickUp") || strcasestr(actorName, "VH_Pickup") || (strcasestr(actorName, "Truck") && !strcasestr(actorName, "Monster")) || strcasestr(actorName, "Rony")) {
-                snprintf(outDisplay, outCap, "Xe Bán Tải");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Motorcycle") || strcasestr(actorName, "Motorbike") || strcasestr(actorName, "VH_Motor") || strcasestr(actorName, "Bike")) {
-                snprintf(outDisplay, outCap, "Xe Máy");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Scooter")) {
-                snprintf(outDisplay, outCap, "Xe Scooter");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "TukTuk")) {
-                snprintf(outDisplay, outCap, "Xe TukTuk");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "MiniBus") || strcasestr(actorName, "Bus_")) {
-                snprintf(outDisplay, outCap, "Xe MiniBus");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "PG117") || strcasestr(actorName, "Boat") || strcasestr(actorName, "Cano")) {
-                snprintf(outDisplay, outCap, "Thuyền Cano");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "AquaRail") || strcasestr(actorName, "JetSki")) {
-                snprintf(outDisplay, outCap, "Moto Nước");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "BRDM")) {
-                snprintf(outDisplay, outCap, "Xe BRDM");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Coupe") || strcasestr(actorName, "CoupeRB")) {
-                snprintf(outDisplay, outCap, "Xe Coupe RB");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Mirado")) {
-                snprintf(outDisplay, outCap, "Xe Mirado");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "MonsterTruck") || strcasestr(actorName, "BigFoot")) {
-                snprintf(outDisplay, outCap, "Xe Quái Thú");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Lada")) {
-                snprintf(outDisplay, outCap, "Xe Lada Niva");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Snowmobile") || strcasestr(actorName, "Snowbike")) {
-                snprintf(outDisplay, outCap, "Xe Tuyết");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Bicycle")) {
-                snprintf(outDisplay, outCap, "Xe Đạp");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Tank")) {
-                snprintf(outDisplay, outCap, "Xe Tăng");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Helicopter") || strcasestr(actorName, "DirectFly")) {
-                snprintf(outDisplay, outCap, "Trực Thăng");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Lamborghini")) {
-                snprintf(outDisplay, outCap, "Xe Lamborghini");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "Tesla") || strcasestr(actorName, "ModelY")) {
-                snprintf(outDisplay, outCap, "Xe Model Y");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "UTV")) {
-                snprintf(outDisplay, outCap, "Xe UTV");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "ATV")) {
-                snprintf(outDisplay, outCap, "Xe ATV");
-                return DSPUBGItemCategoryVehicle;
-            } else if (strcasestr(actorName, "VH_") || strcasestr(actorName, "Vehicle")) {
-                // Secondary check via vehicle shape / vtype
-                uint8_t shape = ds_pubg_read_u8(actor + 0x70DULL);
-                if (shape > 0 && shape <= 125) {
-                    DSPUBGItemCategory cat = ds_pubg_classify_vehicle_shape(shape, outDisplay, outCap);
-                    if (cat != DSPUBGItemCategoryNone) return cat;
-                }
-                uint8_t vtype = ds_pubg_read_u8(actor + 0x70CULL);
-                if (vtype > 0 && vtype <= 30) {
-                    DSPUBGItemCategory cat = ds_pubg_classify_vehicle_type(vtype, outDisplay, outCap);
-                    if (cat != DSPUBGItemCategoryNone) return cat;
-                }
+        // 1. Vehicle check by name / secondary shape fallback
+        DSPUBGItemCategory vehCat = ds_pubg_classify_vehicle_name(actorName, outDisplay, outCap);
+        if (vehCat != DSPUBGItemCategoryNone) {
+            return vehCat;
+        }
+        if (strcasestr(actorName, "VH_") || strcasestr(actorName, "Vehicle")) {
+            uint8_t shape = ds_pubg_read_u8(actor + 0x70DULL);
+            if (shape > 0 && shape <= 125) {
+                DSPUBGItemCategory cat = ds_pubg_classify_vehicle_shape(shape, outDisplay, outCap);
+                if (cat != DSPUBGItemCategoryNone) return cat;
+            }
+            uint8_t vtype = ds_pubg_read_u8(actor + 0x70CULL);
+            if (vtype > 0 && vtype <= 30) {
+                DSPUBGItemCategory cat = ds_pubg_classify_vehicle_type(vtype, outDisplay, outCap);
+                if (cat != DSPUBGItemCategoryNone) return cat;
             }
         }
 
@@ -2107,18 +1680,8 @@ static std::vector<CrateItemInfo> ds_pubg_get_crate_items(uint64_t crateActor) {
     uint64_t wrap = ds_pubg_read_ptr(crateActor + 0x658ULL);
     if (wrap && ds_pubg_valid(wrap)) targets.push_back(wrap);
 
-    // Look for attached wrappers or inventory components
-    static const uint64_t kCompOffsets[] = {
-        0x5B8ULL, 0x5C8ULL, 0x620ULL, 0x630ULL, 0x640ULL, 0x650ULL, 0x660ULL, 0x680ULL, 0x6F0ULL, 0x700ULL
-    };
-    for (uint64_t cOff : kCompOffsets) {
-        uint64_t comp = ds_pubg_read_ptr(crateActor + cOff);
-        if (comp && comp != crateActor && ds_pubg_valid(comp)) {
-            targets.push_back(comp);
-        }
-    }
-
     auto addItem = [&](int itemId, int count) {
+        (void)count;
         if (itemId < 101001 || itemId > 699999) return;
         char dName[36] = {0};
         DSPUBGItemCategory cat = ds_pubg_classify_item_id(itemId, dName, sizeof(dName));
@@ -2128,24 +1691,23 @@ static std::vector<CrateItemInfo> ds_pubg_get_crate_items(uint64_t crateActor) {
         if (itemId == 101004 || itemId == 103003 || itemId == 101005 || itemId == 103007 ||
             itemId == 105003 || itemId == 103013 || itemId == 102008 || itemId == 101006 ||
             itemId == 106007 || itemId == 101008 || itemId == 103001 || itemId == 103002) {
-            prio = 1; // M416, AWM, Groza, Mk14, MG3, AMR, P90, AUG, Flare Gun, M762, Kar98k, M24
+            prio = 1; // High-tier rifles/snipers/airdrop guns
         } else if (cat == DSPUBGItemCategoryWeapon) {
-            prio = 2; // Other weapons
+            prio = 2;
         } else if (itemId == 501003 || itemId == 501006 || itemId == 502003 || itemId == 503003) {
-            prio = 3; // L3 Armor, Helmet, Bag
+            prio = 3; // Lv3 Armor, Helmet, Bag
         } else if (itemId == 201005 || itemId == 201010 || itemId == 201012) {
             prio = 4; // Scope 8x, 6x, 15x
         } else if (itemId == 501002 || itemId == 501005 || itemId == 502002 || itemId == 503002) {
-            prio = 5; // L2 Armor, Helmet, Bag
+            prio = 5; // Lv2 Armor, Helmet, Bag
         } else if (itemId == 201004 || itemId == 201009) {
             prio = 6; // Scope 4x, 3x
         } else if (itemId == 601003 || itemId == 601006 || itemId == 601002) {
-            prio = 7; // Med Kit, Adrenaline, First Aid
+            prio = 7; // Meds
         } else if (itemId == 305001 || itemId == 303001 || itemId == 302001) {
             prio = 8; // Ammo
         }
 
-        // Avoid exact duplicates in list
         for (const auto &ex : results) {
             if (strcmp(ex.name, dName) == 0) return;
         }
@@ -2158,7 +1720,7 @@ static std::vector<CrateItemInfo> ds_pubg_get_crate_items(uint64_t crateActor) {
         results.push_back(info);
     };
 
-    // Fast direct check for PickUpListWrapperActor.PickUpDataList (offset 0x968, stride 0x40, ID at +0x4)
+    // PickUpListWrapperActor.PickUpDataList (offset 0x968, stride 0x40, ID at +0x4, Count at +0x18)
     for (uint64_t target : targets) {
         if (!target || !ds_pubg_valid(target)) continue;
         uint64_t dataPtr = ds_pubg_read_ptr(target + 0x968ULL);
@@ -2169,82 +1731,6 @@ static std::vector<CrateItemInfo> ds_pubg_get_crate_items(uint64_t crateActor) {
                 int id = ds_pubg_read_i32(elem + 0x4ULL);
                 int qty = ds_pubg_read_i32(elem + 0x18ULL);
                 addItem(id, qty);
-            }
-            if (!results.empty()) break;
-        }
-    }
-
-    if (results.empty()) {
-        for (uint64_t target : targets) {
-            if (!target || !ds_pubg_valid(target)) continue;
-
-            for (uint64_t off = 0x580ULL; off <= 0x980ULL; off += 8ULL) {
-                uint64_t dataPtr = ds_pubg_read_ptr(target + off);
-                if (!dataPtr || !ds_pubg_valid(dataPtr)) continue;
-
-                uint32_t count = ds_pubg_read_u32(target + off + 8ULL);
-                if (count == 0 || count > 64) continue;
-                uint32_t max = ds_pubg_read_u32(target + off + 12ULL);
-                if (max < count || max > 128) continue;
-
-                // Test if pointer array
-                int validItemsPtr = 0;
-                int testLimit = (count > 6) ? 6 : (int)count;
-                for (int t = 0; t < testLimit; t++) {
-                    uint64_t obj = ds_pubg_read_ptr(dataPtr + t * 8ULL);
-                    if (obj && ds_pubg_valid(obj)) {
-                        int id = ds_pubg_read_i32(obj + 0x5FCULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0x758ULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0x2F4ULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0xCCULL);
-                        if (id >= 101001 && id <= 699999) validItemsPtr++;
-                    }
-                }
-
-                if (validItemsPtr > 0) {
-                    for (uint32_t i = 0; i < count; i++) {
-                        uint64_t obj = ds_pubg_read_ptr(dataPtr + i * 8ULL);
-                        if (!obj || !ds_pubg_valid(obj)) continue;
-                        int id = ds_pubg_read_i32(obj + 0x5FCULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0x758ULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0x2F4ULL);
-                        if (id < 101001 || id > 699999) id = ds_pubg_read_i32(obj + 0xCCULL);
-                        int qty = ds_pubg_read_i32(obj + 0x618ULL);
-                        addItem(id, qty);
-                    }
-                    break;
-                }
-
-                // Test struct array
-                static const int kStrides[] = { 56, 48, 64, 40, 32, 72, 80 };
-                static const int kIdOffsets[] = { 4, 0, 8, 12, 16, 20 };
-                int bestStride = 0, bestIdOff = 0, bestMatchCount = 0;
-
-                for (int stride : kStrides) {
-                    for (int idOff : kIdOffsets) {
-                        int matches = 0;
-                        for (int t = 0; t < testLimit; t++) {
-                            int id = ds_pubg_read_i32(dataPtr + t * stride + idOff);
-                            if (id >= 101001 && id <= 699999) matches++;
-                        }
-                        if (matches > bestMatchCount) {
-                            bestMatchCount = matches;
-                            bestStride = stride;
-                            bestIdOff = idOff;
-                        }
-                    }
-                    if (bestMatchCount >= 2 || (count == 1 && bestMatchCount == 1)) break;
-                }
-
-                if (bestMatchCount > 0) {
-                    for (uint32_t i = 0; i < count; i++) {
-                        uint64_t elem = dataPtr + i * bestStride;
-                        int id = ds_pubg_read_i32(elem + bestIdOff);
-                        int qty = ds_pubg_read_i32(elem + bestIdOff + 4);
-                        addItem(id, qty);
-                    }
-                    break;
-                }
             }
             if (!results.empty()) break;
         }
@@ -2810,195 +2296,6 @@ static bool ds_pubg_read_live_bone_array(uint64_t meshComp, uint32_t cachedOff,
     return ds_pubg_find_bone_array(meshComp, outData, outCount, outOffset);
 }
 
-static const char *ds_pubg_weapon_name_by_id(int32_t id) {
-    switch (id) {
-        // Assault Rifles
-        case 101001: return "AKM";
-        case 101002: return "M16A4";
-        case 101003: return "SCAR-L";
-        case 101004: return "M416";
-        case 101005: return "Groza";
-        case 101006: return "AUG";
-        case 101007: return "QBZ";
-        case 101008: return "M762";
-        case 101009: return "Mk47";
-        case 101010: return "G36C";
-        case 101011: return "FAMAS";
-        case 101012: return "ACE32";
-        case 101013: return "HoneyBadger";
-
-        // SMGs
-        case 102001: return "UZI";
-        case 102002: return "UMP45";
-        case 102003: return "Vector";
-        case 102004: return "Tommy";
-        case 102005: return "Bizon";
-        case 102007: return "P90";
-        case 102008: return "MP5K";
-
-        // Sniper & DMR
-        case 103001: return "Kar98k";
-        case 103002: return "M24";
-        case 103003: return "AWM";
-        case 103004: return "SKS";
-        case 103005: return "VSS";
-        case 103006: return "Mini14";
-        case 103007: return "Mk14";
-        case 103008: return "Win94";
-        case 103009: return "SLR";
-        case 103010: return "QBU";
-        case 103011: return "Mosin";
-        case 103012: return "AMR";
-        case 103013: return "Lynx AMR";
-
-        // Shotguns
-        case 104001: return "S686";
-        case 104002: return "S1897";
-        case 104003: return "S12K";
-        case 104004: return "DBS";
-        case 104005: return "M1014";
-
-        // LMGs
-        case 105001: return "M249";
-        case 105002: return "DP-28";
-        case 105003: return "MG3";
-
-        // Pistols
-        case 106001: return "P92";
-        case 106002: return "P1911";
-        case 106003: return "R1895";
-        case 106004: return "P18C";
-        case 106005: return "R45";
-        case 106006: return "SawedOff";
-        case 106008: return "Skorpion";
-        case 106010: return "Deagle";
-
-        // Others / Melee
-        case 107001: return "Crossbow";
-        case 108001: return "Pan";
-        case 108002: return "Crowbar";
-        case 108003: return "Machete";
-        case 108004: return "Sickle";
-
-        // Throwables / Grenades
-        case 601001: return "Frag Grenade";
-        case 601002: return "Smoke Grenade";
-        case 601003: return "Molotov";
-        case 601004: return "Stun Grenade";
-        case 601005: return "Grenade";
-        case 602001: return "Smoke Grenade";
-        case 602002: return "Frag Grenade";
-        case 602003: return "Molotov";
-        case 602004: return "Stun Grenade";
-        default: return NULL;
-    }
-}
-
-static int32_t ds_pubg_read_equipped_weapon_id(uint64_t pawn) {
-    if (!pawn || !ds_pubg_valid(pawn)) return 0;
-
-    auto isValidWeaponId = [](int32_t wid) -> bool {
-        return (wid >= 101001 && wid <= 108999) || (wid >= 601001 && wid <= 603999);
-    };
-
-    auto extractWeaponIdFromActor = [&](uint64_t weapon) -> int32_t {
-        if (!weapon || !ds_pubg_valid(weapon)) return 0;
-
-        // 1. WeaponCfg.KeyID (0x798 on ASTExtraWeapon)
-        int32_t wid = ds_pubg_read_i32(weapon + 0x798ULL);
-        if (isValidWeaponId(wid)) return wid;
-
-        // 2. OwnerClientCreateWeaponData.ID.TypeSpecificID (0x68C on ASTExtraWeapon: 0x670 + 0x18 + 0x4)
-        wid = ds_pubg_read_i32(weapon + 0x68CULL);
-        if (isValidWeaponId(wid)) return wid;
-
-        // 3. WeaponEntityComp (0x868) -> WeaponId (0x1E0 on UWeaponEntity)
-        uint64_t wepEntity = ds_pubg_read_ptr(weapon + 0x868ULL);
-        if (wepEntity && ds_pubg_valid(wepEntity)) {
-            wid = ds_pubg_read_i32(wepEntity + 0x1E0ULL);
-            if (isValidWeaponId(wid)) return wid;
-        }
-
-        // 4. ShootID (0xCBC on ASTExtraShootWeapon)
-        wid = ds_pubg_read_i32(weapon + 0xCBCULL);
-        if (isValidWeaponId(wid)) return wid;
-
-        // 5. Standard heuristic offsets on weapon
-        static const uint64_t idOffsets[] = { 0x74ULL, 0x1E0ULL, 0x200ULL, 0x220ULL, 0x238ULL, 0x280ULL };
-        for (uint64_t idOff : idOffsets) {
-            wid = ds_pubg_read_i32(weapon + idOff);
-            if (isValidWeaponId(wid)) return wid;
-        }
-        return 0;
-    };
-
-    // Step 1: Check WeaponManagerComponent on pawn
-    // Offsets on ASTExtraBaseCharacter: 0x2768 (DUMP updated), 0x2628 (primary dump), 0x25B8, 0x15B8, 0x2600, 0x2618, 0x2620, 0x2630
-    static const uint64_t wmOffsets[] = { 0x2768ULL, 0x2628ULL, 0x25B8ULL, 0x15B8ULL, 0x2600ULL, 0x2618ULL, 0x2620ULL, 0x2630ULL };
-    for (uint64_t wmOff : wmOffsets) {
-        uint64_t wm = ds_pubg_read_ptr(pawn + wmOff);
-        if (!wm || !ds_pubg_valid(wm)) continue;
-
-        // Check active / held weapons:
-        // CurrentWeaponReplicated (0x5E8), CurrentWeaponSimulate (0x5F8), TemporaryWeaponReplicated (0x5F0), CurrentShield (0x600, 0x608)
-        static const uint64_t cwOffsets[] = { 0x5E8ULL, 0x5F8ULL, 0x5F0ULL, 0x600ULL, 0x608ULL };
-        for (uint64_t cwOff : cwOffsets) {
-            uint64_t w = ds_pubg_read_ptr(wm + cwOff);
-            if (w && ds_pubg_valid(w)) {
-                int32_t wid = extractWeaponIdFromActor(w);
-                if (wid > 0) return wid;
-            }
-        }
-
-        // If held weapon pointer was temporarily null during switch, check active socket:
-        // CurUseWeaponLogicSocketRep: 1=Slot1, 2=Slot2, 3=SubSlot, 4=MeleeSlot
-        uint8_t curSlot = ds_pubg_read_u8(wm + 0x320ULL);
-        if (curSlot >= 1 && curSlot <= 4) {
-            uint64_t slotOff = 0;
-            if (curSlot == 1) slotOff = 0x4C8ULL;
-            else if (curSlot == 2) slotOff = 0x500ULL;
-            else if (curSlot == 3) slotOff = 0x538ULL;
-            else if (curSlot == 4) slotOff = 0x570ULL;
-
-            if (slotOff != 0) {
-                // Check TargetWeapon at slot + 0x0
-                uint64_t w = ds_pubg_read_ptr(wm + slotOff);
-                if (w && ds_pubg_valid(w)) {
-                    int32_t wid = extractWeaponIdFromActor(w);
-                    if (wid > 0) return wid;
-                }
-                // Check ID.TypeSpecificID at slot + 0x1C (0x18 + 0x4)
-                int32_t slotWid = ds_pubg_read_i32(wm + slotOff + 0x1CULL);
-                if (isValidWeaponId(slotWid)) return slotWid;
-            }
-        } else if (curSlot == 0) {
-            // curSlot == 0 (SWPS_None) explicitly means Unarmed (tay không)
-            return 0;
-        }
-    }
-
-    // Step 2: Check CurrentReloadWeapon on ASTExtraBaseCharacter (0x3220ULL)
-    uint64_t reloadWep = ds_pubg_read_ptr(pawn + 0x3220ULL);
-    if (reloadWep && ds_pubg_valid(reloadWep)) {
-        int32_t wid = extractWeaponIdFromActor(reloadWep);
-        if (wid > 0) return wid;
-    }
-
-    // Step 3: Check fallback direct weapon pointers on pawn
-    static const uint64_t directWeaponOffsets[] = {
-        0x2AF4ULL, 0x2A84ULL, 0x2B00ULL, 0x2A70ULL, 0x2B10ULL, 0x2AA0ULL, 0x21F0ULL, 0x1A00ULL
-    };
-    for (uint64_t off : directWeaponOffsets) {
-        uint64_t w = ds_pubg_read_ptr(pawn + off);
-        if (w && ds_pubg_valid(w)) {
-            int32_t wid = extractWeaponIdFromActor(w);
-            if (wid > 0) return wid;
-        }
-    }
-
-    return 0;
-}
-
 static int g_dspubgTotalEnemies = 0;
 static int g_dspubgTotalBots = 0;
 
@@ -3279,1042 +2576,54 @@ static bool ds_pubg_find_level_actors(uint64_t lvl, uint64_t *outData, uint32_t 
     return true;
 }
 
-// -----------------------------------------------------------------------------
-// Client-Side Map Collision Obstacle Ray-Box Vischeck System
-// (Pure Read-Only Math Ray-OBB Intersection, zero engine hooks, zero anticheat risk)
-// -----------------------------------------------------------------------------
-static inline void ds_pubg_rotator_to_axes(
-    const DSPUBGRotator &rot,
-    DSPUBGVector &outX,
-    DSPUBGVector &outY,
-    DSPUBGVector &outZ)
-{
-    const float kPi = 3.141592653589793f;
-    float radPitch = rot.Pitch * kPi / 180.0f;
-    float radYaw   = rot.Yaw   * kPi / 180.0f;
-    float radRoll  = rot.Roll  * kPi / 180.0f;
+// Resolve world-space translation for a SceneComponent, preferring
+// ComponentToWorld (+0x210 quat, +0x220 translation) so attached actors keep
+// true world coordinates instead of parent-relative local offsets.
+static bool ds_pubg_read_world_loc(uint64_t rootComp, DSPUBGVector &outLoc, bool includeAttachParent) {
+    if (!rootComp || !ds_pubg_valid(rootComp)) return false;
 
-    float SP = sinf(radPitch), CP = cosf(radPitch);
-    float SY = sinf(radYaw),   CY = cosf(radYaw);
-    float SR = sinf(radRoll),  CR = cosf(radRoll);
-
-    // Forward (X)
-    outX.X = CP * CY;
-    outX.Y = CP * SY;
-    outX.Z = SP;
-
-    // Right (Y)
-    outY.X = SR * SP * CY - CR * SY;
-    outY.Y = SR * SP * SY + CR * CY;
-    outY.Z = -SR * CP;
-
-    // Up (Z)
-    outZ.X = -(CR * SP * CY + SR * SY);
-    outZ.Y = CY * SR - CR * SP * SY;
-    outZ.Z = CR * CP;
-}
-
-// FQuat -> orthonormal axes. The collision primitives in FKAggregateGeom only
-// carry a quaternion, so the box builder needs this instead of a rotator.
-static inline void ds_pubg_quat_to_axes(float x, float y, float z, float w,
-                                        DSPUBGVector &outX,
-                                        DSPUBGVector &outY,
-                                        DSPUBGVector &outZ) {
-    float n = x * x + y * y + z * z + w * w;
-    if (!isfinite(n) || n <= 1e-6f) {
-        outX = DSPUBGVector{ 1.0f, 0.0f, 0.0f };
-        outY = DSPUBGVector{ 0.0f, 1.0f, 0.0f };
-        outZ = DSPUBGVector{ 0.0f, 0.0f, 1.0f };
-        return;
-    }
-    float s = 2.0f / n;
-    outX = DSPUBGVector{ 1.0f - s * (y * y + z * z), s * (x * y + z * w),       s * (x * z - y * w) };
-    outY = DSPUBGVector{ s * (x * y - z * w),       1.0f - s * (x * x + z * z), s * (y * z + x * w) };
-    outZ = DSPUBGVector{ s * (x * z + y * w),       s * (y * z - x * w),       1.0f - s * (x * x + y * y) };
-}
-
-// One occlusion primitive: centre, half extents along its own three axes and a
-// circumscribed sphere radius for the broad phase.
-struct DSPUBGObstacleBox {
-    DSPUBGVector center;
-    DSPUBGVector extent;   // half extents along axisX/Y/Z
-    DSPUBGVector axisX;    // world-space box axes (orthonormal)
-    DSPUBGVector axisY;
-    DSPUBGVector axisZ;
-    float radius;          // circumscribed sphere radius
-};
-
-static bool ds_pubg_component_world_pose(uint64_t comp,
-                                         DSPUBGVector &outLoc,
-                                         DSPUBGVector &outX,
-                                         DSPUBGVector &outY,
-                                         DSPUBGVector &outZ,
-                                         DSPUBGVector &outScale);
-
-// --- World-space box helpers ------------------------------------------------
-// A box is stored as center + three orthonormal world axes + half extents, so
-// the slab test never has to re-derive axes from a rotator (ISMs and concave
-// collision elements are not rotator-aligned).
-
-static inline DSPUBGVector ds_pubg_axes_apply(const DSPUBGVector &v,
-                                              const DSPUBGVector &ax,
-                                              const DSPUBGVector &ay,
-                                              const DSPUBGVector &az) {
-    DSPUBGVector out = {};
-    out.X = v.X * ax.X + v.Y * ay.X + v.Z * az.X;
-    out.Y = v.X * ax.Y + v.Y * ay.Y + v.Z * az.Y;
-    out.Z = v.X * ax.Z + v.Y * ay.Z + v.Z * az.Z;
-    return out;
-}
-
-static inline DSPUBGVector ds_pubg_axes_scale(const DSPUBGVector &v,
-                                              const DSPUBGVector &s) {
-    return DSPUBGVector{ v.X * s.X, v.Y * s.Y, v.Z * s.Z };
-}
-
-static inline DSPUBGVector ds_pubg_rotated_axes(const DSPUBGVector &parentX,
-                                                const DSPUBGVector &parentY,
-                                                const DSPUBGVector &parentZ,
-                                                const DSPUBGVector &localAxis) {
-    return ds_pubg_axes_apply(localAxis, parentX, parentY, parentZ);
-}
-
-static inline void ds_pubg_box_finalize(DSPUBGObstacleBox &box) {
-    box.radius = hypotf(hypotf(box.extent.X, box.extent.Y), box.extent.Z);
-    if (!isfinite(box.radius) || box.radius <= 0.0f) box.radius = 1.0f;
-}
-
-// A single occlusion box must stay in the size range of a real wall, floor or
-// prop module. Anything larger is an aggregate mesh bound (terrain, landscape,
-// sky dome, a whole building cluster) and would black out every sight line.
-// 50 m half extent is already far beyond any usable wall module.
-static const float kDSPUBGMaxObstacleHalfExtent = 5000.0f;
-
-static inline bool ds_pubg_box_is_sane(const DSPUBGObstacleBox &box) {
-    if (!isfinite(box.center.X) || !isfinite(box.center.Y) || !isfinite(box.center.Z)) return false;
-    if (!isfinite(box.extent.X) || !isfinite(box.extent.Y) || !isfinite(box.extent.Z)) return false;
-    if (box.extent.X <= 0.0f || box.extent.Y <= 0.0f || box.extent.Z <= 0.0f) return false;
-    if (box.extent.X > kDSPUBGMaxObstacleHalfExtent ||
-        box.extent.Y > kDSPUBGMaxObstacleHalfExtent ||
-        box.extent.Z > kDSPUBGMaxObstacleHalfExtent) return false;
-    return true;
-}
-
-// True when `point` sits inside the box (or within `margin` of its surface).
-// A component whose bound swallows the camera cannot block the ray - the slab
-// test would start inside, and its only sane reading is "the camera is in it",
-// not "the camera is behind a wall".
-static inline bool ds_pubg_box_contains_point(const DSPUBGObstacleBox &box,
-                                              const DSPUBGVector &point,
-                                              float margin) {
-    DSPUBGVector d = { point.X - box.center.X, point.Y - box.center.Y, point.Z - box.center.Z };
-    float x = d.X * box.axisX.X + d.Y * box.axisX.Y + d.Z * box.axisX.Z;
-    float y = d.X * box.axisY.X + d.Y * box.axisY.Y + d.Z * box.axisY.Z;
-    float z = d.X * box.axisZ.X + d.Y * box.axisZ.Y + d.Z * box.axisZ.Z;
-    return fabsf(x) <= box.extent.X + margin &&
-           fabsf(y) <= box.extent.Y + margin &&
-           fabsf(z) <= box.extent.Z + margin;
-}
-
-// ---------------------------------------------------------------------------
-// Cover classification (ported from the external.cpp / PhysX reference)
-// ---------------------------------------------------------------------------
-// The reference filters PhysX shapes by measured size before trusting them as
-// cover. Without these tests the wrong shapes dominate the result: capsule
-// bounds of players act as walls, thin panes seal window openings, and volume
-// boxes fill whole rooms. All thresholds are centimetres.
-
-static inline void ds_pubg_box_half_extent_sorted(const DSPUBGObstacleBox &box,
-                                                  float &mn, float &mid, float &mx) {
-    float a = box.extent.X * 2.0f, b = box.extent.Y * 2.0f, c = box.extent.Z * 2.0f;
-    if (a > b) { float t = a; a = b; b = t; }
-    if (b > c) { float t = b; b = c; c = t; }
-    if (a > b) { float t = a; a = b; b = t; }
-    mn = a; mid = b; mx = c;
-}
-
-// A container / trigger volume: every axis large. It encloses space instead of
-// occupying it, so it must never occlude.
-static inline bool ds_pubg_box_is_wrapper_volume(const DSPUBGObstacleBox &box) {
-    float mn = 0.0f, mid = 0.0f, mx = 0.0f;
-    ds_pubg_box_half_extent_sorted(box, mn, mid, mx);
-    return mn > 500.0f && mx > 900.0f;
-}
-
-// Window glass: a thin sheet spanning a pane. The visual opening is
-// transparent and a player behind it is still visible. Only sheets are
-// dropped - a solid wall is commonly 15-30 cm thick and must stay cover, so
-// the thin side is capped at 6 cm (a 20 cm wall and a 4 cm pane are different
-// objects, not a threshold to blur).
-static inline bool ds_pubg_box_is_glass_pane(const DSPUBGObstacleBox &box) {
-    float mn = 0.0f, mid = 0.0f, mx = 0.0f;
-    ds_pubg_box_half_extent_sorted(box, mn, mid, mx);
-    if (mn > 6.0f || mn < 0.4f) return false;
-    if (mid < 70.0f || mx < 80.0f || mx > 380.0f) return false;
-    return true;
-}
-
-// Terrain / road slab: wide and flat. Handled as its own layer so it blocks
-// hills without consuming the wall budget.
-static inline bool ds_pubg_box_is_terrain(const DSPUBGObstacleBox &box) {
-    float mn = 0.0f, mid = 0.0f, mx = 0.0f;
-    ds_pubg_box_half_extent_sorted(box, mn, mid, mx);
-    float horizontal = (mx > mid) ? mx : mid;
-    return horizontal > 2200.0f && mn < 380.0f;
-}
-
-// Player-sized capsule: the reference drops every small rounded shape so bodies
-// never act as cover.
-static inline bool ds_pubg_box_is_character_sized(const DSPUBGObstacleBox &box) {
-    float mn = 0.0f, mid = 0.0f, mx = 0.0f;
-    ds_pubg_box_half_extent_sorted(box, mn, mid, mx);
-    return mx < 230.0f && mn < 95.0f;
-}
-
-// Single entry point used by both the extractor and the ray test.
-//
-// `rounded` marks shapes that came from a sphere or capsule. The
-// character-sized rejection only makes sense there: the reference applies it to
-// Sphere/Capsule meshes so player bodies never act as cover. Applied to boxes it
-// also discarded real walls - a 2 m wall section with a 0.3 m thickness lands in
-// the same size window as a torso.
-static inline bool ds_pubg_box_is_valid_cover_ex(const DSPUBGObstacleBox &box,
-                                                 const DSPUBGVector *rayStart,
-                                                 bool rounded) {
-    if (!ds_pubg_box_is_sane(box)) return false;
-    if (ds_pubg_box_is_wrapper_volume(box)) return false;
-    if (ds_pubg_box_is_glass_pane(box)) return false;
-    if (ds_pubg_box_is_terrain(box)) return false;
-    if (rounded && ds_pubg_box_is_character_sized(box)) return false;
-    if (rayStart && ds_pubg_box_contains_point(box, *rayStart, 10.0f)) return false;
-    return true;
-}
-
-static inline bool ds_pubg_box_is_valid_cover(const DSPUBGObstacleBox &box,
-                                              const DSPUBGVector *rayStart) {
-    return ds_pubg_box_is_valid_cover_ex(box, rayStart, false);
-}
-
-// ---------------------------------------------------------------------------
-// PhysX shape source (ported from the external.cpp BGMI reference, arm64)
-// ---------------------------------------------------------------------------
-// The reference does not trust UE's cooked AggregateGeom: it walks the live
-// PhysX shapes and ray-tests real geometry. The same chain is used here, with
-// the shape's AABB standing in for the triangle stream (the render mesh data
-// is stripped from the shipped build, so PhysX is the only triangle source).
-//
-//   UStaticMeshComponent.BodyInstance    0x550   (FBodyInstance, 0x210)
-//   FBodyInstance.RigidActorSyncId       0x110   -> PxRigidActor*
-//   FBodyInstance.RigidActorAsyncId      0x118   -> async scene twin
-//   NpRigidActor.ShapeMgr                0x0C    (32-bit reference value)
-//   NpShape.Geometry (GeometryUnion)     0x74
-//   GeometryUnion.Type                   0x00    (PxGeometryType)
-//   PxBoxGeometry.HalfExtents            0x04
-//   PxCapsuleGeometry.Radius/HalfHeight  0x04 / 0x08
-//   PxSphereGeometry.Radius              0x04
-//   PxMeshScale (3 floats + quat)        0x04
-//   PxConvexMeshGeometry.ConvexMesh      ~0x20
-//   PxTriangleMeshGeometry.TriangleMesh  ~0x24 (32-bit) / ~0x28 (arm64)
-//   Gu::ConvexMesh -> ConvexHullData.AABB 0x10 (PxBounds3)
-//   Gu::TriangleMesh.AABB                 0x20 (PxBounds3)
-//
-// Geometry values are already in world units (UE bakes component scale into
-// box/capsule half extents and into PxMeshScale for meshes), so the component
-// transform is applied as rotation + translation only.
-static const uint64_t kDSPUBGBodyInstanceOffset   = 0x550ULL;
-static const uint64_t kDSPUBGBodyInstanceSyncId   = 0x110ULL;
-static const uint64_t kDSPUBGBodyInstanceAsyncId  = 0x118ULL;
-static const uint64_t kDSPUBGPxShapeMgrOffset     = 0x0CULL;
-static const uint64_t kDSPUBGPxGeometryOffset     = 0x74ULL;
-
-enum : int {
-    kDSPUBGPxGeomSphere      = 0,
-    kDSPUBGPxGeomPlane       = 1,
-    kDSPUBGPxGeomCapsule     = 2,
-    kDSPUBGPxGeomBox         = 3,
-    kDSPUBGPxGeomConvex      = 4,
-    kDSPUBGPxGeomTriMesh     = 5,
-    kDSPUBGPxGeomHeightField = 6,
-};
-
-// Where the GeometryUnion sits inside NpShape is width dependent: the 0x74
-// constant comes from the 32-bit reference, and the PxTransform/StreamPtr
-// members before it grow when pointers are 8 bytes. 0x74 still reads a value in
-// 0..6 on arm64 often enough to look correct, which is how a probe can accept
-// 89 shapes and build one box out of them. The offset is therefore discovered
-// by requiring the union to yield a usable AABB, never by trusting a constant.
-static uint64_t g_dspubgPxGeomOff = 0;
-
-// Candidate slots for the discriminant. Covers the 32-bit value, the arm64
-// shift, and the neighbouring padding in case a member was added.
-static const uint64_t kDSPUBGPxGeomOffCandidates[] = {
-    0x6CULL, 0x70ULL, 0x74ULL, 0x78ULL, 0x7CULL, 0x80ULL, 0x84ULL, 0x88ULL, 0x8CULL
-};
-
-static inline int32_t ds_pubg_px_geom_type_at(uint64_t shape, uint64_t geomOff) {
-    int32_t type = (int32_t)ds_pubg_read_u32(shape + geomOff);
-    if (type < kDSPUBGPxGeomSphere || type > kDSPUBGPxGeomHeightField) return -1;
-    return type;
-}
-
-// ds_pubg_read_ptr rejects any address that is not 8-byte aligned, but
-// NpRigidActor stores its shape manager at a member offset, not a pointer
-// boundary - on a 4-mod-8 layout that check alone would hide the list. Read
-// the raw word and mask it the same way ds_pubg_read_ptr does.
-static uint64_t ds_pubg_px_read_ptr_any(uint64_t addr) {
-    uint64_t value = 0;
-    if (!ds_pubg_read(addr, &value, sizeof(value))) return 0;
-    value &= 0x0000FFFFFFFFFFFFULL;
-    return ds_pubg_valid(value) ? value : 0;
-}
-
-// A geometry union lands on 4-mod-8 addresses and its members move between
-// pointer widths, so the mesh pointer and the PxMeshScale vector are probed in
-// this order instead of trusting one constant.
-static const uint64_t kDSPUBGPxMeshPtrSlots[] = {
-    0x30ULL, 0x2CULL, 0x28ULL, 0x24ULL, 0x20ULL, 0x38ULL, 0x40ULL, 0x18ULL, 0x1CULL
-};
-static const uint64_t kDSPUBGPxScaleSlots[] = { 0x4ULL, 0x20ULL, 0x10ULL, 0x14ULL, 0x24ULL };
-
-static inline bool ds_pubg_px_scale_vec_ok(const float *s) {
-    for (int i = 0; i < 3; i++) {
-        if (!isfinite(s[i]) || fabsf(s[i]) < 0.001f || fabsf(s[i]) > 1000.0f) return false;
-    }
-    return true;
-}
-
-static inline bool ds_pubg_px_quat_ok(const float *q) {
-    const float n = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-    return isfinite(n) && n > 0.81f && n < 1.21f;
-}
-
-// Validates PxMeshScale for both known layouts:
-//   scale-first (32-bit reference): scale at S, quat at S+0x0C
-//   quat-first  (PhysX 3.4 arm64):  quat at S, scale at S+0x10
-// A mesh pointer read as floats, or an uninitialised slot, fails both.
-static bool ds_pubg_px_mesh_scale_at(uint64_t geom, float outScale[3]) {
-    for (uint64_t slot : kDSPUBGPxScaleSlots) {
-        float raw[8] = {};
-        if (!ds_pubg_read(geom + slot, raw, sizeof(raw))) continue;
-
-        // scale-first: raw[0..2] is the vector, raw[3..6] the quaternion.
-        if (ds_pubg_px_scale_vec_ok(raw) && ds_pubg_px_quat_ok(raw + 3)) {
-            if (outScale) { outScale[0] = fabsf(raw[0]); outScale[1] = fabsf(raw[1]); outScale[2] = fabsf(raw[2]); }
-            return true;
-        }
-        // quat-first: raw[0..3] is the quaternion, raw[4..6] the vector.
-        if (ds_pubg_px_quat_ok(raw) && ds_pubg_px_scale_vec_ok(raw + 4)) {
-            if (outScale) { outScale[0] = fabsf(raw[4]); outScale[1] = fabsf(raw[5]); outScale[2] = fabsf(raw[6]); }
+    uint8_t rc2w[32] = {0};
+    if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
+        float qx = 0, qy = 0, qz = 0, qw = 1.0f;
+        DSPUBGVector c2wLoc = {};
+        memcpy(&qx, rc2w + 0x0, 4);
+        memcpy(&qy, rc2w + 0x4, 4);
+        memcpy(&qz, rc2w + 0x8, 4);
+        memcpy(&qw, rc2w + 0xC, 4);
+        memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
+        float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+        if (isfinite(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
+            isfinite(c2wLoc.X) && isfinite(c2wLoc.Y) && isfinite(c2wLoc.Z) &&
+            (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
+            outLoc = c2wLoc;
             return true;
         }
     }
-    return false;
-}
 
-// A slot holding a small integer 0..6 is not a geometry: padding, flags and
-// counts all read in that range. A shape only qualifies when the union at that
-// slot also carries a payload of the matching primitive - half extents with a
-// real size, a positive radius, or a valid PxMeshScale. Without this test the
-// manager probe locked onto junk (63 "shapes", zero boxes).
-static bool ds_pubg_px_geom_signature_at(uint64_t shape, uint64_t geomOff) {
-    const int32_t type = ds_pubg_px_geom_type_at(shape, geomOff);
-    if (type < 0) return false;
-    const uint64_t geom = shape + geomOff;
-    switch (type) {
-        case kDSPUBGPxGeomBox: {
-            float h[3] = {};
-            if (!ds_pubg_read(geom + 0x4ULL, h, sizeof(h))) return false;
-            for (int i = 0; i < 3; i++) {
-                if (!isfinite(h[i]) || fabsf(h[i]) < 0.1f || fabsf(h[i]) > 20000.0f) return false;
-            }
-            return true;
-        }
-        case kDSPUBGPxGeomSphere: {
-            float r = ds_pubg_read_f32(geom + 0x4ULL);
-            return isfinite(r) && r > 0.05f && r < 20000.0f;
-        }
-        case kDSPUBGPxGeomCapsule: {
-            float r = ds_pubg_read_f32(geom + 0x4ULL);
-            float hh = ds_pubg_read_f32(geom + 0x8ULL);
-            return isfinite(r) && isfinite(hh) && r > 0.05f && r < 20000.0f && hh >= 0.0f && hh < 20000.0f;
-        }
-        case kDSPUBGPxGeomConvex:
-        case kDSPUBGPxGeomTriMesh:
-            // A mesh is only believed when its PxMeshScale reads back or a
-            // mesh pointer resolves. Requiring the pointer alone would drop
-            // every mesh whose StreamPtr is a serialised id instead of an
-            // address, and the shape would vanish before the reader saw it.
-            return ds_pubg_px_mesh_scale_at(geom, nullptr);
-        default:
-            return false;
+    DSPUBGVector relLoc = {};
+    if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &relLoc, sizeof(relLoc))) {
+        return false;
     }
-}
-
-// Used while walking a shape list: the shape is a candidate only when a known
-// slot carries a geometry whose payload is valid.
-static bool ds_pubg_px_shape_type(uint64_t shape, int &outType) {
-    outType = -1;
-    if (!shape || !ds_pubg_valid(shape)) return false;
-
-    if (g_dspubgPxGeomOff) {
-        int32_t type = ds_pubg_px_geom_type_at(shape, g_dspubgPxGeomOff);
-        if (type >= 0 && ds_pubg_px_geom_signature_at(shape, g_dspubgPxGeomOff)) {
-            outType = type;
-            return true;
-        }
-        // A cached slot that decoded one shape does not guarantee the next
-        // one: keep the shape by scanning the other candidates instead of
-        // dropping it from the list before the reader ever sees it.
-    }
-    for (uint64_t off : kDSPUBGPxGeomOffCandidates) {
-        int32_t type = ds_pubg_px_geom_type_at(shape, off);
-        if (type >= 0 && ds_pubg_px_geom_signature_at(shape, off)) {
-            outType = type;
-            return true;
-        }
-    }
-    return false;
-}
-
-// Collect the shape pointers hanging off a PxRigidActor.
-//
-// NpRigidActor keeps its NpShapeManager inline: a pointer to the first shape
-// followed by the shape count. The count sits at sizeof(void*), so +4 on the
-// 32-bit BGMI build the reference targets and +8 on arm64 - reading +4 here
-// would slice the pointer instead of the count.
-//
-// The manager's own offset inside the actor is not portable across pointer
-// widths either, so the working value is probed once and cached.
-// PhysX path diagnostics: components that exposed a rigid actor, shapes
-// collected and shapes that produced a usable box. A zero B count is then
-// attributable to the actor walk, the ShapeMgr scan or the geometry reader.
-static uint32_t s_obsPxActors = 0;
-static uint32_t s_obsPxShapes = 0;
-static uint32_t s_obsPxBoxes = 0;
-// Per-geometry counters. A shape that never reaches a box is either an
-// unsupported primitive, an unreadable mesh header, a degenerate bound or a
-// rejected cover; without these four numbers the fix is guesswork.
-static uint32_t s_pxGeomCount[7] = {};
-static uint32_t s_pxNoAabb = 0;
-static uint32_t s_pxNoCover = 0;
-static uint32_t s_pxNoSane = 0;
-// Mesh internals: a pointer that resolved, a bound derived from the vertex
-// stream, and a bound taken from the header AABB fallback. The three split the
-// "shape read but no box" case into pointer / vertex / header failures.
-static uint32_t s_pxMeshPtrOk = 0;
-static uint32_t s_pxMeshVertOk = 0;
-static uint32_t s_pxMeshStoredOk = 0;
-static uint64_t g_dspubgPxShapeMgrOff = 0;
-
-static int ds_pubg_px_collect_at(uint64_t rigidActor, uint64_t mgrOff,
-                                 uint64_t *outShapes, int maxShapes) {
-    uint64_t list = ds_pubg_px_read_ptr_any(rigidActor + mgrOff);
-    uint32_t count = (uint32_t)ds_pubg_read_u32(rigidActor + mgrOff + 8ULL) & 0xFFFFu;
-    if (count == 0 || count > 32) return 0;
-
-    if (count == 1) {
-        int type = -1;
-        if (!ds_pubg_px_shape_type(list, type)) return 0;
-        outShapes[0] = list;
-        return 1;
-    }
-    if (!list || !ds_pubg_valid(list)) return 0;
-
-    uint64_t buf[32] = {0};
-    if (!ds_pubg_read(list, buf, (size_t)count * sizeof(uint64_t))) return 0;
-
-    int written = 0;
-    for (uint32_t i = 0; i < count && written < maxShapes; i++) {
-        int type = -1;
-        if (!ds_pubg_px_shape_type(buf[i], type)) continue;
-        outShapes[written++] = buf[i];
-    }
-    return written;
-}
-
-static int ds_pubg_px_collect_shapes(uint64_t rigidActor, uint64_t *outShapes, int maxShapes) {
-    if (!outShapes || maxShapes <= 0) return 0;
-    if (!rigidActor || !ds_pubg_valid(rigidActor)) return 0;
-    outShapes[0] = 0;
-
-    if (g_dspubgPxShapeMgrOff) {
-        int n = ds_pubg_px_collect_at(rigidActor, g_dspubgPxShapeMgrOff, outShapes, maxShapes);
-        if (n > 0) return n;
-    }
-
-    // Probe order: the documented 32-bit value first, then every 8-byte slot an
-    // arm64 pointer member could occupy, then a 4-byte sweep for padding.
-    static const uint64_t kCandidates[] = {
-        0x0CULL, 0x10ULL, 0x08ULL, 0x18ULL, 0x20ULL, 0x14ULL, 0x1CULL, 0x24ULL,
-        0x00ULL, 0x04ULL, 0x28ULL, 0x2CULL, 0x30ULL, 0x34ULL, 0x38ULL, 0x3CULL,
-        0x40ULL, 0x44ULL, 0x48ULL, 0x4CULL, 0x50ULL, 0x54ULL, 0x58ULL, 0x5CULL,
-        0x60ULL, 0x64ULL, 0x68ULL, 0x6CULL, 0x70ULL, 0x74ULL
-    };
-    for (uint64_t off : kCandidates) {
-        int n = ds_pubg_px_collect_at(rigidActor, off, outShapes, maxShapes);
-        if (n > 0) {
-            g_dspubgPxShapeMgrOff = off;
-            return n;
-        }
-    }
-    for (uint64_t off : kCandidates) {
-        if (off % 8 == 0) continue;
-        int n = ds_pubg_px_collect_at(rigidActor, off + 4ULL, outShapes, maxShapes);
-        if (n > 0) {
-            g_dspubgPxShapeMgrOff = off + 4ULL;
-            return n;
-        }
-    }
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
-// PhysX geometry -> local AABB inside the component
-// ---------------------------------------------------------------------------
-static inline bool ds_pubg_px_aabb_sane(const DSPUBGVector &lo, const DSPUBGVector &hi) {
-    if (!isfinite(lo.X) || !isfinite(lo.Y) || !isfinite(lo.Z)) return false;
-    if (!isfinite(hi.X) || !isfinite(hi.Y) || !isfinite(hi.Z)) return false;
-    if (hi.X < lo.X || hi.Y < lo.Y || hi.Z < lo.Z) return false;
-    float ex = hi.X - lo.X, ey = hi.Y - lo.Y, ez = hi.Z - lo.Z;
-    if (ex < 0.05f && ey < 0.05f && ez < 0.05f) return false;
-    if (ex > 40000.0f || ey > 40000.0f || ez > 40000.0f) return false;
-    return true;
-}
-
-// Read a mesh-space AABB out of the live vertex buffer. The Gu:: mesh headers
-// carry two pointer members, so their absolute layout shifts between the
-// 32-bit reference and this arm64 build; the header triple itself (vertex
-// count, triangle count, vertex pointer) keeps its relative shape. Both are
-// located by scanning the first 0x60 bytes and validating against the vertices
-// that actually read back, which cannot be faked by padding.
-static inline DSPUBGVector ds_pubg_px_v3(const float *v) {
-    return DSPUBGVector{ v[0], v[1], v[2] };
-}
-
-static inline void ds_pubg_px_grow_bounds(DSPUBGVector &lo, DSPUBGVector &hi,
-                                         const DSPUBGVector &v, bool &have) {
-    if (!have) {
-        lo = v;
-        hi = v;
-        have = true;
-        return;
-    }
-    if (v.X < lo.X) lo.X = v.X; else if (v.X > hi.X) hi.X = v.X;
-    if (v.Y < lo.Y) lo.Y = v.Y; else if (v.Y > hi.Y) hi.Y = v.Y;
-    if (v.Z < lo.Z) lo.Z = v.Z; else if (v.Z > hi.Z) hi.Z = v.Z;
-}
-
-// Vertex stream at `vp` with `count` entries of 12 bytes. Full read up to 32k
-// vertices, otherwise a uniform sample - the AABB only needs coverage, not
-// every triangle vertex.
-static bool ds_pubg_px_bounds_from_vertices(uint64_t vp, uint32_t count,
-                                            DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    if (!ds_pubg_valid(vp) || count < 3) return false;
-    if (count > 2000000) return false;
-
-    const uint32_t kFullRead = 32768;
-    const uint32_t kSamples = 4096;
-    uint32_t stride = 1;
-    uint32_t last = count - 1;
-    if (count > kFullRead) stride = (count + kSamples - 1) / kSamples;
-
-    DSPUBGVector lo = {}, hi = {};
-    bool have = false;
-    float v[3] = {};
-    uint32_t reads = 0;
-
-    for (uint32_t i = 0; i < count; i += stride) {
-        if (!ds_pubg_read(vp + (uint64_t)i * 12ULL, v, sizeof(v))) return false;
-        if (!isfinite(v[0]) || !isfinite(v[1]) || !isfinite(v[2])) return false;
-        if (fabsf(v[0]) > 200000.0f || fabsf(v[1]) > 200000.0f || fabsf(v[2]) > 200000.0f) return false;
-        ds_pubg_px_grow_bounds(lo, hi, ds_pubg_px_v3(v), have);
-        reads++;
-    }
-    // Always include the final vertex: a sampled sweep would otherwise miss it.
-    if (last % stride != 0) {
-        if (ds_pubg_read(vp + (uint64_t)last * 12ULL, v, sizeof(v))) {
-            if (isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2])) {
-                ds_pubg_px_grow_bounds(lo, hi, ds_pubg_px_v3(v), have);
+    if (includeAttachParent) {
+        uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
+        if (parent && ds_pubg_valid(parent)) {
+            DSPUBGVector parentLoc = {};
+            if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
+                relLoc.X += parentLoc.X;
+                relLoc.Y += parentLoc.Y;
+                relLoc.Z += parentLoc.Z;
             }
         }
     }
-    if (!have || reads < 3) return false;
-    if (!ds_pubg_px_aabb_sane(lo, hi)) return false;
-    outLo = lo;
-    outHi = hi;
+    if (!isfinite(relLoc.X) || !isfinite(relLoc.Y) || !isfinite(relLoc.Z) ||
+        (fabsf(relLoc.X) < 1.0f && fabsf(relLoc.Y) < 1.0f)) {
+        return false;
+    }
+    outLoc = relLoc;
     return true;
 }
 
-// Stored PxBounds3 (min.xyz, max.xyz) at `addr`. ConvexHullData opens with it,
-// and Gu::TriangleMesh carries one behind its vertex/triangle header - both
-// survive pointer-width changes because they are plain float triples.
-static bool ds_pubg_px_stored_bounds(uint64_t addr, DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    float b[6] = {};
-    if (!ds_pubg_read(addr, b, sizeof(b))) return false;
-    for (int i = 0; i < 6; i++) if (!isfinite(b[i])) return false;
-    DSPUBGVector lo = { b[0], b[1], b[2] };
-    DSPUBGVector hi = { b[3], b[4], b[5] };
-    if (!ds_pubg_px_aabb_sane(lo, hi)) return false;
-    outLo = lo;
-    outHi = hi;
-    return true;
-}
 
-// TriangleMesh: PxTriangleMeshGeometry.TriangleMesh -> Gu::TriangleMesh, whose
-// header is (NbVertices, NbTriangles, Vertices, Triangles, AABB, Flags).
-static bool ds_pubg_px_trimesh_bounds(uint64_t meshPtr, DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    if (!meshPtr || !ds_pubg_valid(meshPtr)) return false;
-
-    uint8_t raw[0x60] = {};
-    if (!ds_pubg_read(meshPtr, raw, sizeof(raw))) return false;
-
-    for (uint64_t off = 0x08; off + 0x30 <= sizeof(raw); off += 4) {
-        uint32_t nbV = 0, nbT = 0;
-        memcpy(&nbV, raw + off, 4);
-        memcpy(&nbT, raw + off + 4, 4);
-        if (nbV < 3 || nbV > 2000000) continue;
-        if (nbT < 1 || nbT > 4000000) continue;
-        if (nbT > nbV * 8ULL + 64ULL) continue;
-
-        for (uint64_t d = off + 8; d + 8 <= off + 0x30; d += 4) {
-            uint64_t vp8 = 0;
-            memcpy(&vp8, raw + d, 8);
-            uint64_t candidates[2] = { vp8 & 0x0000FFFFFFFFFFFFULL, 0 };
-            uint32_t vp32 = 0;
-            memcpy(&vp32, raw + d, 4);
-            candidates[1] = (uint64_t)vp32;
-
-            for (uint64_t vp : candidates) {
-                if (!ds_pubg_valid(vp)) continue;
-                if (ds_pubg_px_bounds_from_vertices(vp, nbV, outLo, outHi)) {
-                    s_pxMeshVertOk++;
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Vertex stream unreadable: fall back to the mesh's own AABB. It is stored
-    // right after the pointer members, so its slot moves between 32-bit and
-    // arm64 - scan the plausible window instead of pinning one offset.
-    for (uint64_t off = 0x18; off + 24 <= 0x60; off += 4) {
-        if (ds_pubg_px_stored_bounds(meshPtr + off, outLo, outHi)) {
-            s_pxMeshStoredOk++;
-            return true;
-        }
-    }
-    return false;
-}
-
-// ConvexMesh: ConvexHullData holds NbEdges / NbHullVertices / NbPolygons /
-// Polygons, and the hull vertices follow the polygon array. Scanned for the
-// same reason as the trimesh header, then validated polygon by polygon.
-static bool ds_pubg_px_convex_bounds(uint64_t meshPtr, DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    if (!meshPtr || !ds_pubg_valid(meshPtr)) return false;
-
-    uint8_t raw[0xC0] = {};
-    if (!ds_pubg_read(meshPtr, raw, sizeof(raw))) return false;
-
-    for (uint64_t off = 0x08; off + 0x50 <= sizeof(raw); off += 4) {
-        // Polygon record: { normal, vertRef } - 20 bytes in the 32-bit build,
-        // 24 in arm64. Both layouts keep NbHullVertices/NbPolygons adjacent and
-        // the polygon pointer right behind them.
-        uint8_t nV = raw[off + 0x36];
-        uint8_t nPoly = raw[off + 0x37];
-        if (nV < 4 || nPoly < 4) continue;
-        if (nV == 0xFF || nPoly == 0xFF) continue;
-
-        uint64_t polyCandidates[2] = { 0, 0 };
-        uint64_t p8 = 0;
-        memcpy(&p8, raw + off + 0x38, 8);
-        polyCandidates[0] = p8 & 0x0000FFFFFFFFFFFFULL;
-        uint32_t p32 = 0;
-        memcpy(&p32, raw + off + 0x38, 4);
-        polyCandidates[1] = (uint64_t)p32;
-
-        for (uint64_t polys : polyCandidates) {
-            if (!ds_pubg_valid(polys)) continue;
-
-            float normal[3] = {};
-            if (!ds_pubg_read(polys, normal, sizeof(normal))) continue;
-            float nl = sqrtf(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-            if (!isfinite(nl) || nl < 0.8f || nl > 1.2f) continue;
-
-            for (uint64_t polySize = 20; polySize <= 24; polySize += 4) {
-                uint64_t verts = polys + (uint64_t)nPoly * polySize;
-                if (ds_pubg_px_bounds_from_vertices(verts, (uint32_t)nV, outLo, outHi)) {
-                    s_pxMeshVertOk++;
-                    return true;
-                }
-            }
-        }
-    }
-
-    // ConvexHullData begins with its own PxBounds3 - the cheapest reliable
-    // source when the hull vertex block does not read back.
-    if (ds_pubg_px_stored_bounds(meshPtr, outLo, outHi)) {
-        s_pxMeshStoredOk++;
-        return true;
-    }
-    return false;
-}
-
-// Applies PxMeshScale to a mesh-space AABB. The scale rotation is skipped on
-// purpose: the resulting axis-aligned bound stays conservative.
-static bool ds_pubg_px_mesh_aabb(uint64_t geom, int type, DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    DSPUBGVector mn = {}, mx = {};
-    bool got = false;
-    for (uint64_t slot : kDSPUBGPxMeshPtrSlots) {
-        // geometry offsets land on 4-mod-8 addresses, so the strict aligned
-        // reader never resolved the mesh pointer (all 63 shapes, 0 boxes).
-        uint64_t meshPtr = ds_pubg_px_read_ptr_any(geom + slot);
-        if (!meshPtr || !ds_pubg_valid(meshPtr)) continue;
-        s_pxMeshPtrOk++;
-        got = (type == kDSPUBGPxGeomConvex)
-            ? ds_pubg_px_convex_bounds(meshPtr, mn, mx)
-            : ds_pubg_px_trimesh_bounds(meshPtr, mn, mx);
-        if (got) break;
-    }
-    if (!got) return false;
-
-    float sc[3] = { 1.0f, 1.0f, 1.0f };
-    ds_pubg_px_mesh_scale_at(geom, sc);
-
-    outLo = DSPUBGVector{ mn.X * sc[0], mn.Y * sc[1], mn.Z * sc[2] };
-    outHi = DSPUBGVector{ mx.X * sc[0], mx.Y * sc[1], mx.Z * sc[2] };
-    if (outLo.X > outHi.X) { float t = outLo.X; outLo.X = outHi.X; outHi.X = t; }
-    if (outLo.Y > outHi.Y) { float t = outLo.Y; outLo.Y = outHi.Y; outHi.Y = t; }
-    if (outLo.Z > outHi.Z) { float t = outLo.Z; outLo.Z = outHi.Z; outHi.Z = t; }
-    return ds_pubg_px_aabb_sane(outLo, outHi);
-}
-
-static bool ds_pubg_px_geom_local_aabb_at(uint64_t shape, uint64_t geomOff,
-                                          DSPUBGVector &outLo, DSPUBGVector &outHi) {
-    outLo = {};
-    outHi = {};
-    if (!shape || !ds_pubg_valid(shape)) return false;
-
-    uint64_t geom = shape + geomOff;
-    int32_t type = (int32_t)ds_pubg_read_u32(geom);
-    if (type < kDSPUBGPxGeomSphere || type > kDSPUBGPxGeomHeightField) return false;
-
-    switch (type) {
-        case kDSPUBGPxGeomBox: {
-            DSPUBGVector h = {};
-            if (!ds_pubg_read(geom + 0x4ULL, &h, sizeof(h))) return false;
-            float hx = fabsf(h.X), hy = fabsf(h.Y), hz = fabsf(h.Z);
-            if (!isfinite(hx) || !isfinite(hy) || !isfinite(hz)) return false;
-            outLo = DSPUBGVector{ -hx, -hy, -hz };
-            outHi = DSPUBGVector{  hx,  hy,  hz };
-            return ds_pubg_px_aabb_sane(outLo, outHi);
-        }
-        case kDSPUBGPxGeomCapsule: {
-            float r = ds_pubg_read_f32(geom + 0x4ULL);
-            float hh = ds_pubg_read_f32(geom + 0x8ULL);
-            if (!isfinite(r) || r <= 0.0f || r > 5000.0f) return false;
-            if (!isfinite(hh) || hh < 0.0f || hh > 5000.0f) return false;
-            // PhysX capsules are aligned to the shape's local X axis.
-            outLo = DSPUBGVector{ -(r + hh), -r, -r };
-            outHi = DSPUBGVector{  (r + hh),  r,  r };
-            return ds_pubg_px_aabb_sane(outLo, outHi);
-        }
-        case kDSPUBGPxGeomSphere: {
-            float r = ds_pubg_read_f32(geom + 0x4ULL);
-            if (!isfinite(r) || r <= 0.0f || r > 5000.0f) return false;
-            outLo = DSPUBGVector{ -r, -r, -r };
-            outHi = DSPUBGVector{  r,  r,  r };
-            return ds_pubg_px_aabb_sane(outLo, outHi);
-        }
-        case kDSPUBGPxGeomConvex:
-        case kDSPUBGPxGeomTriMesh:
-            return ds_pubg_px_mesh_aabb(geom, type, outLo, outHi);
-        default:
-            // Plane and heightfield are terrain: handled by the terrain layer,
-            // never by a single wall box.
-            return false;
-    }
-}
-
-// A cached offset can be settled by the first shape of a level and then miss on
-// every other one - the union's type slot reads 0..6 on several padding
-// positions. After a run of misses the cache is dropped and re-probed instead
-// of starving the whole scan.
-static uint32_t s_pxGeomOffMisses = 0;
-
-static bool ds_pubg_px_geom_local_aabb(uint64_t shape, DSPUBGVector &outLo, DSPUBGVector &outHi,
-                                       uint64_t *outGeomOff = nullptr) {
-    if (g_dspubgPxGeomOff) {
-        if (ds_pubg_px_geom_local_aabb_at(shape, g_dspubgPxGeomOff, outLo, outHi)) {
-            s_pxGeomOffMisses = 0;
-            if (outGeomOff) *outGeomOff = g_dspubgPxGeomOff;
-            return true;
-        }
-        if (++s_pxGeomOffMisses < 8) return false;
-        s_pxGeomOffMisses = 0;
-        g_dspubgPxGeomOff = 0;
-    }
-    // Two passes: offsets whose union carries a real primitive payload first,
-    // then the raw AABB read. Padding that happens to hold 0..6 and three
-    // plausible floats passes the second test but not the first, so the
-    // strict pass settles the layout before the loose one can claim it.
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 0) {
-            if (ds_pubg_px_geom_signature_at(shape, kDSPUBGPxGeometryOffset) &&
-                ds_pubg_px_geom_local_aabb_at(shape, kDSPUBGPxGeometryOffset, outLo, outHi)) {
-                if (outGeomOff) *outGeomOff = kDSPUBGPxGeometryOffset;
-                return true;
-            }
-            for (uint64_t off : kDSPUBGPxGeomOffCandidates) {
-                if (off == kDSPUBGPxGeometryOffset) continue;
-                if (!ds_pubg_px_geom_signature_at(shape, off)) continue;
-                if (ds_pubg_px_geom_local_aabb_at(shape, off, outLo, outHi)) {
-                    if (outGeomOff) *outGeomOff = off;
-                    return true;
-                }
-            }
-            continue;
-        }
-        if (ds_pubg_px_geom_local_aabb_at(shape, kDSPUBGPxGeometryOffset, outLo, outHi)) {
-            if (outGeomOff) *outGeomOff = kDSPUBGPxGeometryOffset;
-            return true;
-        }
-        for (uint64_t off : kDSPUBGPxGeomOffCandidates) {
-            if (off == kDSPUBGPxGeometryOffset) continue;
-            if (ds_pubg_px_geom_local_aabb_at(shape, off, outLo, outHi)) {
-                if (outGeomOff) *outGeomOff = off;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Locks in the geometry offset once a shape is decoded with it. Called from the
-// shape reader, so the first shape that produces a real AABB settles the layout
-// for the session instead of the code guessing again per shape.
-static void ds_pubg_px_note_geom_offset(uint64_t shape) {
-    if (g_dspubgPxGeomOff) return;
-    DSPUBGVector lo = {}, hi = {};
-    if (ds_pubg_px_geom_local_aabb_at(shape, kDSPUBGPxGeometryOffset, lo, hi)) {
-        g_dspubgPxGeomOff = kDSPUBGPxGeometryOffset;
-        return;
-    }
-    for (uint64_t off : kDSPUBGPxGeomOffCandidates) {
-        if (off == kDSPUBGPxGeometryOffset) continue;
-        if (ds_pubg_px_geom_local_aabb_at(shape, off, lo, hi)) {
-            g_dspubgPxGeomOff = off;
-            return;
-        }
-    }
-}
-
-// NpShape.Shape2Actor is a PxTransform: quat (4 floats), then position (3
-// floats) at +0x10. Its offset moves with the pointer width for the same reason
-// the geometry union does, so the transform is located by its own signature - a
-// unit quaternion followed by a small position - instead of a fixed constant.
-static uint64_t g_dspubgPxPoseOff = 0;
-
-static bool ds_pubg_px_read_pose_at(uint64_t shape, uint64_t poseOff,
-                                    DSPUBGVector &outPos,
-                                    DSPUBGVector &outX,
-                                    DSPUBGVector &outY,
-                                    DSPUBGVector &outZ,
-                                    bool *outQuatOk) {
-    outPos = {};
-    outX = DSPUBGVector{ 1.0f, 0.0f, 0.0f };
-    outY = DSPUBGVector{ 0.0f, 1.0f, 0.0f };
-    outZ = DSPUBGVector{ 0.0f, 0.0f, 1.0f };
-    if (outQuatOk) *outQuatOk = false;
-
-    float q[4] = {};
-    if (!ds_pubg_read(shape + poseOff, q, sizeof(q))) return false;
-    float p[3] = {};
-    if (!ds_pubg_read(shape + poseOff + 0x10ULL, p, sizeof(p))) return false;
-
-    for (int i = 0; i < 4; i++) if (!isfinite(q[i])) return false;
-    for (int i = 0; i < 3; i++) if (!isfinite(p[i])) return false;
-
-    // A PxTransform position is a shape offset inside its actor, so a
-    // world-sized translation means the wrong slot was read.
-    const float mag = fabsf(p[0]) + fabsf(p[1]) + fabsf(p[2]);
-    if (mag > 8000.0f) return false;
-
-    const float n = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
-    const bool unitQuat = (n > 0.9f && n < 1.1f);
-    if (unitQuat) {
-        ds_pubg_quat_to_axes(q[0], q[1], q[2], q[3], outX, outY, outZ);
-        if (outQuatOk) *outQuatOk = true;
-    }
-    outPos = DSPUBGVector{ p[0], p[1], p[2] };
-    return true;
-}
-
-static bool ds_pubg_px_shape_local_pose(uint64_t shape,
-                                        DSPUBGVector &outPos,
-                                        DSPUBGVector &outX,
-                                        DSPUBGVector &outY,
-                                        DSPUBGVector &outZ) {
-    static const uint64_t kPoseCandidates[] = {
-        0x50ULL, 0x58ULL, 0x48ULL, 0x60ULL, 0x40ULL, 0x68ULL, 0x38ULL, 0x78ULL
-    };
-
-    if (g_dspubgPxPoseOff) {
-        return ds_pubg_px_read_pose_at(shape, g_dspubgPxPoseOff, outPos, outX, outY, outZ, nullptr);
-    }
-
-    // Only a unit-length quaternion identifies a real PxTransform: an identity
-    // transform is (0,0,0,1), which passes this test too. A slot with merely a
-    // plausible position is rejected - taking it shifted walls off their mesh.
-    for (uint64_t off : kPoseCandidates) {
-        DSPUBGVector pos = {}, x = {}, y = {}, z = {};
-        bool quatOk = false;
-        if (!ds_pubg_px_read_pose_at(shape, off, pos, x, y, z, &quatOk)) continue;
-        if (!quatOk) continue;
-        g_dspubgPxPoseOff = off;
-        outPos = pos; outX = x; outY = y; outZ = z;
-        return true;
-    }
-
-    // No transform found: the shape is used with an identity local pose, which
-    // is the common case for collision primitives attached directly.
-    return true;
-}
-
-// One PxShape -> world-space cover box, composed from the component transform
-// (world rotation and translation) and the shape's local pose.
-static bool ds_pubg_px_shape_box(uint64_t shape,
-                                 const DSPUBGVector &compLoc,
-                                 const DSPUBGVector &compX,
-                                 const DSPUBGVector &compY,
-                                 const DSPUBGVector &compZ,
-                                 DSPUBGObstacleBox &outBox) {
-    outBox = {};
-    if (!shape || !ds_pubg_valid(shape)) return false;
-
-    DSPUBGVector localLo = {}, localHi = {};
-    uint64_t usedGeomOff = 0;
-    if (!ds_pubg_px_geom_local_aabb(shape, localLo, localHi, &usedGeomOff)) { s_pxNoAabb++; return false; }
-
-    DSPUBGVector localMid = { (localLo.X + localHi.X) * 0.5f,
-                              (localLo.Y + localHi.Y) * 0.5f,
-                              (localLo.Z + localHi.Z) * 0.5f };
-    DSPUBGVector half = { (localHi.X - localLo.X) * 0.5f,
-                          (localHi.Y - localLo.Y) * 0.5f,
-                          (localHi.Z - localLo.Z) * 0.5f };
-
-    ds_pubg_px_note_geom_offset(shape);
-    // The type must come from the slot that actually decoded the bound; the
-    // cached value can differ from the probe that succeeded for this shape.
-    const uint64_t geomOff = usedGeomOff ? usedGeomOff
-                                         : (g_dspubgPxGeomOff ? g_dspubgPxGeomOff : kDSPUBGPxGeometryOffset);
-    int32_t geomType = (int32_t)ds_pubg_read_u32(shape + geomOff);
-    if (geomType >= 0 && geomType <= 6) s_pxGeomCount[geomType]++;
-    const bool rounded = (geomType == kDSPUBGPxGeomSphere || geomType == kDSPUBGPxGeomCapsule);
-
-    DSPUBGVector shapePos = {};
-    DSPUBGVector shapeX = { 1.0f, 0.0f, 0.0f };
-    DSPUBGVector shapeY = { 0.0f, 1.0f, 0.0f };
-    DSPUBGVector shapeZ = { 0.0f, 0.0f, 1.0f };
-    ds_pubg_px_shape_local_pose(shape, shapePos, shapeX, shapeY, shapeZ);
-
-    // Geometric centre in shape space, rotated into component space by the
-    // shape's own axes, then translated by the shape pose. Adding the two
-    // vectors without rotating first shifted offset shapes (window frames,
-    // door panels) sideways by the hull centre.
-    //
-    // No compScale multiply here: UE bakes the component scale into the PhysX
-    // geometry at creation (half extents and shape offsets are already in world
-    // units), so scaling the offset again pushed the primitive away from its
-    // visual mesh.
-    DSPUBGVector rotatedMid = ds_pubg_axes_apply(localMid, shapeX, shapeY, shapeZ);
-    DSPUBGVector worldOffset = ds_pubg_axes_apply(
-        DSPUBGVector{ rotatedMid.X + shapePos.X,
-                      rotatedMid.Y + shapePos.Y,
-                      rotatedMid.Z + shapePos.Z },
-        compX, compY, compZ);
-
-    outBox.center = DSPUBGVector{ compLoc.X + worldOffset.X,
-                                  compLoc.Y + worldOffset.Y,
-                                  compLoc.Z + worldOffset.Z };
-    outBox.extent = half;
-    outBox.axisX = ds_pubg_rotated_axes(compX, compY, compZ, shapeX);
-    outBox.axisY = ds_pubg_rotated_axes(compX, compY, compZ, shapeY);
-    outBox.axisZ = ds_pubg_rotated_axes(compX, compY, compZ, shapeZ);
-    ds_pubg_box_finalize(outBox);
-
-    if (!ds_pubg_box_is_sane(outBox)) { s_pxNoSane++; return false; }
-    if (!ds_pubg_box_is_valid_cover_ex(outBox, nullptr, rounded)) { s_pxNoCover++; return false; }
-    return true;
-}
-
-// Shape sources for one component: sync actor first, async twin second (a few
-// level actors only register in the async scene). The component's own world
-// pose is resolved here so callers never have to pass it - passing the camera
-// location instead placed every PhysX box on top of the player.
-static int ds_pubg_px_component_boxes(uint64_t comp,
-                                      const DSPUBGVector &camLoc,
-                                      DSPUBGObstacleBox *outBoxes,
-                                      int maxBoxes) {
-    if (!outBoxes || maxBoxes <= 0) return 0;
-    if (!comp || !ds_pubg_valid(comp)) return 0;
-
-    DSPUBGVector compLoc = {}, compScale = { 1.0f, 1.0f, 1.0f };
-    DSPUBGVector compX = {}, compY = {}, compZ = {};
-    if (!ds_pubg_component_world_pose(comp, compLoc, compX, compY, compZ, compScale)) return 0;
-
-    static const uint64_t kActorIds[] = {
-        kDSPUBGBodyInstanceSyncId, kDSPUBGBodyInstanceAsyncId
-    };
-
-    int written = 0;
-    for (uint64_t idOff : kActorIds) {
-        uint64_t rigidActor = ds_pubg_read_ptr(comp + kDSPUBGBodyInstanceOffset + idOff);
-        if (!rigidActor || !ds_pubg_valid(rigidActor)) continue;
-
-        uint64_t shapes[32] = {0};
-        int shapeCount = ds_pubg_px_collect_shapes(rigidActor, shapes, 32);
-        if (shapeCount > 0) s_obsPxActors++;
-        s_obsPxShapes += (uint32_t)(shapeCount > 0 ? shapeCount : 0);
-        for (int i = 0; i < shapeCount && written < maxBoxes; i++) {
-            DSPUBGObstacleBox box = {};
-            if (!ds_pubg_px_shape_box(shapes[i], compLoc, compX, compY, compZ, box)) continue;
-            if (ds_pubg_box_contains_point(box, camLoc, 10.0f)) continue;
-            s_obsPxBoxes++;
-            outBoxes[written++] = box;
-        }
-    }
-    return written;
-}
-
-static inline bool ds_pubg_box_is_valid_cover(const DSPUBGObstacleBox &box, const DSPUBGVector *rayStart);
-static const int kDSPUBGMaxObstacles = 4096;
-static DSPUBGObstacleBox s_obstacles[kDSPUBGMaxObstacles] = {};
-static int s_obstacleCount = 0;
-static DSPUBGVector s_lastObstacleScanLoc = { 999999.0f, 999999.0f, 999999.0f };
-static uint64_t s_obstacleLastScanTick = 0;
-// Live counters of the Actor & Shape Classification system (see section A).
-static size_t s_staticActorCount = 0;
-static size_t s_dynamicActorCount = 0;
-// Obstacle pre-pass stage counters (diagnostics: shows exactly which stage
-// of the scan fails: A=actors iterated, N=names resolved, S=scenery
-// classified, B=boxes extracted, L=levels scanned).
-static uint32_t s_obsScanActors = 0;
-static uint32_t s_obsNameOk = 0;
-static uint32_t s_obsScenery = 0;
-static uint32_t s_obsBoxOk = 0;
-static uint32_t s_obsLevels = 0;
-// Per-stage drop counters for one scan. S122/B0 only says "no boxes"; these
-// say where the actors went: no root component, no components at all, or
-// components that yielded no geometry from any of the three extractors.
-static uint32_t s_obsNoRoot = 0;
-static uint32_t s_obsNoComp = 0;
-static uint32_t s_obsNoMeshComp = 0;
-static uint32_t s_obsCompBoxes = 0;
-static uint32_t s_obsPxActorsSeen = 0;
-static uint32_t s_obsRootZero = 0;
-static uint32_t s_obsFar = 0;
-static uint32_t s_obsPxIdFound = 0;
-static uint32_t s_obsUnnamed = 0;
 
 // Live informative diagnostic HUD string (disabled per user request)
 static const char* ds_pubg_get_debug_status(void) {
@@ -4447,808 +2756,7 @@ static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint6
     return (isMatchGs && hasLiveLocalPawn);
 }
 
-// Gate on the class of the *mesh object itself*, not on the component's FName.
-// A light / volume / decal / audio component does not point at a UStaticMesh at
-// 0xA30; what lives there is padding that almost never resolves to a live
-// UObject, and never to one whose class name is "StaticMesh". Resolving the
-// mesh class also survives builds where the component FName is unreadable,
-// which would otherwise silently zero out every obstacle box.
-static inline bool ds_pubg_object_class_contains(uint64_t obj, const char *needle) {
-    if (!obj || !needle || !ds_pubg_valid(obj)) return false;
-    char className[64] = {0};
-    if (!ds_pubg_get_actor_name(obj, className, sizeof(className))) return false;
-    return strstr(className, needle) != nullptr;
-}
-
-// A component is usable as an occlusion source only if the mesh pointer at
-// 0xA30 actually leads to a UStaticMesh.
-// A live UStaticMesh also exposes a BodySetup at 0xB0 that points at a
-// UBodySetup carrying an FKAggregateGeom. Checking that shape is structural: it
-// holds whether or not the name pool resolved, which matters because the name
-// gate alone dropped every obstacle when GNames degraded.
-static inline bool ds_pubg_looks_like_static_mesh(uint64_t mesh) {
-    if (!mesh || !ds_pubg_valid(mesh)) return false;
-    if (ds_pubg_object_class_contains(mesh, "StaticMesh")) return true;
-
-    uint64_t bodySetup = ds_pubg_read_ptr(mesh + 0xB0ULL);
-    if (!bodySetup || !ds_pubg_valid(bodySetup)) return false;
-    if (!ds_pubg_object_class_contains(bodySetup, "BodySetup")) {
-        // Even without a resolvable class, a BodySetup always starts with an
-        // FKAggregateGeom whose TArrays must be readable or empty.
-        uint64_t boxData = ds_pubg_read_ptr(bodySetup + 0x28ULL + 0x30ULL);
-        uint32_t boxCount = ds_pubg_read_u32(bodySetup + 0x28ULL + 0x30ULL + 0x8ULL);
-        if (boxCount > 0 && boxCount <= 4096 && (!boxData || !ds_pubg_valid(boxData))) return false;
-    }
-    return true;
-}
-
-static inline bool ds_pubg_component_has_static_mesh(uint64_t comp, uint64_t &outMesh) {
-    outMesh = 0;
-    if (!comp || !ds_pubg_valid(comp)) return false;
-    uint64_t mesh = ds_pubg_read_ptr(comp + 0xA30ULL);
-    if (!ds_pubg_looks_like_static_mesh(mesh)) return false;
-    outMesh = mesh;
-    return true;
-}
-
-// Soft scenery must never become an occlusion box: foliage and terrain would
-// otherwise block the sight line to an enemy standing in the open next to a
-// bush, and a landscape heightfield box covers the whole map.
-static inline bool ds_pubg_is_soft_scenery_name(const char *name) {
-    if (!name || !name[0]) return false;
-    // Only reject far-field / soft geometry. "Tree" also appears in
-    // "TreeHouse" style props, so the check is limited to plain class tokens.
-    return (strstr(name, "Foliage") || strstr(name, "Grass") ||
-            strstr(name, "Bush") || strstr(name, "Landscape") ||
-            strstr(name, "Terrain") || strstr(name, "Heightfield") ||
-            strstr(name, "Water") || strstr(name, "Sky") ||
-            strstr(name, "Cloud") || strstr(name, "Fog") ||
-            strstr(name, "Particle") || strstr(name, "Decal") ||
-            strstr(name, "Decorative") || strstr(name, "TreeFoliage") ||
-            strstr(name, "Billboard"));
-}
-
-// Reads the component's world pose by walking AttachParent. PUBG attaches the
-// building collision components to the level actor, so RelativeLocation alone
-// points at the wrong place (that was one root cause of the vischeck failing
-// near doorways and corners). Composes the UE relative-transform chain:
-//   World = RootLocal * ... * ParentLocal * CompLocal
-// Each local transform is (rotation axes, scale, translation) and the walk
-// goes leaf -> root, prepending every parent onto the accumulated transform.
-static bool ds_pubg_component_world_pose(uint64_t comp,
-                                         DSPUBGVector &outLoc,
-                                         DSPUBGVector &outX,
-                                         DSPUBGVector &outY,
-                                         DSPUBGVector &outZ,
-                                         DSPUBGVector &outScale) {
-    outLoc = DSPUBGVector{};
-    outX = DSPUBGVector{ 1.0f, 0.0f, 0.0f };
-    outY = DSPUBGVector{ 0.0f, 1.0f, 0.0f };
-    outZ = DSPUBGVector{ 0.0f, 0.0f, 1.0f };
-    outScale = DSPUBGVector{ 1.0f, 1.0f, 1.0f };
-    if (!comp || !ds_pubg_valid(comp)) return false;
-
-    bool have = false;
-    DSPUBGVector accLoc = {};
-    DSPUBGVector accScale = { 1.0f, 1.0f, 1.0f };
-    DSPUBGVector accX = { 1.0f, 0.0f, 0.0f };
-    DSPUBGVector accY = { 0.0f, 1.0f, 0.0f };
-    DSPUBGVector accZ = { 0.0f, 0.0f, 1.0f };
-
-    uint64_t node = comp;
-    for (int depth = 0; depth < 6; depth++) {
-        if (!node || !ds_pubg_valid(node)) break;
-
-        DSPUBGVector loc = {};
-        if (!ds_pubg_read(node + kDSPUBGSceneCompRelativeLocOffset, &loc, sizeof(loc))) break;
-        DSPUBGRotator rot = {};
-        ds_pubg_read(node + 0x1F0ULL, &rot, sizeof(rot));
-        DSPUBGVector sc = { 1.0f, 1.0f, 1.0f };
-        ds_pubg_read(node + 0x1FCULL, &sc, sizeof(sc));
-        if (fabsf(sc.X) < 0.01f) sc.X = 1.0f;
-        if (fabsf(sc.Y) < 0.01f) sc.Y = 1.0f;
-        if (fabsf(sc.Z) < 0.01f) sc.Z = 1.0f;
-
-        DSPUBGVector nx = {}, ny = {}, nz = {};
-        ds_pubg_rotator_to_axes(rot, nx, ny, nz);
-
-        if (!have) {
-            accLoc = loc;
-            accScale = sc;
-            accX = nx;
-            accY = ny;
-            accZ = nz;
-            have = true;
-        } else {
-            // parent ∘ acc
-            DSPUBGVector scaledLoc = ds_pubg_axes_scale(accLoc, sc);
-            DSPUBGVector rotatedLoc = ds_pubg_axes_apply(scaledLoc, nx, ny, nz);
-            accLoc.X = rotatedLoc.X + loc.X;
-            accLoc.Y = rotatedLoc.Y + loc.Y;
-            accLoc.Z = rotatedLoc.Z + loc.Z;
-            accScale.X *= sc.X;
-            accScale.Y *= sc.Y;
-            accScale.Z *= sc.Z;
-            accX = ds_pubg_rotated_axes(nx, ny, nz, accX);
-            accY = ds_pubg_rotated_axes(nx, ny, nz, accY);
-            accZ = ds_pubg_rotated_axes(nx, ny, nz, accZ);
-        }
-
-        node = ds_pubg_read_ptr(node + kDSPUBGSceneCompAttachedParentOffset);
-    }
-
-    if (!have) return false;
-    if (!isfinite(accLoc.X) || !isfinite(accLoc.Y) || !isfinite(accLoc.Z)) return false;
-
-    outLoc = accLoc;
-    outScale = accScale;
-    outX = accX;
-    outY = accY;
-    outZ = accZ;
-    return true;
-}
-
-// Emits every box collision element of UBodySetup.AggGeom (the real cooked
-// collision of the mesh) plus the static mesh bounds as a fallback.
-//   UStaticMeshComponent.StaticMesh  0xA30
-//   UStaticMesh.BodySetup            0xB0
-//   UBodySetup.AggGeom               0x28
-//   FKAggregateGeom.BoxElems         0x30 (TArray, stride 0xB0)
-//   FKBoxElem: Center 0x80, Rotation 0x8C, X/Y/Z half 0x98/0x9C/0xA0
-static int ds_pubg_extract_component_boxes(uint64_t comp,
-                                           const DSPUBGVector &camLoc,
-                                           DSPUBGObstacleBox *outBoxes,
-                                           int maxBoxes) {
-    if (!outBoxes || maxBoxes <= 0) return 0;
-    if (!comp || !ds_pubg_valid(comp)) return 0;
-
-    // Only real static mesh components resolve to a UStaticMesh at 0xA30.
-    // Lights, audio emitters, volumes, decals and triggers do not, and reading
-    // their padding as a mesh produced phantom obstacle boxes.
-    uint64_t staticMesh = 0;
-    if (!ds_pubg_component_has_static_mesh(comp, staticMesh)) return 0;
-
-    DSPUBGVector compLoc = {}, compScale = { 1.0f, 1.0f, 1.0f };
-    DSPUBGVector compX = {}, compY = {}, compZ = {};
-    if (!ds_pubg_component_world_pose(comp, compLoc, compX, compY, compZ, compScale)) return 0;
-    if (!isfinite(compLoc.X) || !isfinite(compLoc.Y) || !isfinite(compLoc.Z)) return 0;
-
-    uint64_t bodySetup = ds_pubg_read_ptr(staticMesh + 0xB0ULL);
-
-    int written = 0;
-
-    // BuildScale3D scales the cooked collision back to mesh space. It lives on
-    // UBodySetup and applies to every primitive kind, so it is read once here
-    // and shared by the box / convex / capsule passes below.
-    DSPUBGVector buildScale = { 1.0f, 1.0f, 1.0f };
-    if (bodySetup && ds_pubg_valid(bodySetup)) {
-        ds_pubg_read(bodySetup + 0x3B4ULL, &buildScale, sizeof(buildScale));
-        if (fabsf(buildScale.X) < 0.01f) buildScale.X = 1.0f;
-        if (fabsf(buildScale.Y) < 0.01f) buildScale.Y = 1.0f;
-        if (fabsf(buildScale.Z) < 0.01f) buildScale.Z = 1.0f;
-    }
-
-    if (bodySetup && ds_pubg_valid(bodySetup)) {
-        uint64_t boxData = ds_pubg_read_ptr(bodySetup + 0x28ULL + 0x30ULL);
-        uint32_t boxCount = ds_pubg_read_u32(bodySetup + 0x28ULL + 0x30ULL + 0x8ULL);
-        if (boxData && ds_pubg_valid(boxData) && boxCount > 0 && boxCount <= 256) {
-            if (boxCount > (uint32_t)maxBoxes) boxCount = (uint32_t)maxBoxes;
-            for (uint32_t i = 0; i < boxCount; i++) {
-                uint64_t elem = boxData + (uint64_t)i * 0xB0ULL;
-                DSPUBGVector eCenter = {};
-                DSPUBGRotator eRot = {};
-                float ex = 0.0f, ey = 0.0f, ez = 0.0f;
-                if (!ds_pubg_read(elem + 0x80ULL, &eCenter, sizeof(eCenter))) break;
-                ds_pubg_read(elem + 0x8CULL, &eRot, sizeof(eRot));
-                ds_pubg_read(elem + 0x98ULL, &ex, sizeof(ex));
-                ds_pubg_read(elem + 0x9CULL, &ey, sizeof(ey));
-                ds_pubg_read(elem + 0xA0ULL, &ez, sizeof(ez));
-
-                ex *= 0.5f * fabsf(buildScale.X) * fabsf(compScale.X);
-                ey *= 0.5f * fabsf(buildScale.Y) * fabsf(compScale.Y);
-                ez *= 0.5f * fabsf(buildScale.Z) * fabsf(compScale.Z);
-                if (!isfinite(ex) || !isfinite(ey) || !isfinite(ez)) continue;
-                if (ex < 1.0f && ey < 1.0f && ez < 1.0f) continue;
-                if (ex > 20000.0f || ey > 20000.0f || ez > 20000.0f) continue;
-
-                DSPUBGVector localOffset = ds_pubg_axes_scale(
-                    eCenter,
-                    DSPUBGVector{ fabsf(buildScale.X) * fabsf(compScale.X),
-                                  fabsf(buildScale.Y) * fabsf(compScale.Y),
-                                  fabsf(buildScale.Z) * fabsf(compScale.Z) });
-                DSPUBGVector worldOffset = ds_pubg_axes_apply(localOffset, compX, compY, compZ);
-
-                DSPUBGObstacleBox box = {};
-                box.center.X = compLoc.X + worldOffset.X;
-                box.center.Y = compLoc.Y + worldOffset.Y;
-                box.center.Z = compLoc.Z + worldOffset.Z;
-                box.extent = DSPUBGVector{ ex, ey, ez };
-
-                DSPUBGVector exX = {}, exY = {}, exZ = {};
-                ds_pubg_rotator_to_axes(eRot, exX, exY, exZ);
-                box.axisX = ds_pubg_rotated_axes(compX, compY, compZ, exX);
-                box.axisY = ds_pubg_rotated_axes(compX, compY, compZ, exY);
-                box.axisZ = ds_pubg_rotated_axes(compX, compY, compZ, exZ);
-                ds_pubg_box_finalize(box);
-                if (!ds_pubg_box_is_valid_cover(box, nullptr)) continue;
-                outBoxes[written++] = box;
-            }
-        }
-    }
-
-    // Convex hulls: PUBG cooks most building shells as convex elements, not
-    // boxes, so a mesh whose walls are convex reported zero obstacles and the
-    // ray passed straight through the wall. ElemBox is the hull's own mesh-space
-    // AABB, which is the correct conservative stand-in for a ray test.
-    //   FKAggregateGeom.ConvexElems 0x90 (stride 0xA0)
-    //   FKConvexElem.ElemBox        0x38 (FBox: Min 0x00, Max 0x0C)
-    if (bodySetup && ds_pubg_valid(bodySetup)) {
-        uint64_t convexData = ds_pubg_read_ptr(bodySetup + 0x28ULL + 0x90ULL);
-        uint32_t convexCount = ds_pubg_read_u32(bodySetup + 0x28ULL + 0x90ULL + 0x8ULL);
-        if (convexData && ds_pubg_valid(convexData) && convexCount > 0 && convexCount <= 256) {
-            for (uint32_t i = 0; i < convexCount && written < maxBoxes; i++) {
-                uint64_t elem = convexData + (uint64_t)i * 0xA0ULL;
-                DSPUBGVector eMin = {}, eMax = {};
-                if (!ds_pubg_read(elem + 0x38ULL, &eMin, sizeof(eMin))) break;
-                if (!ds_pubg_read(elem + 0x44ULL, &eMax, sizeof(eMax))) break;
-                if (!isfinite(eMin.X) || !isfinite(eMax.X)) continue;
-
-                DSPUBGVector half = { (eMax.X - eMin.X) * 0.5f,
-                                      (eMax.Y - eMin.Y) * 0.5f,
-                                      (eMax.Z - eMin.Z) * 0.5f };
-                DSPUBGVector mid = { (eMax.X + eMin.X) * 0.5f,
-                                     (eMax.Y + eMin.Y) * 0.5f,
-                                     (eMax.Z + eMin.Z) * 0.5f };
-                half.X *= fabsf(buildScale.X) * fabsf(compScale.X);
-                half.Y *= fabsf(buildScale.Y) * fabsf(compScale.Y);
-                half.Z *= fabsf(buildScale.Z) * fabsf(compScale.Z);
-                if (half.X < 4.0f && half.Y < 4.0f && half.Z < 4.0f) continue;
-                if (!isfinite(half.X) || !isfinite(half.Y) || !isfinite(half.Z)) continue;
-
-                DSPUBGVector scaledMid = ds_pubg_axes_scale(
-                    mid,
-                    DSPUBGVector{ fabsf(buildScale.X) * fabsf(compScale.X),
-                                  fabsf(buildScale.Y) * fabsf(compScale.Y),
-                                  fabsf(buildScale.Z) * fabsf(compScale.Z) });
-                DSPUBGVector worldOffset = ds_pubg_axes_apply(scaledMid, compX, compY, compZ);
-
-                DSPUBGObstacleBox box = {};
-                box.center.X = compLoc.X + worldOffset.X;
-                box.center.Y = compLoc.Y + worldOffset.Y;
-                box.center.Z = compLoc.Z + worldOffset.Z;
-                box.extent = half;
-                box.axisX = compX;
-                box.axisY = compY;
-                box.axisZ = compZ;
-                ds_pubg_box_finalize(box);
-                if (!ds_pubg_box_is_valid_cover(box, &camLoc)) continue;
-                outBoxes[written++] = box;
-            }
-        }
-    }
-
-    // Capsules (FKSphylElem): pillars, trunks, railings, pipes.
-    //   FKAggregateGeom.SphylElems 0x60 (stride 0xA0)
-    //   Center 0x80, Rotation 0x8C, Radius 0x98, Length 0x9C
-    if (bodySetup && ds_pubg_valid(bodySetup)) {
-        uint64_t sphylData = ds_pubg_read_ptr(bodySetup + 0x28ULL + 0x60ULL);
-        uint32_t sphylCount = ds_pubg_read_u32(bodySetup + 0x28ULL + 0x60ULL + 0x8ULL);
-        if (sphylData && ds_pubg_valid(sphylData) && sphylCount > 0 && sphylCount <= 256) {
-            for (uint32_t i = 0; i < sphylCount && written < maxBoxes; i++) {
-                uint64_t elem = sphylData + (uint64_t)i * 0xA0ULL;
-                DSPUBGVector eCenter = {};
-                DSPUBGRotator eRot = {};
-                float radius = 0.0f, length = 0.0f;
-                if (!ds_pubg_read(elem + 0x80ULL, &eCenter, sizeof(eCenter))) break;
-                ds_pubg_read(elem + 0x8CULL, &eRot, sizeof(eRot));
-                ds_pubg_read(elem + 0x98ULL, &radius, sizeof(radius));
-                ds_pubg_read(elem + 0x9CULL, &length, sizeof(length));
-                if (!isfinite(radius) || radius <= 0.0f) continue;
-                if (!isfinite(length) || length < 0.0f) continue;
-
-                float ax = radius * fabsf(buildScale.X) * fabsf(compScale.X);
-                float ay = radius * fabsf(buildScale.Y) * fabsf(compScale.Y);
-                float az = (radius + length) * fabsf(buildScale.Z) * fabsf(compScale.Z);
-                if (ax < 3.0f && ay < 3.0f && az < 3.0f) continue;
-
-                DSPUBGVector localOffset = ds_pubg_axes_scale(
-                    eCenter,
-                    DSPUBGVector{ fabsf(buildScale.X) * fabsf(compScale.X),
-                                  fabsf(buildScale.Y) * fabsf(compScale.Y),
-                                  fabsf(buildScale.Z) * fabsf(compScale.Z) });
-                DSPUBGVector worldOffset = ds_pubg_axes_apply(localOffset, compX, compY, compZ);
-
-                DSPUBGObstacleBox box = {};
-                box.center.X = compLoc.X + worldOffset.X;
-                box.center.Y = compLoc.Y + worldOffset.Y;
-                box.center.Z = compLoc.Z + worldOffset.Z;
-                box.extent = DSPUBGVector{ ax, ay, az };
-                DSPUBGVector exX = {}, exY = {}, exZ = {};
-                ds_pubg_rotator_to_axes(eRot, exX, exY, exZ);
-                box.axisX = ds_pubg_rotated_axes(compX, compY, compZ, exX);
-                box.axisY = ds_pubg_rotated_axes(compX, compY, compZ, exY);
-                box.axisZ = ds_pubg_rotated_axes(compX, compY, compZ, exZ);
-                ds_pubg_box_finalize(box);
-                if (!ds_pubg_box_is_valid_cover(box, nullptr)) continue;
-                outBoxes[written++] = box;
-            }
-        }
-    }
-
-    if (written > 0) return written;
-
-    // Fallback: whole-mesh bounds. Good enough for simple props.
-    DSPUBGVector boxOrigin = {}, boxExtent = {};
-    bool gotBounds = false;
-
-    if (staticMesh && ds_pubg_valid(staticMesh)) {
-        ds_pubg_read(staticMesh + 0x1A8ULL, &boxOrigin, sizeof(boxOrigin));
-        ds_pubg_read(staticMesh + 0x1B4ULL, &boxExtent, sizeof(boxExtent));
-        if (boxExtent.X > 5.0f && boxExtent.Y > 5.0f && boxExtent.Z > 5.0f && boxExtent.X < 30000.0f) {
-            gotBounds = true;
-        } else {
-            ds_pubg_read(staticMesh + 0x54ULL, &boxOrigin, sizeof(boxOrigin));
-            ds_pubg_read(staticMesh + 0x60ULL, &boxExtent, sizeof(boxExtent));
-            if (boxExtent.X > 5.0f && boxExtent.Y > 5.0f && boxExtent.Z > 5.0f && boxExtent.X < 30000.0f) {
-                gotBounds = true;
-            }
-        }
-    }
-
-    // No third fallback: 0xB8C is USkinnedMeshComponent.CachedLocalBounds and
-    // does not exist on UStaticMeshComponent. Reading it returned whatever
-    // happened to live in UStaticMeshComponent's padding, which produced huge
-    // phantom boxes around lights, audio emitters, volumes and decals - the
-    // cause of "everything is red in an empty field".
-    if (!gotBounds) return 0;
-
-    boxExtent.X *= fabsf(compScale.X);
-    boxExtent.Y *= fabsf(compScale.Y);
-    boxExtent.Z *= fabsf(compScale.Z);
-
-    DSPUBGObstacleBox box = {};
-    box.center = compLoc;
-    if (fabsf(boxOrigin.X) > 0.1f || fabsf(boxOrigin.Y) > 0.1f || fabsf(boxOrigin.Z) > 0.1f) {
-        DSPUBGVector scaledOrigin = ds_pubg_axes_scale(boxOrigin, compScale);
-        DSPUBGVector worldOffset = ds_pubg_axes_apply(scaledOrigin, compX, compY, compZ);
-        box.center.X += worldOffset.X;
-        box.center.Y += worldOffset.Y;
-        box.center.Z += worldOffset.Z;
-    }
-    box.extent = boxExtent;
-    box.axisX = compX;
-    box.axisY = compY;
-    box.axisZ = compZ;
-    ds_pubg_box_finalize(box);
-    if (!ds_pubg_box_is_valid_cover(box, &camLoc)) return 0;
-    outBoxes[0] = box;
-    return 1;
-}
-
-// Instanced static meshes carry their own per-instance matrices. One actor can
-// hold hundreds of wall modules, which is why the old one-box-per-actor scan
-// produced an almost empty obstacle set.
-//   UInstancedStaticMeshComponent.PerInstanceSMData 0xBD8 (TArray<FMatrix 0x40>)
-static int ds_pubg_extract_instanced_boxes(uint64_t comp,
-                                           const DSPUBGVector &camLoc,
-                                           DSPUBGObstacleBox *outBoxes,
-                                           int maxBoxes) {
-    if (!outBoxes || maxBoxes <= 0) return 0;
-    if (!comp || !ds_pubg_valid(comp)) return 0;
-
-    // 0xBD8 is inside UStaticMeshComponent's padding, so the array there must be
-    // validated before use: a plain static mesh would read garbage as instances.
-    // The class name is a hint only - PUBG ships several subclasses (Color /
-    // Photon / Creative / Hierarchical) and the pool may not resolve them, so a
-    // missing or unmatched name must not disable the instanced path.
-    char compClassName[64] = {0};
-    if (ds_pubg_get_actor_name(comp, compClassName, sizeof(compClassName))) {
-        if (strstr(compClassName, "Foliage")) return 0;
-    }
-
-    // The instance data at 0xBD8 only means something when the component truly
-    // owns a static mesh; otherwise the count/matrix pair is padding.
-    uint64_t mesh = 0;
-    if (!ds_pubg_component_has_static_mesh(comp, mesh)) return 0;
-
-    DSPUBGVector compLoc = {}, compScale = { 1.0f, 1.0f, 1.0f };
-    DSPUBGVector compX = {}, compY = {}, compZ = {};
-    if (!ds_pubg_component_world_pose(comp, compLoc, compX, compY, compZ, compScale)) return 0;
-
-    DSPUBGVector meshOrigin = {}, meshExtent = {};
-    ds_pubg_read(mesh + 0x1A8ULL, &meshOrigin, sizeof(meshOrigin));
-    ds_pubg_read(mesh + 0x1B4ULL, &meshExtent, sizeof(meshExtent));
-    if (!(meshExtent.X > 5.0f && meshExtent.Y > 5.0f && meshExtent.Z > 5.0f)) {
-        ds_pubg_read(mesh + 0x54ULL, &meshOrigin, sizeof(meshOrigin));
-        ds_pubg_read(mesh + 0x60ULL, &meshExtent, sizeof(meshExtent));
-    }
-    if (!(meshExtent.X > 1.0f && meshExtent.Y > 1.0f && meshExtent.Z > 1.0f)) return 0;
-    if (meshExtent.X > 30000.0f || meshExtent.Y > 30000.0f || meshExtent.Z > 30000.0f) return 0;
-
-    uint64_t data = ds_pubg_read_ptr(comp + 0xBD8ULL);
-    uint32_t count = ds_pubg_read_u32(comp + 0xBD8ULL + 0x8ULL);
-    if (!data || !ds_pubg_valid(data) || count == 0 || count > 20000) return 0;
-
-    float maxDistSq = 25000.0f * 25000.0f;
-    int written = 0;
-
-    for (uint32_t i = 0; i < count && written < maxBoxes; i++) {
-        uint64_t m = data + (uint64_t)i * 0x40ULL;
-        float mat[16] = {};
-        if (!ds_pubg_read(m, mat, sizeof(mat))) break;
-
-        // FMatrix: XPlane(0..3), YPlane(4..7), ZPlane(8..11), WPlane(12..15)
-        DSPUBGVector iX = { mat[0], mat[1], mat[2] };
-        DSPUBGVector iY = { mat[4], mat[5], mat[6] };
-        DSPUBGVector iZ = { mat[8], mat[9], mat[10] };
-        DSPUBGVector iPos = { mat[12], mat[13], mat[14] };
-        if (!isfinite(iPos.X) || !isfinite(iPos.Y) || !isfinite(iPos.Z)) continue;
-
-        float sx = hypotf(hypotf(iX.X, iX.Y), iX.Z);
-        float sy = hypotf(hypotf(iY.X, iY.Y), iY.Z);
-        float sz = hypotf(hypotf(iZ.X, iZ.Y), iZ.Z);
-        if (!isfinite(sx) || !isfinite(sy) || !isfinite(sz)) continue;
-        if (sx < 0.01f || sy < 0.01f || sz < 0.01f) continue;
-        if (sx > 100.0f || sy > 100.0f || sz > 100.0f) continue;
-
-        DSPUBGVector iAxisX = { iX.X / sx, iX.Y / sx, iX.Z / sx };
-        DSPUBGVector iAxisY = { iY.X / sy, iY.Y / sy, iY.Z / sy };
-        DSPUBGVector iAxisZ = { iZ.X / sz, iZ.Y / sz, iZ.Z / sz };
-
-        DSPUBGVector instLoc = ds_pubg_axes_scale(iPos, compScale);
-        DSPUBGVector worldPos = ds_pubg_axes_apply(instLoc, compX, compY, compZ);
-        DSPUBGVector center = { compLoc.X + worldPos.X, compLoc.Y + worldPos.Y, compLoc.Z + worldPos.Z };
-
-        float dx = center.X - camLoc.X;
-        float dy = center.Y - camLoc.Y;
-        float dz = center.Z - camLoc.Z;
-        if (dx * dx + dy * dy + dz * dz > maxDistSq) continue;
-
-        DSPUBGObstacleBox box = {};
-        box.center = center;
-        box.extent.X = meshExtent.X * sx * fabsf(compScale.X);
-        box.extent.Y = meshExtent.Y * sy * fabsf(compScale.Y);
-        box.extent.Z = meshExtent.Z * sz * fabsf(compScale.Z);
-        box.axisX = ds_pubg_rotated_axes(compX, compY, compZ, iAxisX);
-        box.axisY = ds_pubg_rotated_axes(compX, compY, compZ, iAxisY);
-        box.axisZ = ds_pubg_rotated_axes(compX, compY, compZ, iAxisZ);
-        ds_pubg_box_finalize(box);
-        if (!ds_pubg_box_is_valid_cover(box, nullptr)) continue;
-        outBoxes[written++] = box;
-    }
-
-    return written;
-}
-
-static bool ds_pubg_ray_intersects_box(
-    const DSPUBGVector &rayStart,
-    const DSPUBGVector &rayEnd,
-    const DSPUBGObstacleBox &box)
-{
-    DSPUBGVector dir = { rayEnd.X - rayStart.X, rayEnd.Y - rayStart.Y, rayEnd.Z - rayStart.Z };
-    float len = hypotf(hypotf(dir.X, dir.Y), dir.Z);
-    if (len < 10.0f) return false;
-    float invLen = 1.0f / len;
-    DSPUBGVector d = { dir.X * invLen, dir.Y * invLen, dir.Z * invLen };
-
-    // 1. Fast bounding sphere rejection test
-    DSPUBGVector v = { box.center.X - rayStart.X, box.center.Y - rayStart.Y, box.center.Z - rayStart.Z };
-    float t_proj = v.X * d.X + v.Y * d.Y + v.Z * d.Z;
-    float radius = box.radius;
-    if (t_proj < -radius || t_proj > len + radius) return false;
-
-    float vSq = v.X * v.X + v.Y * v.Y + v.Z * v.Z;
-    float dPerpSq = vSq - t_proj * t_proj;
-    if (dPerpSq > radius * radius) return false;
-
-    // 2. Kay-Kajiya slab test along each of the 3 world-space box axes
-    DSPUBGVector diff = { rayStart.X - box.center.X, rayStart.Y - box.center.Y, rayStart.Z - box.center.Z };
-    float tMin = 0.0f;
-    float tMax = len;
-
-    auto testSlab = [&](const DSPUBGVector &axis, float ext) -> bool {
-        float f = axis.X * d.X + axis.Y * d.Y + axis.Z * d.Z;
-        float s = axis.X * diff.X + axis.Y * diff.Y + axis.Z * diff.Z;
-        if (fabsf(f) > 1e-6f) {
-            float t1 = (-s - ext) / f;
-            float t2 = (-s + ext) / f;
-            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
-            if (t1 > tMin) tMin = t1;
-            if (t2 < tMax) tMax = t2;
-            if (tMin > tMax) return false;
-        } else {
-            if (fabsf(s) > ext) return false;
-        }
-        return true;
-    };
-
-    if (!testSlab(box.axisX, box.extent.X)) return false;
-    if (!testSlab(box.axisY, box.extent.Y)) return false;
-    if (!testSlab(box.axisZ, box.extent.Z)) return false;
-
-    // Must intersect strictly between camera and target. A box that swallows
-    // the camera (tMin == 0) is rejected on purpose: aggregate bounds that
-    // cover the player are over-approximations, and letting them block turned
-    // every enemy red in the first field test. Real occluders are extracted
-    // per collision primitive, so they never contain the camera.
-    return (tMin > 10.0f && tMin < len - 10.0f && tMin <= tMax);
-}
-
-static bool ds_pubg_is_blocked_by_obstacle(const DSPUBGVector &camLoc, const DSPUBGVector &targetLoc) {
-    if (s_obstacleCount <= 0) return false;
-
-    // Broad phase: reject every box that cannot possibly lie on the segment
-    // cam->target before running the full slab test. With up to 4096 boxes and
-    // six rays per enemy this keeps the per-frame cost bounded.
-    float segX = targetLoc.X - camLoc.X;
-    float segY = targetLoc.Y - camLoc.Y;
-    float segZ = targetLoc.Z - camLoc.Z;
-    float segLenSq = segX * segX + segY * segY + segZ * segZ;
-    if (segLenSq < 100.0f) return false;
-
-    for (int i = 0; i < s_obstacleCount; i++) {
-        const DSPUBGObstacleBox &box = s_obstacles[i];
-        float vx = box.center.X - camLoc.X;
-        float vy = box.center.Y - camLoc.Y;
-        float vz = box.center.Z - camLoc.Z;
-        // Cheap sphere/segment distance test.
-        float t = (vx * segX + vy * segY + vz * segZ) / segLenSq;
-        if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
-        float dx = vx - segX * t;
-        float dy = vy - segY * t;
-        float dz = vz - segZ * t;
-        float r = box.radius;
-        if (dx * dx + dy * dy + dz * dz > r * r) continue;
-
-        if (ds_pubg_ray_intersects_box(camLoc, targetLoc, s_obstacles[i])) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static inline bool ds_pubg_ray_has_line_of_sight(const DSPUBGVector &start, const DSPUBGVector &target) {
-    // Map StaticMesh Collision Box Query (Ray-OBB Kay-Kajiya slab test)
-    if (s_obstacleCount > 0) {
-        if (ds_pubg_is_blocked_by_obstacle(start, target)) {
-            return false; // Blocked by StaticMesh building / wall box
-        }
-    }
-
-    return true; // Clear line of sight
-}
-
-// ===========================================================================
-// A. ACTOR & SHAPE CLASSIFICATION SYSTEM
-// ---------------------------------------------------------------------------
-// The ESP walks thousands of level actors every frame. Instead of treating all
-// of them the same way, every actor is classified into exactly one bucket so
-// each consumer can use the cheapest strategy:
-//
-//   [A1] Static Actors   - immutable world geometry (houses, walls, terrain,
-//                          foliage). Their world transform + collision OBB is
-//                          captured ONCE and cached, so later frames cost
-//                          zero memory reads.
-//   [A2] Dynamic Actors  - everything that moves (players, bots, vehicles,
-//                          loot). Their transform matrix is refreshed every
-//                          frame so we always know where they are right now.
-//   [A3] Smart Filtering - recognises the local capsule hitbox, vehicles and
-//                          dropped weapons, and maintains a skipActors set
-//                          (self / teammates) that every scanner consults.
-// ===========================================================================
-
-enum class DSPUBGShapeKind : uint8_t {
-    None = 0,
-    Obb,      // oriented bounding box - static collision geometry
-    Capsule,  // character capsule hitbox
-    Sphere,   // pickup / loot sphere
-};
-
-enum class DSPUBGActorClass : uint8_t {
-    Unknown = 0,
-    StaticScenery,   // walls, houses, terrain, foliage
-    DynamicPawn,     // players + bots
-    DynamicVehicle,  // cars, motorcycles, boats
-    LootItem,        // dropped weapons, ammo, meds, crates
-    Ignored,         // dropped weapon / self / teammate -> skipped
-};
-
-enum : uint32_t {
-    DSPUBGActLocal    = 1u << 0,
-    DSPUBGActTeammate = 1u << 1,
-    DSPUBGActVehicle  = 1u << 2,
-    DSPUBGActDropped  = 1u << 3,
-};
-
-// --- A1. Static Actor Library -------------------------------------------------
-// Cached geometry for immutable actors. Keyed by AActor pointer, open
-// addressed, and bound to one UWorld so a map change drops the whole library.
-// One actor yields at most this many boxes, both when it is scanned fresh and
-// when it is served from the static cache. The two budgets must match, or the
-// geometry would visibly thin out on cached frames.
-static const int kDSPUBGStaticBoxesPerActor = 32;
-static const int kDSPUBGBoxesPerComponent = 32;
-struct DSPUBGStaticActor {
-    uint64_t actor;
-    uint64_t component;
-    int boxCount;
-    DSPUBGObstacleBox boxes[kDSPUBGStaticBoxesPerActor];
-    uint64_t capturedTick;
-};
-
-static const size_t kDSPUBGStaticActorSlots = 2048;   // power of two
-static DSPUBGStaticActor s_staticActors[kDSPUBGStaticActorSlots] = {};
-static uint64_t s_staticActorWorld = 0;
-static uint64_t s_staticActorLevelSig = 0;
-
-static inline size_t ds_pubg_static_hash(uint64_t actor) {
-    return (size_t)((actor >> 4) ^ (actor >> 17)) & (kDSPUBGStaticActorSlots - 1);
-}
-
-// --- A1b. Non-static actor memory ---------------------------------------------
-// Actors that are known to be *not* world geometry (players, loot, lights,
-// volumes, ...). Kept here so the static scanner never has to read their name
-// again, and - more importantly - so it never has to write into the shared
-// actor cache that the player and item scanners own.
-static const size_t kDSPUBGNonStaticSlots = 4096;   // power of two
-static uint64_t s_nonStaticActors[kDSPUBGNonStaticSlots] = {};
-
-static inline size_t ds_pubg_nonstatic_hash(uint64_t actor) {
-    return (size_t)((actor >> 4) ^ (actor >> 15)) & (kDSPUBGNonStaticSlots - 1);
-}
-
-static bool ds_pubg_nonstatic_known(uint64_t actor) {
-    if (!actor) return true;
-    size_t idx = ds_pubg_nonstatic_hash(actor);
-    for (size_t probe = 0; probe < kDSPUBGNonStaticSlots; probe++) {
-        uint64_t slot = s_nonStaticActors[(idx + probe) & (kDSPUBGNonStaticSlots - 1)];
-        if (slot == actor) return true;
-        if (slot == 0) return false;
-    }
-    return false;
-}
-
-static void ds_pubg_nonstatic_remember(uint64_t actor) {
-    if (!actor) return;
-    size_t idx = ds_pubg_nonstatic_hash(actor);
-    for (size_t probe = 0; probe < kDSPUBGNonStaticSlots; probe++) {
-        uint64_t &slot = s_nonStaticActors[(idx + probe) & (kDSPUBGNonStaticSlots - 1)];
-        if (slot == actor) return;
-        if (slot == 0) { slot = actor; return; }
-    }
-}
-
-// A new UWorld means every cached transform is stale: drop the whole library.
-static void ds_pubg_static_library_reset(uint64_t world) {
-    if (world == s_staticActorWorld) return;
-    memset(s_staticActors, 0, sizeof(s_staticActors));
-    memset(s_nonStaticActors, 0, sizeof(s_nonStaticActors));
-    s_staticActorCount = 0;
-    s_staticActorWorld = world;
-}
-
-// Seamless travel keeps the same UWorld but swaps the level set, so the
-// caller can force a drop when the levels change. The world binding is kept
-// so the next frame does not clear the (still empty) library again.
-static void ds_pubg_static_library_invalidate(void) {
-    memset(s_staticActors, 0, sizeof(s_staticActors));
-    memset(s_nonStaticActors, 0, sizeof(s_nonStaticActors));
-    s_staticActorCount = 0;
-}
-
-// Returns the slot holding the actor, or the first free slot for insertion.
-static DSPUBGStaticActor *ds_pubg_static_slot(uint64_t actor, bool &found) {
-    size_t idx = ds_pubg_static_hash(actor);
-    for (size_t probe = 0; probe < kDSPUBGStaticActorSlots; probe++) {
-        DSPUBGStaticActor &e = s_staticActors[(idx + probe) & (kDSPUBGStaticActorSlots - 1)];
-        if (e.actor == actor) { found = true; return &e; }
-        if (e.actor == 0) { found = false; return &e; }
-    }
-    found = false;
-    return nullptr;   // library full
-}
-
-// --- A2. Dynamic Actor Registry ----------------------------------------------
-// Live transform of every actor that moves. Refreshed each frame by the
-// player / vehicle / loot passes.
-struct DSPUBGDynamicActor {
-    uint64_t actor;
-    DSPUBGShapeKind shape;
-    DSPUBGActorClass actorClass;
-    uint32_t flags;
-    DSPUBGVector location;
-    DSPUBGRotator rotation;
-    DSPUBGVector scale;
-    float radius;
-    float halfHeight;
-    uint64_t lastSeenTick;
-};
-
-static const size_t kDSPUBGDynamicActorSlots = 512;   // power of two
-static DSPUBGDynamicActor s_dynamicActors[kDSPUBGDynamicActorSlots] = {};
-
-static inline size_t ds_pubg_dynamic_hash(uint64_t actor) {
-    return (size_t)((actor >> 4) ^ (actor >> 13)) & (kDSPUBGDynamicActorSlots - 1);
-}
-
-static DSPUBGDynamicActor *ds_pubg_dynamic_slot(uint64_t actor, bool &found) {
-    size_t idx = ds_pubg_dynamic_hash(actor);
-    for (size_t probe = 0; probe < kDSPUBGDynamicActorSlots; probe++) {
-        DSPUBGDynamicActor &e = s_dynamicActors[(idx + probe) & (kDSPUBGDynamicActorSlots - 1)];
-        if (e.actor == actor) { found = true; return &e; }
-        if (e.actor == 0) { found = false; return &e; }
-    }
-    found = false;
-    return nullptr;
-}
-
-// Refresh the transform matrix of a moving actor. Called every frame for each
-// player, vehicle and loot actor we can see.
-static void ds_pubg_dynamic_update(uint64_t actor,
-                                   DSPUBGShapeKind shape,
-                                   DSPUBGActorClass actorClass,
-                                   uint32_t flags,
-                                   const DSPUBGVector &location,
-                                   const DSPUBGRotator &rotation,
-                                   const DSPUBGVector &scale,
-                                   float radius,
-                                   float halfHeight) {
-    if (!actor) return;
-    bool found = false;
-    DSPUBGDynamicActor *e = ds_pubg_dynamic_slot(actor, found);
-    if (!e) return;
-    if (!found) {
-        memset(e, 0, sizeof(*e));
-        e->actor = actor;
-        s_dynamicActorCount++;
-    }
-    e->shape = shape;
-    e->actorClass = actorClass;
-    e->flags = flags;
-    e->location = location;
-    e->rotation = rotation;
-    e->scale = scale;
-    e->radius = radius;
-    e->halfHeight = halfHeight;
-    e->lastSeenTick = s_visTickCounter;
-}
-
-static DSPUBGDynamicActor *ds_pubg_dynamic_find(uint64_t actor) {
-    if (!actor) return nullptr;
-    bool found = false;
-    DSPUBGDynamicActor *e = ds_pubg_dynamic_slot(actor, found);
-    return found ? e : nullptr;
-}
-
-// Drop entries that stopped being refreshed so the registry never keeps a
-// stale transform alive.
-static void ds_pubg_dynamic_prune(void) {
-    for (size_t i = 0; i < kDSPUBGDynamicActorSlots; i++) {
-        DSPUBGDynamicActor &e = s_dynamicActors[i];
-        if (e.actor == 0) continue;
-        if ((s_visTickCounter - e.lastSeenTick) > 30) {
-            memset(&e, 0, sizeof(e));
-            if (s_dynamicActorCount) s_dynamicActorCount--;
-        }
-    }
-}
-
-// --- A3. Smart Filtering ------------------------------------------------------
-// Recognises the shapes that must never be treated as static geometry and
-// keeps the skipActors set (self / teammates) consulted by every scanner.
-struct DSPUBGLocalCapsule {
-    bool valid;
-    uint64_t component;
-    DSPUBGVector location;
-    float radius;
-    float halfHeight;
-};
-static DSPUBGLocalCapsule s_localCapsule = {};
-
-// UCapsuleComponent: CapsuleHalfHeight 0x9F8 | CapsuleRadius 0x9FC
-static const uint64_t kDSPUGCapsuleHalfHeightOffset = 0x9F8ULL;
-static const uint64_t kDSPUGCapsuleRadiusOffset = 0x9FCULL;
-static const uint64_t kDSPUBGCharacterCapsuleOffset = 0x520ULL;  // ACharacter.CapsuleComponent
+// Live teammate/self skip set consulted by item/vehicle scanner.
 
 // skipActors set (open addressed, O(1) lookup)
 static const size_t kDSPUBGSkipActorSlots = 1024;   // power of two
@@ -5283,92 +2791,6 @@ static bool ds_pubg_smart_is_skipped(uint64_t actor) {
         if (slot == 0) return false;
     }
     return false;
-}
-
-// Locate the local player capsule hitbox. The capsule is the authoritative
-// collision shape of a character, so knowing it lets the vischeck ignore the
-// player's own collision and lets the renderer skip self.
-static bool ds_pubg_smart_detect_local_capsule(uint64_t localPawn) {
-    if (!localPawn || !ds_pubg_valid(localPawn)) return false;
-
-    uint64_t capsule = ds_pubg_read_ptr(localPawn + kDSPUBGCharacterCapsuleOffset);
-    if (!capsule || !ds_pubg_valid(capsule)) {
-        capsule = ds_pubg_read_ptr(localPawn + 0x180ULL);   // RootComponent fallback
-    }
-    if (!capsule || !ds_pubg_valid(capsule)) return false;
-
-    DSPUBGVector loc = {};
-    if (!ds_pubg_read(capsule + kDSPUBGSceneCompRelativeLocOffset, &loc, sizeof(loc))) return false;
-    if (isnan(loc.X) || isnan(loc.Y) || isnan(loc.Z)) return false;
-
-    float halfHeight = ds_pubg_read_f32(capsule + kDSPUGCapsuleHalfHeightOffset);
-    float radius = ds_pubg_read_f32(capsule + kDSPUGCapsuleRadiusOffset);
-    if (!isfinite(halfHeight) || halfHeight <= 0.0f || halfHeight > 2000.0f) return false;
-    if (!isfinite(radius) || radius <= 0.0f || radius > 500.0f) return false;
-
-    s_localCapsule.valid = true;
-    s_localCapsule.component = capsule;
-    s_localCapsule.location = loc;
-    s_localCapsule.radius = radius;
-    s_localCapsule.halfHeight = halfHeight;
-    return true;
-}
-
-// Characters are never world geometry. They must be recognised before the
-// scenery list, because a pawn can carry a scenery-looking token (bots are
-// often named "...Target...") and would otherwise be baked into the obstacle
-// list and block its own line of sight.
-static inline bool ds_pubg_smart_is_pawn_name(const char *name) {
-    if (!name || !name[0]) return false;
-    return (strstr(name, "Pawn") || strstr(name, "Character") ||
-            strstr(name, "Player") || strstr(name, "Target") ||
-            strstr(name, "Dummy") || strstr(name, "Model") ||
-            strstr(name, "Avatar") || strstr(name, "Soldier") ||
-            strstr(name, "Bot") || strstr(name, "AI_"));
-}
-
-// Vehicles move, so they must never be baked into the static geometry cache.
-static inline bool ds_pubg_smart_is_vehicle_name(const char *name) {
-    if (!name || !name[0]) return false;
-    return (strstr(name, "VH_") || strstr(name, "Vehicle") ||
-            strstr(name, "Jeep") || strstr(name, "UAZ") ||
-            strstr(name, "Sedan") || strstr(name, "Dacia") ||
-            strstr(name, "Buggy") || strstr(name, "Truck") ||
-            strstr(name, "Rony") || strstr(name, "Motorcycle") ||
-            strstr(name, "Scooter") || strstr(name, "Boat") ||
-            strstr(name, "Helicopter") || strstr(name, "Airdrop") ||
-            strstr(name, "Parachute") || strstr(name, "Bike"));
-}
-
-// Dropped weapons are loot on the floor: they are not world geometry and must
-// not block the line of sight.
-static inline bool ds_pubg_smart_is_dropped_weapon_name(const char *name) {
-    if (!name || !name[0]) return false;
-    if (strstr(name, "PickUp") || strstr(name, "Pickup") || strstr(name, "Wrapper")) {
-        return (strstr(name, "Weapon") || strstr(name, "Gun") ||
-                strstr(name, "AWM") || strstr(name, "AKM") || strstr(name, "M416") ||
-                strstr(name, "DP28") || strstr(name, "Kar98") || strstr(name, "SCAR") ||
-                strstr(name, "UMP") || strstr(name, "SKS") || strstr(name, "S686"));
-    }
-    return false;
-}
-
-// Classify one actor for the static scanner: scenery that is neither a
-// character, a vehicle nor a dropped weapon becomes static geometry.
-static inline DSPUBGActorClass ds_pubg_smart_classify_scenery(const char *name) {
-    if (!name || !name[0]) return DSPUBGActorClass::Unknown;
-    if (ds_pubg_smart_is_pawn_name(name)) return DSPUBGActorClass::DynamicPawn;
-    if (ds_pubg_smart_is_vehicle_name(name)) return DSPUBGActorClass::DynamicVehicle;
-    if (ds_pubg_smart_is_dropped_weapon_name(name)) return DSPUBGActorClass::Ignored;
-    if (ds_pubg_is_scenery_name(name)) return DSPUBGActorClass::StaticScenery;
-    return DSPUBGActorClass::Unknown;
-}
-
-// Called once per tick, before any scanner runs: refreshes the skip set,
-// detects the local capsule and rebinds the static library to this world.
-static void ds_pubg_smart_begin_frame(uint64_t world, uint64_t localPawn) {
-    (void)world;
-    (void)localPawn;
 }
 
 static void ds_pubg_tick_impl(void) {
@@ -5505,10 +2927,6 @@ static void ds_pubg_tick_impl(void) {
     }
 
     uint64_t localPawn = playerController ? ds_pubg_read_ptr(playerController + kDSPUBGPlayerControllerPawnOffset) : 0;
-
-    // [A3] Refresh the smart filters for this frame: skip set, local capsule
-    // hitbox and the static geometry library binding.
-    ds_pubg_smart_begin_frame(world, localPawn);
 
     // Check if player is actually in an active match (filters out Lobby, MainCity, Frontend)
     if (!ds_pubg_is_in_match(world, playerController, localPawn)) {
@@ -5667,59 +3085,28 @@ static void ds_pubg_tick_impl(void) {
                      strcasestr(pawnName, "Bot") != NULL ||
                      strcasestr(pawnName, "STExtra") != NULL);
                 if (!isTrainingTarget && !psHint) {
-                    bool isScenery = (strstr(pawnName, "StaticMesh") || strstr(pawnName, "Foliage") ||
-                        strstr(pawnName, "Landscape") || strstr(pawnName, "Building") ||
-                        strstr(pawnName, "House") || strstr(pawnName, "Tree") ||
-                        strstr(pawnName, "Rock") || strstr(pawnName, "Wall") ||
-                        strstr(pawnName, "Fence") || strstr(pawnName, "Door") ||
-                        strstr(pawnName, "Window") || strstr(pawnName, "Floor") ||
-                        strstr(pawnName, "Roof") || strstr(pawnName, "Brush") ||
-                        strstr(pawnName, "SM_") || strstr(pawnName, "Mesh") ||
-                        strstr(pawnName, "BP_Building") || strstr(pawnName, "BP_House") ||
-                        strstr(pawnName, "BP_Wall") || strstr(pawnName, "BP_Door") ||
-                        strstr(pawnName, "BP_Fence") || strstr(pawnName, "BP_Stair") ||
-                        strstr(pawnName, "Arch") || strstr(pawnName, "Prop") ||
-                        strstr(pawnName, "Stair") || strstr(pawnName, "Tower") ||
-                        strstr(pawnName, "Shed") || strstr(pawnName, "Gate") ||
-                        strstr(pawnName, "Container") || strstr(pawnName, "Obstacle"));
-                    if (isScenery) {
+                    static const char *const kPawnSceneryExtraTokens[] = {
+                        "SM_", "Mesh", "BP_Building", "BP_House", "BP_Wall", "BP_Door",
+                        "BP_Fence", "BP_Stair", "Arch", "Prop", "Stair", "Tower",
+                        "Shed", "Gate", "Container", "Obstacle"
+                    };
+                    static const char *const kPawnNonCharTokens[] = {
+                        "Bullet", "Proj", "Weapon", "PickUp", "Vehicle", "VH_",
+                        "Drop", "Tomb", "Box", "Supply", "AirDrop", "Item",
+                        "Controller", "Shell", "Cartridge", "Trace", "Grenade",
+                        "Smoke", "Explosion", "Shoulei", "Molotov", "Burn"
+                    };
+                    if (ds_pubg_is_scenery_name(pawnName) ||
+                        ds_pubg_contains_any(pawnName, kPawnSceneryExtraTokens, sizeof(kPawnSceneryExtraTokens) / sizeof(kPawnSceneryExtraTokens[0]), false)) {
                         ds_pubg_cache_stamp(cEntry, pawn);
                         cEntry.isScenery = true;
                         cEntry.isPawn = false;
                         cEntry.isTrainingTarget = false;
                         cEntry.itemCat = DSPUBGItemCategoryNone;
-                        cEntry.vCommon = 0;
                         return false;
                     }
 
-                    if (ds_pubg_is_pet_name(pawnName) ||
-                        strcasestr(pawnName, "Particle") || strcasestr(pawnName, "Effect") ||
-                        strcasestr(pawnName, "Decal") || strcasestr(pawnName, "Camera") ||
-                        strcasestr(pawnName, "Volume") || strcasestr(pawnName, "Trigger") ||
-                        strcasestr(pawnName, "Light") || strcasestr(pawnName, "Audio") ||
-                        strcasestr(pawnName, "Sound") || strcasestr(pawnName, "Zone") ||
-                        strcasestr(pawnName, "Fog") || strcasestr(pawnName, "Lobby") ||
-                        strcasestr(pawnName, "MainCity") || strcasestr(pawnName, "PetAvatar") ||
-                        strcasestr(pawnName, "LobbyModel") || strcasestr(pawnName, "Avatar") ||
-                        strcasestr(pawnName, "Preview")) {
-                        ds_pubg_cache_stamp(cEntry, pawn);
-                        cEntry.isScenery = true;
-                        cEntry.isPawn = false;
-                        cEntry.isTrainingTarget = false;
-                        cEntry.itemCat = DSPUBGItemCategoryNone;
-                        cEntry.vCommon = 0;
-                        return false;
-                    }
-
-                    if (strcasestr(pawnName, "Bullet") || strcasestr(pawnName, "Proj") || strcasestr(pawnName, "Weapon") ||
-                        strcasestr(pawnName, "PickUp") || strcasestr(pawnName, "Vehicle") || strcasestr(pawnName, "VH_") ||
-                        strcasestr(pawnName, "Drop") || strcasestr(pawnName, "Tomb") || strcasestr(pawnName, "Box") ||
-                        strcasestr(pawnName, "Supply") || strcasestr(pawnName, "AirDrop") || strcasestr(pawnName, "Item") ||
-                        strcasestr(pawnName, "Controller") || strcasestr(pawnName, "Shell") ||
-                        strcasestr(pawnName, "Cartridge") || strcasestr(pawnName, "Trace") ||
-                        strcasestr(pawnName, "Grenade") || strcasestr(pawnName, "Smoke") ||
-                        strcasestr(pawnName, "Explosion") || strcasestr(pawnName, "Shoulei") ||
-                        strcasestr(pawnName, "Molotov") || strcasestr(pawnName, "Burn")) {
+                    if (ds_pubg_contains_any(pawnName, kPawnNonCharTokens, sizeof(kPawnNonCharTokens) / sizeof(kPawnNonCharTokens[0]), true)) {
                         return false;
                     }
                 }
@@ -5791,14 +3178,12 @@ static void ds_pubg_tick_impl(void) {
             cEntry.metaActor = 0;
             cEntry.metaPs = 0;
             cEntry.infoActor = 0;
-            cEntry.weaponActor = 0;
         }
         ds_pubg_cache_stamp(cEntry, pawn);
         cEntry.isPawn = true;
         cEntry.isScenery = false;
         cEntry.isTrainingTarget = isTrainingTarget;
         cEntry.itemCat = DSPUBGItemCategoryNone;
-        cEntry.vCommon = 0;
         cEntry.rootComp = rootComp;
         cEntry.meshComp = meshComp;
 
@@ -5845,48 +3230,8 @@ static void ds_pubg_tick_impl(void) {
 
         seenPawns.push_back(pawn);
 
-        // Prefer ComponentToWorld (+0x210 quat, +0x220 translation) FIRST so enemies
-        // inside vehicles, parachuting, or attached to moving platforms always resolve
-        // exact world-space coordinates instead of parent-relative local offsets.
         DSPUBGVector rootLoc = {};
-        bool haveRootLoc = false;
-        uint8_t rc2w[32] = {0};
-        if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
-            float qx = 0, qy = 0, qz = 0, qw = 1.0f;
-            DSPUBGVector c2wLoc = {};
-            memcpy(&qx, rc2w + 0x0, 4);
-            memcpy(&qy, rc2w + 0x4, 4);
-            memcpy(&qz, rc2w + 0x8, 4);
-            memcpy(&qw, rc2w + 0xC, 4);
-            memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
-            float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
-            if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
-                !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
-                !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
-                !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
-                (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
-                rootLoc = c2wLoc;
-                haveRootLoc = true;
-            }
-        }
-        if (!haveRootLoc) {
-            if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
-                return false;
-            }
-            uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
-            if (parent && ds_pubg_valid(parent)) {
-                DSPUBGVector parentLoc = {};
-                if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
-                    rootLoc.X += parentLoc.X;
-                    rootLoc.Y += parentLoc.Y;
-                    rootLoc.Z += parentLoc.Z;
-                }
-            }
-        }
-        if (isnan(rootLoc.X) || isinf(rootLoc.X) ||
-            isnan(rootLoc.Y) || isinf(rootLoc.Y) ||
-            isnan(rootLoc.Z) || isinf(rootLoc.Z) ||
-            (fabsf(rootLoc.X) < 1.0f && fabsf(rootLoc.Y) < 1.0f)) {
+        if (!ds_pubg_read_world_loc(rootComp, rootLoc, true)) {
             return false;
         }
 
@@ -5952,7 +3297,6 @@ static void ds_pubg_tick_impl(void) {
                             cEntry.isScenery = true;
                             cEntry.isPawn = false;
                             cEntry.itemCat = DSPUBGItemCategoryNone;
-                            cEntry.vCommon = 0;
                             return false;
                         }
                         if (strcasestr(ctrlName, "AI") || strcasestr(ctrlName, "Fake")) {
@@ -6127,25 +3471,6 @@ static void ds_pubg_tick_impl(void) {
         }
 
         if (onScreen) {
-            if (cacheValid && cEntry.weaponActor != pawn ||
-                !cacheValid ||
-                (s_visTickCounter - cEntry.weaponRefreshTick) >= 10) {
-                char resolvedWeapon[32] = {0};
-                int32_t wid = ds_pubg_read_equipped_weapon_id(pawn);
-                if (wid > 0) {
-                    const char *wName = ds_pubg_weapon_name_by_id(wid);
-                    if (wName) {
-                        strncpy(resolvedWeapon, wName, sizeof(resolvedWeapon) - 1);
-                    } else {
-                        snprintf(resolvedWeapon, sizeof(resolvedWeapon), "Gun %d", wid);
-                    }
-                }
-                memcpy(cEntry.cachedWeapon, resolvedWeapon, sizeof(cEntry.cachedWeapon));
-                cEntry.weaponActor = pawn;
-                cEntry.weaponRefreshTick = s_visTickCounter;
-            }
-            memcpy(p.weaponName, cEntry.cachedWeapon, sizeof(p.weaponName));
-
             if (!cacheValid || cEntry.infoActor != pawn) {
                 char resolvedName[32] = {0};
                 char resolvedNation[16] = {0};
@@ -6475,7 +3800,6 @@ static void ds_pubg_tick_impl(void) {
         cEntry.isScenery = false;
         cEntry.isPawn = true;
         cEntry.itemCat = DSPUBGItemCategoryNone;
-        cEntry.vCommon = 0;
         return true;
     };
 
@@ -6817,40 +4141,11 @@ static void ds_pubg_tick_impl(void) {
 
         // 1. Fast RootComponent and Location check FIRST (ComponentToWorld then RelativeLocation)
         DSPUBGVector rootLoc = {};
-        bool hasLoc = false;
         uint64_t rootComp = ds_pubg_read_ptr(actor + kDSPUBGActorRootComponentOffset);
         if (!rootComp || !ds_pubg_valid(rootComp)) {
             rootComp = ds_pubg_read_ptr(actor + 0x180ULL);
         }
-        if (rootComp && ds_pubg_valid(rootComp)) {
-            uint8_t rc2w[32] = {0};
-            if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
-                float qx = 0, qy = 0, qz = 0, qw = 1.0f;
-                DSPUBGVector c2wLoc = {};
-                memcpy(&qx, rc2w + 0x0, 4);
-                memcpy(&qy, rc2w + 0x4, 4);
-                memcpy(&qz, rc2w + 0x8, 4);
-                memcpy(&qw, rc2w + 0xC, 4);
-                memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
-                float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
-                if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
-                    !isnan(c2wLoc.X) && !isinf(c2wLoc.X) &&
-                    !isnan(c2wLoc.Y) && !isinf(c2wLoc.Y) &&
-                    !isnan(c2wLoc.Z) && !isinf(c2wLoc.Z) &&
-                    (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
-                    rootLoc = c2wLoc;
-                    hasLoc = true;
-                }
-            }
-            if (!hasLoc && ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &rootLoc, sizeof(rootLoc))) {
-                if (!isnan(rootLoc.X) && !isinf(rootLoc.X) &&
-                    !isnan(rootLoc.Y) && !isinf(rootLoc.Y) &&
-                    !isnan(rootLoc.Z) && !isinf(rootLoc.Z) &&
-                    (fabsf(rootLoc.X) >= 1.0f || fabsf(rootLoc.Y) >= 1.0f)) {
-                    hasLoc = true;
-                }
-            }
-        }
+        bool hasLoc = ds_pubg_read_world_loc(rootComp, rootLoc, false);
         if (!hasLoc) {
             // AttachedRelLoc at 0x634 (APickUpWrapperActor) or 0x624 (APlayerTombBox)
             if (ds_pubg_read(actor + 0x634ULL, &rootLoc, sizeof(rootLoc)) &&
@@ -6902,7 +4197,6 @@ static void ds_pubg_tick_impl(void) {
                     cEntry.isScenery = false;
                     cEntry.isPawn = false;
                     cEntry.itemCat = DSPUBGItemCategoryNone;
-                    cEntry.vCommon = 0;
                     return;
                 }
             }
@@ -6915,7 +4209,6 @@ static void ds_pubg_tick_impl(void) {
                     cEntry.isScenery = true;
                     cEntry.isPawn = false;
                     cEntry.itemCat = DSPUBGItemCategoryNone;
-                    cEntry.vCommon = 0;
                     return;
                 }
             }
@@ -6926,7 +4219,6 @@ static void ds_pubg_tick_impl(void) {
                     cEntry.isScenery = true;
                     cEntry.isPawn = false;
                     cEntry.itemCat = DSPUBGItemCategoryNone;
-                    cEntry.vCommon = 0;
                 }
                 return;
             }
@@ -6936,11 +4228,6 @@ static void ds_pubg_tick_impl(void) {
             cEntry.itemCat = cat;
             strncpy(cEntry.itemName, displayName, sizeof(cEntry.itemName) - 1);
             cEntry.itemName[sizeof(cEntry.itemName) - 1] = '\0';
-            cEntry.vCommon = 0;
-            cEntry.cachedHp = 0.0f;
-            cEntry.cachedHpMax = 0.0f;
-            cEntry.cachedFuel = 0.0f;
-            cEntry.cachedFuelMax = 0.0f;
         }
 
         if (!ds_pubg_is_item_type_enabled(cat, displayName)) return;
@@ -7010,9 +4297,6 @@ static void ds_pubg_tick_impl(void) {
         }
 
     };
-
-    // Vischeck disabled per user request: map obstacle scan skipped
-    s_obstacleCount = 0;
 
     // Source 1 preload: read PlayerArray entries (defer projection until after level/loot scan)
     struct DSPUBGPAEntry {
@@ -7305,8 +4589,6 @@ static void ds_pubg_tick_impl(void) {
         }
     }
 
-    // Advance tick
-    ++s_visTickCounter;
 }
 
 static void ds_pubg_tick(void) {
