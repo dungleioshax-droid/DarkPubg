@@ -1131,7 +1131,6 @@ static inline bool ds_pubg_is_item_type_enabled(DSPUBGItemCategory cat, const ch
 static void ds_pubg_tick(void);
 static bool ds_pubg_has_render_source(void);
 static bool ds_pubg_has_active_match(void);
-static const char* ds_pubg_get_debug_status(void);
 static int ds_pubg_copy_projected_players(DSPUBGProjectedPlayer out[kDSPUBGMaxPlayers],
                                           uint64_t *epochOut);
 static int ds_pubg_copy_projected_items(DSPUBGProjectedItem out[kDSPUBGMaxItems],

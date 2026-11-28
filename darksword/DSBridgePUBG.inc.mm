@@ -89,7 +89,6 @@ static int g_dspubgLastActorsCount = 0;
 static int g_dspubgLastEnemyCount = 0;
 static int g_dspubgLastBotCount = 0;
 static uint32_t g_dspubgLastBoneOff = 0;
-static char g_dspubgStatusBuf[192] = "PUBG: init";
 
 // Snapshot storage
 static os_unfair_lock g_dspubgSnapshotLock = OS_UNFAIR_LOCK_INIT;
@@ -2012,7 +2011,6 @@ static bool ds_pubg_attach(void) {
     uint64_t proc = ds_pubg_find_proc(&targetPid);
 
     if (!ds_isvalid(proc) || targetPid <= 0) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: not found");
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgProc = g_dspubgVmMap = g_dspubgBase = 0;
@@ -2024,7 +2022,6 @@ static bool ds_pubg_attach(void) {
     uint64_t task = proc_task(proc);
     uint64_t vmMap = ds_isvalid(task) ? task_get_vm_map(task) : 0;
     if (!ds_isvalid(vmMap)) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d vmMap=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
@@ -2043,7 +2040,6 @@ static bool ds_pubg_attach(void) {
     g_dspubgVmMap = vmMap;
 
     if (!ds_debug_shmem_claim_target(DSDebugShmemOwner::PUBG, targetPid, proc, vmMap)) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d claim=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
@@ -2059,7 +2055,6 @@ static bool ds_pubg_attach(void) {
     }
 
     if (!g_dspubgBase) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf), "PUBG: pid=%d base=0", targetPid);
         g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
         return false;
@@ -2141,20 +2136,61 @@ static bool ds_pubg_cam_basis_project(const DSPUBGCamBasis &b, DSPUBGVector worl
 
 static bool ds_pubg_read_c2w(uint64_t meshComp, const DSPUBGVector &rootLoc, float halfH, uint8_t *outC2W) {
     if (!meshComp || !ds_pubg_valid(meshComp) || !outC2W) return false;
+    static const uint32_t kCandidates[] = { 0x210, 0x208, 0x200, 0x220, 0x218 };
+    static uint32_t s_cachedC2WOff = 0;
 
-    // Direct read from 0x210 (UE4 arm64 USceneComponent::ComponentToWorld aligned offset)
-    if (ds_pubg_read(meshComp + 0x210ULL, outC2W, 48)) {
+    auto testCandidate = [&](uint32_t off) -> bool {
+        uint8_t buf[48];
+        if (!ds_pubg_read(meshComp + (uint64_t)off, buf, sizeof(buf))) return false;
+
         float qx = 0, qy = 0, qz = 0, qw = 1.0f;
-        memcpy(&qx, outC2W + 0x0, 4);
-        memcpy(&qy, outC2W + 0x4, 4);
-        memcpy(&qz, outC2W + 0x8, 4);
-        memcpy(&qw, outC2W + 0xC, 4);
+        memcpy(&qx, buf + 0x0, 4);
+        memcpy(&qy, buf + 0x4, 4);
+        memcpy(&qz, buf + 0x8, 4);
+        memcpy(&qw, buf + 0xC, 4);
         float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
-        if (!isnan(qlen2) && !isinf(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f) {
+        if (isnan(qlen2) || isinf(qlen2) || qlen2 < 0.4f || qlen2 > 2.2f) return false;
+
+        float tx = 0, ty = 0, tz = 0;
+        memcpy(&tx, buf + 0x10, 4);
+        memcpy(&ty, buf + 0x14, 4);
+        memcpy(&tz, buf + 0x18, 4);
+        if (isnan(tx) || isinf(tx) || isnan(ty) || isinf(ty) || isnan(tz) || isinf(tz)) return false;
+
+        float dX = tx - rootLoc.X;
+        float dY = ty - rootLoc.Y;
+        if (dX * dX + dY * dY > (300.0f * 300.0f)) return false;
+
+        float expectedZ = rootLoc.Z - halfH;
+        if (fabsf(tz - expectedZ) > 250.0f && fabsf(tz - rootLoc.Z) > 250.0f) return false;
+
+        float sx = 1.0f, sy = 1.0f, sz = 1.0f;
+        memcpy(&sx, buf + 0x20, 4);
+        memcpy(&sy, buf + 0x24, 4);
+        memcpy(&sz, buf + 0x28, 4);
+        if (isnan(sx) || isinf(sx) || sx < 0.2f || sx > 5.0f ||
+            isnan(sy) || isinf(sy) || sy < 0.2f || sy > 5.0f ||
+            isnan(sz) || isinf(sz) || sz < 0.2f || sz > 5.0f) return false;
+
+        memcpy(outC2W, buf, 48);
+        return true;
+    };
+
+    if (s_cachedC2WOff != 0 && testCandidate(s_cachedC2WOff)) {
+        return true;
+    }
+
+    for (uint32_t off : kCandidates) {
+        if (off == s_cachedC2WOff) continue;
+        if (testCandidate(off)) {
+            s_cachedC2WOff = off;
             return true;
         }
     }
 
+    if (ds_pubg_read(meshComp + 0x210ULL, outC2W, 48)) {
+        return true;
+    }
     if (ds_pubg_read(meshComp + 0x208ULL, outC2W, 48)) {
         return true;
     }
@@ -2639,12 +2675,6 @@ static bool ds_pubg_read_world_loc(uint64_t rootComp, DSPUBGVector &outLoc, bool
     return ds_pubg_read_component_to_world(rootComp, outLoc);
 }
 
-
-
-static const char* ds_pubg_get_debug_status(void) {
-    return g_dspubgStatusBuf;
-}
-
 static inline bool ds_pubg_is_lobby_name(const char *name) {
     if (!name || !name[0]) return false;
     if (strcasestr(name, "Training") != NULL ||
@@ -2890,8 +2920,6 @@ static void ds_pubg_tick_impl(void) {
     }
 
     if (!world) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
-                 "PUBG: pid=%u base=1 world=0 gn=%d", g_dspubgPid, g_dspubgNamesCalibrated ? 1 : 0);
         ds_pubg_reset_match_caches();
         g_dspubgLastActorsCount = 0;
         g_dspubgLastEnemyCount = 0;
@@ -2970,10 +2998,6 @@ static void ds_pubg_tick_impl(void) {
 
     // Check if player is actually in an active match (filters out Lobby, MainCity, Frontend)
     if (!ds_pubg_is_in_match(world, playerController, localPawn)) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
-                 "PUBG: pid=%u w=1 gn=%d pc=%d lp=%d inM=0",
-                 g_dspubgPid, g_dspubgNamesCalibrated ? 1 : 0,
-                 playerController ? 1 : 0, localPawn ? 1 : 0);
         os_unfair_lock_lock(&g_dspubgSnapshotLock);
         g_dspubgPlayerCount = 0;
         g_dspubgItemCount = 0;
@@ -3082,8 +3106,6 @@ static void ds_pubg_tick_impl(void) {
 
     DSPUBGCamBasis basis = {};
     if (!ds_pubg_cam_basis_build(camLoc, camRot, camFOV, screenW, screenH, basis)) {
-        snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
-                 "PUBG: inM=1 cam=0 cm=%d fov=%.1f", cameraManager ? 1 : 0, camFOV);
         return;
     }
 
@@ -4496,7 +4518,7 @@ static void ds_pubg_tick_impl(void) {
                             continue;
                         }
                         if (cEntry.isPawn) {
-                            if (s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
+                            if (s_trackedLevelPawns.size() < 256) s_trackedLevelPawns.push_back(actor);
                             continue;
                         }
                     }
@@ -4511,7 +4533,7 @@ static void ds_pubg_tick_impl(void) {
                             if (!alreadyG && s_trackedLevelGrenades.size() < 16) s_trackedLevelGrenades.push_back(actor);
                         }
                     } else {
-                        if (s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
+                        if (s_trackedLevelPawns.size() < 256) s_trackedLevelPawns.push_back(actor);
                     }
                 }
             }
@@ -4529,6 +4551,8 @@ static void ds_pubg_tick_impl(void) {
 
     // Dual-cadence level & loot scan BEFORE refreshing camera/player transforms
     // so enemy ESP always projects against the latest post-scan camera pose.
+    // On full-scan ticks (and immediately on tick 0 / sublevel-count change), scan
+    // PersistentLevel AND every streaming sublevel in one pass so all enemies appear together.
     static const uint32_t kDSPUBGFullScanInterval = 20;
     bool needFullLevelScan = ((s_levelScanTick++ % kDSPUBGFullScanInterval) == 0);
     if (needFullLevelScan && level) {
@@ -4536,7 +4560,14 @@ static void ds_pubg_tick_impl(void) {
         int beforeCount = itemStagingCount;
         collectActorsFromLevel(level, true);
         if (g_dspubgLevelActorsOff) {
+            uint32_t prevLevels = s_cachedWorldLevelCount;
             s_cachedWorldLevelCount = ds_pubg_find_world_levels(world, level, s_cachedWorldLevels, 64);
+            if (s_cachedWorldLevelCount != prevLevels) {
+                s_sublevelCursor = 1;
+            }
+            for (uint32_t li = 1; li < s_cachedWorldLevelCount; li++) {
+                collectActorsFromLevel(s_cachedWorldLevels[li], false);
+            }
         }
         s_cachedLootCount = 0;
         for (int i = beforeCount; i < itemStagingCount && s_cachedLootCount < (int)(sizeof(s_cachedLoot)/sizeof(s_cachedLoot[0])); i++) {
@@ -4552,9 +4583,8 @@ static void ds_pubg_tick_impl(void) {
         }
     } else {
         if (g_dspubgLevelActorsOff && s_cachedWorldLevelCount > 1) {
-            // Amortize streaming sublevel pawn discovery (max 3 sublevels/tick) to avoid scan spikes
             uint32_t subCount = s_cachedWorldLevelCount - 1;
-            uint32_t batch = subCount < 3 ? subCount : 3;
+            uint32_t batch = subCount < 6 ? subCount : 6;
             for (uint32_t b = 0; b < batch; b++) {
                 uint32_t li = 1 + ((s_sublevelCursor - 1 + b) % subCount);
                 collectActorsFromLevel(s_cachedWorldLevels[li], false);
@@ -4630,6 +4660,20 @@ static void ds_pubg_tick_impl(void) {
             s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
             continue;
         }
+        // Pawns newly processed during this tick's level/sublevel scan are already
+        // in seenPawns; calling processPawn again would fail the duplicate check
+        // and immediately evict them from s_trackedLevelPawns.
+        bool alreadyProcessed = false;
+        for (uint64_t seen : seenPawns) {
+            if (seen == tp) {
+                alreadyProcessed = true;
+                break;
+            }
+        }
+        if (alreadyProcessed) {
+            pi++;
+            continue;
+        }
         if (!processPawn(tp, 0, false)) {
             s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
         } else {
@@ -4688,12 +4732,6 @@ static void ds_pubg_tick_impl(void) {
     g_dspubgGrenadeCount = copyGrenadeCount;
     ++g_dspubgGrenadeEpoch;
     os_unfair_lock_unlock(&g_dspubgSnapshotLock);
-
-    snprintf(g_dspubgStatusBuf, sizeof(g_dspubgStatusBuf),
-             "PUBG: gn=%d pa=%zu act=%d sl=%u p=%d e=%d",
-             g_dspubgNamesCalibrated ? 1 : 0, paEntries.size(),
-             g_dspubgLastActorsCount, (unsigned)s_cachedWorldLevelCount,
-             publishedCount, total360EnemyCount + total360BotCount);
 
     // Garbage collect stale grenade histories (> 3 ticks unseen)
     for (int h = 0; h < 16; h++) {

@@ -1021,7 +1021,6 @@ static CALayer *g_hostedPUBGGrenadeMarkerFillLayers[kDSPUBGMaxGrenades] = {};
 static CATextLayer *g_hostedPUBGGrenadeDangerBanner = nil;
 static CAShapeLayer *g_hostedPUBGTopCountBgLayer = nil;
 static CATextLayer *g_hostedPUBGTopCountLabel = nil;
-static CATextLayer *g_hostedPUBGStatusLabel = nil;
 
 // Per-frame draw budget. The player snapshot is sorted nearest-first, so the
 // long tail past this index costs raster time without tactical value. Enemy
@@ -1064,7 +1063,6 @@ static void ds_hosted_pubg_hide_all(void) {
     if (g_hostedPUBGGrenadeDangerBanner && !g_hostedPUBGGrenadeDangerBanner.hidden) g_hostedPUBGGrenadeDangerBanner.hidden = YES;
     if (g_hostedPUBGTopCountBgLayer && !g_hostedPUBGTopCountBgLayer.hidden) g_hostedPUBGTopCountBgLayer.hidden = YES;
     if (g_hostedPUBGTopCountLabel && !g_hostedPUBGTopCountLabel.hidden) g_hostedPUBGTopCountLabel.hidden = YES;
-    if (g_hostedPUBGStatusLabel && !g_hostedPUBGStatusLabel.hidden) g_hostedPUBGStatusLabel.hidden = YES;
 }
 
 static CGColorRef ds_pubg_cgcolor_from_rgba(uint32_t rgba) {
@@ -1279,23 +1277,12 @@ static void ds_hosted_apply_pubg(void) {
         ds_hosted_pubg_hide_all();
         return;
     }
-    auto showEmptyDiagnostics = [&](NSString *extra) {
-        if (!g_hostedPUBGStatusLabel) return;
-        const char *dbg = ds_pubg_get_debug_status();
-        NSString *msg = (dbg && dbg[0])
-            ? [NSString stringWithFormat:@"%s%@", dbg, extra ?: @""]
-            : [NSString stringWithFormat:@"PUBG: waiting%@", extra ?: @""];
-        ds_layer_set_frame(g_hostedPUBGStatusLabel, CGRectMake(60.0f, 8.0f, 420.0f, 16.0f));
-        ds_layer_set_string(g_hostedPUBGStatusLabel, msg);
-        ds_layer_set_hidden(g_hostedPUBGStatusLabel, NO);
-    };
     UIInterfaceOrientation orientation = ds_active_orientation();
     if (!UIInterfaceOrientationIsLandscape(orientation)) {
         if (ds_pubg_has_render_source()) {
             orientation = UIInterfaceOrientationLandscapeRight;
         } else {
             ds_hosted_pubg_hide_all();
-            showEmptyDiagnostics([NSString stringWithFormat:@" | ori=%d", (int)orientation]);
             return;
         }
     }
@@ -1381,7 +1368,6 @@ static void ds_hosted_apply_pubg(void) {
 
     if (count == 0 && itemCount == 0 && grenadeCount == 0 && (totalEnemies + totalBots) <= 0) {
         ds_hosted_pubg_hide_all();
-        showEmptyDiagnostics(@"");
         return;
     }
 
@@ -1632,34 +1618,38 @@ static void ds_hosted_apply_pubg(void) {
             }
 
             if (validJoint(p.skeleton[0]) || validJoint(p.skeleton[15])) {
-                const float kFixedHeadRadius = 4.5f;
                 float hcx = validJoint(p.skeleton[0]) ? p.skeleton[0].x : p.skeleton[15].x;
                 float hcy = validJoint(p.skeleton[0]) ? p.skeleton[0].y : p.skeleton[15].y;
 
-                // Keep a constant head-ring size across all distances and terminate
-                // the neck segment on the circle perimeter so no bone pierces inside.
+                // Match PUBGDS 3D-perspective head circle size from Head <-> HeadTop,
+                // keep it centered on the real head joint, and stop the neck line
+                // at the circle rim so no bone pierces inside.
+                float r = p.boxHeight / 18.0f;
+                if (validJoint(p.skeleton[15]) && validJoint(p.skeleton[0])) {
+                    float d = hypotf(p.skeleton[15].x - p.skeleton[0].x,
+                                     p.skeleton[15].y - p.skeleton[0].y) * 1.1f;
+                    if (d >= 0.6f && d <= 30.0f) {
+                        r = d;
+                    }
+                }
+                if (r < 2.0f) r = 2.0f;
+                if (r > 24.0f) r = 24.0f;
+
                 if (validJoint(p.skeleton[1])) {
                     float nx = p.skeleton[1].x;
                     float ny = p.skeleton[1].y;
                     float dx = hcx - nx;
                     float dy = hcy - ny;
                     float neckDist = hypotf(dx, dy);
-                    if (neckDist <= maxAllowed) {
-                        float ux = (neckDist >= 0.5f) ? (dx / neckDist) : 0.0f;
-                        float uy = (neckDist >= 0.5f) ? (dy / neckDist) : -1.0f;
-                        if (neckDist < kFixedHeadRadius) {
-                            hcx = nx + ux * kFixedHeadRadius;
-                            hcy = ny + uy * kFixedHeadRadius;
-                        } else {
-                            float rimX = hcx - ux * kFixedHeadRadius;
-                            float rimY = hcy - uy * kFixedHeadRadius;
-                            CGPathMoveToPoint(sTarget, NULL, ds_q05(nx), ds_q05(ny));
-                            CGPathAddLineToPoint(sTarget, NULL, ds_q05(rimX), ds_q05(rimY));
-                        }
+                    if (neckDist <= maxAllowed && neckDist > r + 0.25f) {
+                        float rimX = hcx - (dx / neckDist) * r;
+                        float rimY = hcy - (dy / neckDist) * r;
+                        CGPathMoveToPoint(sTarget, NULL, ds_q05(nx), ds_q05(ny));
+                        CGPathAddLineToPoint(sTarget, NULL, ds_q05(rimX), ds_q05(rimY));
                     }
                 }
 
-                CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(kFixedHeadRadius);
+                CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(r);
                 // CGPathAddArc flattens a 0..2PI sweep to a zero-length arc
                 // (start and end angle normalise to the same point), so the
                 // head ring vanished once the skeleton moved to a batched
@@ -1742,11 +1732,6 @@ static void ds_hosted_apply_pubg(void) {
         } else {
             ds_layer_set_hidden(g_hostedPUBGTopCountLabel, YES);
         }
-    }
-
-    // Diagnostics line: disabled per user request
-    if (g_hostedPUBGStatusLabel) {
-        g_hostedPUBGStatusLabel.hidden = YES;
     }
 
     // Render Items / Loot ESP (copied above)
@@ -2739,23 +2724,6 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
             topLabel.hidden = YES;
             [g_hostedLayer addSublayer:topLabel];
             g_hostedPUBGTopCountLabel = topLabel;
-
-            CATextLayer *statusLabel = [CATextLayer layer];
-            statusLabel.actions = noAnim;
-            statusLabel.contentsScale = scale;
-            statusLabel.alignmentMode = kCAAlignmentLeft;
-            statusLabel.wrapped = YES;
-            statusLabel.fontSize = 9.0;
-            statusLabel.font = (__bridge CFTypeRef)[UIFont monospacedDigitSystemFontOfSize:9.0 weight:UIFontWeightSemibold];
-            statusLabel.foregroundColor = [UIColor colorWithRed:1.0 green:0.82 blue:0.25 alpha:0.85].CGColor;
-            statusLabel.backgroundColor = UIColor.clearColor.CGColor;
-            statusLabel.shadowColor = [UIColor blackColor].CGColor;
-            statusLabel.shadowRadius = 1.0;
-            statusLabel.shadowOpacity = 1.0;
-            statusLabel.shadowOffset = CGSizeZero;
-            statusLabel.hidden = YES;
-            [g_hostedLayer addSublayer:statusLabel];
-            g_hostedPUBGStatusLabel = statusLabel;
         }
 
     g_hostedLayerReady.store(true, std::memory_order_release);
