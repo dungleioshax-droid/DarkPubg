@@ -1714,7 +1714,6 @@ static void ds_hosted_apply_pubg(void) {
         // 5. Skeleton ESP (batched into alive / knocked CGPath)
         if (g_pubgEspSkeleton && p.hasSkeleton) {
             static const int bonePairs[][2] = {
-                {0, 1},                     // Head <-> Neck
                 {1, 2},                     // Neck <-> Pelvis (Spine)
                 {1, 3}, {3, 4}, {4, 5},     // Neck <-> UprR <-> LwrR <-> HandR
                 {1, 6}, {6, 7}, {7, 8},     // Neck <-> UprL <-> LwrL <-> HandL
@@ -1722,51 +1721,64 @@ static void ds_hosted_apply_pubg(void) {
                 {2, 12}, {12, 13}, {13, 14} // Pelvis <-> ThighL <-> CalfL <-> FootL
             };
             const int boneCount = (int)(sizeof(bonePairs) / sizeof(bonePairs[0]));
+            const float maxAllowed = fmaxf(fmaxf(p.boxHeight, p.boxWidth) * 1.25f, 120.0f);
+            auto validJoint = [](const DSPUBGJoint &j) -> bool {
+                return j.valid && isfinite(j.x) && isfinite(j.y) &&
+                       fabsf(j.x) < 10000.0f && fabsf(j.y) < 10000.0f;
+            };
             CGMutablePathRef sTarget = p.isKnocked ? skelKnockedPath : skelAlivePath;
             BOOL drewSkel = NO;
             for (int b = 0; b < boneCount; b++) {
                 int u = bonePairs[b][0];
                 int v = bonePairs[b][1];
-                if (p.skeleton[u].valid && p.skeleton[v].valid) {
+                if (validJoint(p.skeleton[u]) && validJoint(p.skeleton[v])) {
                     float ux = p.skeleton[u].x, uy = p.skeleton[u].y;
                     float vx = p.skeleton[v].x, vy = p.skeleton[v].y;
-                    if (!isnan(ux) && !isinf(ux) && !isnan(uy) && !isinf(uy) &&
-                        !isnan(vx) && !isinf(vx) && !isnan(vy) && !isinf(vy) &&
-                        fabsf(ux) < 10000.0f && fabsf(uy) < 10000.0f &&
-                        fabsf(vx) < 10000.0f && fabsf(vy) < 10000.0f) {
-                        float segDist = hypotf(ux - vx, uy - vy);
-                        float maxAllowed = fmaxf(fmaxf(p.boxHeight, p.boxWidth) * 1.25f, 120.0f);
-                        if (segDist <= maxAllowed) {
-                            CGPathMoveToPoint(sTarget, NULL, ds_q05(ux), ds_q05(uy));
-                            CGPathAddLineToPoint(sTarget, NULL, ds_q05(vx), ds_q05(vy));
-                            drewSkel = YES;
-                        }
+                    float segDist = hypotf(ux - vx, uy - vy);
+                    if (segDist <= maxAllowed) {
+                        CGPathMoveToPoint(sTarget, NULL, ds_q05(ux), ds_q05(uy));
+                        CGPathAddLineToPoint(sTarget, NULL, ds_q05(vx), ds_q05(vy));
+                        drewSkel = YES;
                     }
                 }
             }
 
-            if (p.skeleton[0].valid || p.skeleton[15].valid) {
-                float hcx = p.skeleton[0].valid ? p.skeleton[0].x : p.skeleton[15].x;
-                float hcy = p.skeleton[0].valid ? p.skeleton[0].y : p.skeleton[15].y;
-                if (!isnan(hcx) && !isinf(hcx) && !isnan(hcy) && !isinf(hcy) &&
-                    fabsf(hcx) < 10000.0f && fabsf(hcy) < 10000.0f) {
-                    float r = p.boxHeight / 18.0f;
-                    if (p.skeleton[15].valid && p.skeleton[0].valid) {
-                        float d = hypotf(p.skeleton[15].x - p.skeleton[0].x,
-                                         p.skeleton[15].y - p.skeleton[0].y) * 1.1f;
-                        if (d >= 0.6f && d <= 30.0f) r = d;
+            if (validJoint(p.skeleton[0]) || validJoint(p.skeleton[15])) {
+                const float kFixedHeadRadius = 4.5f;
+                float hcx = validJoint(p.skeleton[0]) ? p.skeleton[0].x : p.skeleton[15].x;
+                float hcy = validJoint(p.skeleton[0]) ? p.skeleton[0].y : p.skeleton[15].y;
+
+                // Keep a constant head-ring size across all distances and terminate
+                // the neck segment on the circle perimeter so no bone pierces inside.
+                if (validJoint(p.skeleton[1])) {
+                    float nx = p.skeleton[1].x;
+                    float ny = p.skeleton[1].y;
+                    float dx = hcx - nx;
+                    float dy = hcy - ny;
+                    float neckDist = hypotf(dx, dy);
+                    if (neckDist <= maxAllowed) {
+                        float ux = (neckDist >= 0.5f) ? (dx / neckDist) : 0.0f;
+                        float uy = (neckDist >= 0.5f) ? (dy / neckDist) : -1.0f;
+                        if (neckDist < kFixedHeadRadius) {
+                            hcx = nx + ux * kFixedHeadRadius;
+                            hcy = ny + uy * kFixedHeadRadius;
+                        } else {
+                            float rimX = hcx - ux * kFixedHeadRadius;
+                            float rimY = hcy - uy * kFixedHeadRadius;
+                            CGPathMoveToPoint(sTarget, NULL, ds_q05(nx), ds_q05(ny));
+                            CGPathAddLineToPoint(sTarget, NULL, ds_q05(rimX), ds_q05(rimY));
+                        }
                     }
-                    if (r < 0.6f) r = 0.6f;
-                    if (r > 24.0f) r = 24.0f;
-                    CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(r);
-                    // CGPathAddArc flattens a 0..2PI sweep to a zero-length arc
-                    // (start and end angle normalise to the same point), so the
-                    // head ring vanished once the skeleton moved to a batched
-                    // CGPath. An explicit ellipse subpath always closes.
-                    CGPathAddEllipseInRect(sTarget, NULL,
-                                           CGRectMake(qx - qr, qy - qr, qr * 2.0f, qr * 2.0f));
-                    drewSkel = YES;
                 }
+
+                CGFloat qx = ds_q05(hcx), qy = ds_q05(hcy), qr = ds_q05(kFixedHeadRadius);
+                // CGPathAddArc flattens a 0..2PI sweep to a zero-length arc
+                // (start and end angle normalise to the same point), so the
+                // head ring vanished once the skeleton moved to a batched
+                // CGPath. An explicit ellipse subpath always closes.
+                CGPathAddEllipseInRect(sTarget, NULL,
+                                       CGRectMake(qx - qr, qy - qr, qr * 2.0f, qr * 2.0f));
+                drewSkel = YES;
             }
             if (drewSkel) {
                 if (p.isKnocked) hasSkelKnocked = YES; else hasSkelAlive = YES;
