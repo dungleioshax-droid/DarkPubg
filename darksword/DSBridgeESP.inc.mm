@@ -896,13 +896,24 @@ static void ds_hosted_consume_render_snapshot(bool fallback,
                                               double startedAt);
 static void ds_hosted_overlay_frame(void);
 
+static std::atomic<bool> g_hostedPubgFramePending(false);
+
+static void ds_hosted_schedule_frame_tick(void) {
+    if (!g_hostedPubgFramePending.exchange(true, std::memory_order_acq_rel)) {
+        dispatch_async(ds_bridge_queue(), ^{
+            @autoreleasepool {
+                ds_hosted_overlay_frame();
+            }
+            g_hostedPubgFramePending.store(false, std::memory_order_release);
+        });
+    }
+}
+
 static void ds_hosted_configure_display_link(CADisplayLink *displayLink) {
     if (!displayLink) return;
     NSInteger maximum = MAX((NSInteger)UIScreen.mainScreen.maximumFramesPerSecond,
                             (NSInteger)60);
-    // Cap ESP compositor updates to 60 Hz so ProMotion devices do not burn
-    // double CPU/backboardd bandwidth and starve PUBG Mobile.
-    NSInteger targetFPS = MIN(maximum, (NSInteger)60);
+    NSInteger targetFPS = MIN(maximum, (NSInteger)120);
     g_hostedMaximumFrameRate.store((uint32_t)targetFPS,
                                    std::memory_order_release);
     displayLink.preferredFramesPerSecond = targetFPS;
@@ -926,17 +937,7 @@ static void ds_hosted_configure_display_link(CADisplayLink *displayLink) {
     g_hostedLastDisplayLinkTick.store(CACurrentMediaTime(),
                                       std::memory_order_relaxed);
 
-    // Phase-locked frame trigger: clear pending AFTER ds_hosted_overlay_frame()
-    // finishes so slow ticks cannot queue up on ds_bridge_queue().
-    static std::atomic<bool> s_pubgFramePending(false);
-    if (!s_pubgFramePending.exchange(true, std::memory_order_acq_rel)) {
-        dispatch_async(ds_bridge_queue(), ^{
-            @autoreleasepool {
-                ds_hosted_overlay_frame();
-            }
-            s_pubgFramePending.store(false, std::memory_order_release);
-        });
-    }
+    ds_hosted_schedule_frame_tick();
 }
 @end
 
@@ -1740,7 +1741,7 @@ static void ds_hosted_apply_pubg(void) {
             NSString *titleStr = [NSString stringWithFormat:@"[%@ %.0fM]", nameStr, it.distanceMeters];
             CGFloat strW = 120.0f;
             CGFloat strH = 14.0f;
-            ds_layer_set_frame(lbl, CGRectMake(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
+            ds_layer_set_frame(lbl, ds_q1_rect(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
             if (lbl.fontSize != 9.5) lbl.fontSize = 9.5;
             CGColorRef vehColor = ds_pubg_cgcolor_from_rgba(it.colorRGBA);
             if (lbl.foregroundColor != vehColor) lbl.foregroundColor = vehColor;
@@ -1750,7 +1751,7 @@ static void ds_hosted_apply_pubg(void) {
             NSString *itemText = [NSString stringWithFormat:@"[%@ %.0fM]", nameStr, it.distanceMeters];
             CGFloat strW = it.isPriority ? 115.0f : 100.0f;
             CGFloat strH = it.isPriority ? 16.0f : 13.0f;
-            ds_layer_set_frame(lbl, CGRectMake(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
+            ds_layer_set_frame(lbl, ds_q1_rect(posX - strW * 0.5f, posY - strH * 0.5f, strW, strH));
             if (lbl.fontSize != (it.isPriority ? 10.0 : 8.5)) {
                 lbl.fontSize = it.isPriority ? 10.0 : 8.5;
             }
@@ -2081,31 +2082,27 @@ static void ds_hosted_consume_render_snapshot(bool fallback,
 }
 
 static void ds_hosted_publish_render_snapshot(const DSHostedRenderSnapshot &next) {
-    BOOL queueFallback = NO;
+    BOOL queueApply = NO;
     uint64_t fallbackToken = 0;
-    double now = CACurrentMediaTime();
     os_unfair_lock_lock(&g_hostedSnapshotLock);
     int writeIndex = g_hostedPublishedSnapshot == 0 ? 1 : 0;
     g_hostedSnapshots[writeIndex] = next;
     g_hostedSnapshots[writeIndex].generation = ++g_hostedSnapshotGeneration;
     g_hostedPublishedSnapshot = writeIndex;
-    if (now - g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > 0.032 &&
-        !g_hostedFallbackApplyQueued) {
+    if (!g_hostedFallbackApplyQueued) {
         g_hostedFallbackApplyQueued = YES;
         fallbackToken = ++g_hostedFallbackToken;
-        queueFallback = YES;
+        queueApply = YES;
     }
     os_unfair_lock_unlock(&g_hostedSnapshotLock);
-    if (queueFallback) {
+    if (queueApply) {
         dispatch_async(dispatch_get_main_queue(), ^{
             double startedAt = CACurrentMediaTime();
             os_unfair_lock_lock(&g_hostedSnapshotLock);
             BOOL validToken = g_hostedFallbackApplyQueued &&
                               fallbackToken == g_hostedFallbackToken;
-            BOOL displayLinkResumed =
-                g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > now;
             os_unfair_lock_unlock(&g_hostedSnapshotLock);
-            if (validToken && !displayLinkResumed) {
+            if (validToken) {
                 ds_hosted_consume_render_snapshot(true, 0.0, 0.0, startedAt);
             }
             os_unfair_lock_lock(&g_hostedSnapshotLock);
@@ -2764,11 +2761,11 @@ static void ds_hosted_overlay_start(void) {
                 if (g_hostedTimer) {
                     uint32_t targetFPS = MIN(MAX(
                         g_hostedMaximumFrameRate.load(std::memory_order_acquire),
-                        30u), 60u);
+                        60u), 120u);
                     dispatch_source_set_timer(
                         g_hostedTimer, DISPATCH_TIME_NOW,
                         (uint64_t)(NSEC_PER_SEC / targetFPS),
-                        1 * NSEC_PER_MSEC);
+                        500 * NSEC_PER_USEC);
                 }
             });
         }
@@ -2776,26 +2773,32 @@ static void ds_hosted_overlay_start(void) {
     g_hostedTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                            ds_bridge_queue());
     uint32_t targetFPS = MIN(MAX(
-        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 30u), 60u);
+        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 60u), 120u);
     dispatch_source_set_timer(g_hostedTimer, DISPATCH_TIME_NOW,
                               (uint64_t)(NSEC_PER_SEC / targetFPS),
-                              1 * NSEC_PER_MSEC);
+                              500 * NSEC_PER_USEC);
     dispatch_source_set_event_handler(g_hostedTimer, ^{
         @autoreleasepool {
             if (g_hostedLayerReady.load(std::memory_order_acquire)) {
                 uint64_t pulse = g_hostedDisplayPulse.load(std::memory_order_acquire);
+                uint32_t fps = MIN(MAX(
+                    g_hostedMaximumFrameRate.load(std::memory_order_acquire), 60u), 120u);
+                double missWindow = 1.25 / (double)fps;
                 if (pulse == g_hostedConsumedDisplayPulse) {
                     double lastTick = g_hostedLastDisplayLinkTick.load(
                         std::memory_order_relaxed);
                     if (lastTick > 0.0 &&
-                        CACurrentMediaTime() - lastTick <= 0.10) {
+                        CACurrentMediaTime() - lastTick <= missWindow) {
                         return;
                     }
                 } else {
                     g_hostedConsumedDisplayPulse = pulse;
                 }
             }
-            ds_hosted_overlay_frame();
+            if (!g_hostedPubgFramePending.exchange(true, std::memory_order_acq_rel)) {
+                ds_hosted_overlay_frame();
+                g_hostedPubgFramePending.store(false, std::memory_order_release);
+            }
         }
     });
     dispatch_resume(g_hostedTimer);

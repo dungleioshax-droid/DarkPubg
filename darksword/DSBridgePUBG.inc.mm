@@ -136,6 +136,7 @@ struct DSPUBGActorCacheEntry {
     uint64_t infoActor;
     char cachedName[32];
     char cachedNation[16];
+    uint32_t cachedPlayerKey;
     uint64_t metaActor;
     uint64_t metaPs;
     bool cachedIsAI;
@@ -158,6 +159,10 @@ static uint64_t s_lastMatchWorld = 0;
 static uint64_t s_lastMatchLevel = 0;
 static bool s_lastMatchMapIsLobby = false;
 static uint64_t g_dspubgWorldLevelsOff = 0;
+static uint32_t s_cachedBoneReadIdxOff = 0;
+static uint64_t s_cachedWorldLevels[64] = {};
+static uint32_t s_cachedWorldLevelCount = 0;
+static uint32_t s_sublevelCursor = 1;
 
 static inline uint32_t ds_pubg_actor_cache_hash(uint64_t actor) {
     return (uint32_t)((actor >> 4) ^ (actor >> 13)) & (uint32_t)(kDSPUBGActorCacheSize - 1);
@@ -2718,6 +2723,22 @@ static void ds_pubg_bone_world_from_local(const uint8_t *c2w,
 // Dynamically locates live ComponentSpaceTransforms TArray<FTransform> on USkeletalMeshComponent.
 // Tests verified double buffer offsets (0xA30/0xA40), eval-context (0xE18/0xE28), cached (0xCE0/0xCD0),
 // and bone-space (0xC98).
+static int32_t ds_pubg_read_bone_idx(uint64_t meshComp) {
+    if (s_cachedBoneReadIdxOff) {
+        int32_t v = ds_pubg_read_i32(meshComp + (uint64_t)s_cachedBoneReadIdxOff);
+        if (v == 0 || v == 1) return v;
+    }
+    static const uint32_t kIdxOffs[] = { 0xA50U, 0xA54U, 0xA74U, 0xA78U };
+    for (uint32_t off : kIdxOffs) {
+        int32_t v = ds_pubg_read_i32(meshComp + (uint64_t)off);
+        if (v == 0 || v == 1) {
+            s_cachedBoneReadIdxOff = off;
+            return v;
+        }
+    }
+    return -1;
+}
+
 static bool ds_pubg_find_bone_array(uint64_t meshComp, uint64_t *outData, uint32_t *outCount, uint32_t *outOffset) {
     if (!meshComp || !ds_pubg_valid(meshComp)) return false;
 
@@ -2742,11 +2763,7 @@ static bool ds_pubg_find_bone_array(uint64_t meshComp, uint64_t *outData, uint32
     if (testOffset(0xCE0)) return true;
 
     // 2. Double buffer ComponentSpaceTransformsArray[2] (0xA30 / 0xA40)
-    // Read CurrentReadIndex (0xA50 / 0xA54 / 0xA74 / 0xA78)
-    int32_t rd = ds_pubg_read_i32(meshComp + 0xA50ULL);
-    if (rd != 0 && rd != 1) rd = ds_pubg_read_i32(meshComp + 0xA54ULL);
-    if (rd != 0 && rd != 1) rd = ds_pubg_read_i32(meshComp + 0xA74ULL);
-    if (rd != 0 && rd != 1) rd = ds_pubg_read_i32(meshComp + 0xA78ULL);
+    int32_t rd = ds_pubg_read_bone_idx(meshComp);
     uint32_t first = (rd == 1) ? 0xA40 : 0xA30;
     uint32_t second = (rd == 1) ? 0xA30 : 0xA40;
 
@@ -2758,6 +2775,39 @@ static bool ds_pubg_find_bone_array(uint64_t meshComp, uint64_t *outData, uint32
     if (testOffset(0xE28)) return true;
 
     return false;
+}
+
+static bool ds_pubg_read_live_bone_array(uint64_t meshComp, uint32_t cachedOff,
+                                         uint64_t *outData, uint32_t *outCount, uint32_t *outOffset) {
+    if (!meshComp || !ds_pubg_valid(meshComp)) return false;
+
+    auto testOffset = [&](uint32_t off) -> bool {
+        uint8_t hdr[16] = {0};
+        if (!ds_pubg_read(meshComp + (uint64_t)off, hdr, sizeof(hdr))) return false;
+        uint64_t d = 0;
+        uint32_t c = 0, maxc = 0;
+        memcpy(&d, hdr, 8);
+        memcpy(&c, hdr + 8, 4);
+        memcpy(&maxc, hdr + 12, 4);
+        d &= 0x0000FFFFFFFFFFFFULL;
+        if (!ds_pubg_valid(d) || (d & 0x7ULL) != 0) return false;
+        if (c < 20 || c > 800 || maxc < c || maxc > 2000) return false;
+        if (outData) *outData = d;
+        if (outCount) *outCount = c;
+        if (outOffset) *outOffset = off;
+        return true;
+    };
+
+    if (cachedOff == 0xA30U || cachedOff == 0xA40U) {
+        int32_t rd = ds_pubg_read_bone_idx(meshComp);
+        uint32_t first = (rd == 1) ? 0xA40U : 0xA30U;
+        uint32_t second = (rd == 1) ? 0xA30U : 0xA40U;
+        if (testOffset(first) || testOffset(second)) return true;
+    } else if (cachedOff == 0xCE0U || cachedOff == 0xE18U || cachedOff == 0xE28U) {
+        if (testOffset(cachedOff)) return true;
+    }
+
+    return ds_pubg_find_bone_array(meshComp, outData, outCount, outOffset);
 }
 
 static const char *ds_pubg_weapon_name_by_id(int32_t id) {
@@ -3008,6 +3058,9 @@ static void ds_pubg_reset_match_caches(void) {
     s_lastMatchLevel = 0;
     s_lastMatchMapIsLobby = false;
     g_dspubgWorldLevelsOff = 0;
+    s_cachedBoneReadIdxOff = 0;
+    s_cachedWorldLevelCount = 0;
+    s_sublevelCursor = 1;
     ds_pubg_smart_reset();
 }
 
@@ -5673,19 +5726,28 @@ static void ds_pubg_tick_impl(void) {
             }
         }
 
-        // 1. Reject local player's own bullets, weapons, projectiles
-        uint64_t owner = ds_pubg_read_ptr(pawn + 0x140ULL);
-        uint64_t instigator = ds_pubg_read_ptr(pawn + 0x138ULL);
-        if (!isTrainingTarget && localPawn && (owner == localPawn || instigator == localPawn)) {
-            return false;
+        // 1. Reject local player's own bullets, weapons, projectiles (once per actor)
+        if (!(cacheValid && cEntry.isPawn) && !isTrainingTarget && localPawn) {
+            uint64_t owner = ds_pubg_read_ptr(pawn + 0x140ULL);
+            uint64_t instigator = ds_pubg_read_ptr(pawn + 0x138ULL);
+            if (owner == localPawn || instigator == localPawn) {
+                return false;
+            }
         }
 
-        // 2. Hidden / Dead check - AActor.bHidden (0xE8) and STExtraCharacter.bDead (0xE8C)
+        // 2. Hidden check - AActor.bHidden (0xE8)
         if (!isTrainingTarget) {
             uint8_t aHidden = ds_pubg_read_u8(pawn + 0xE8ULL);
             if (aHidden & 0x1) return false;
-            uint8_t isDead = ds_pubg_read_u8(pawn + kDSPUBGCharacterDeadOffset) & 1;
-            if (isDead) return false;
+        }
+
+        // Batch read 0xE70..0xE8F (Health, HealthMax, GroggyHealth 0xE78..0xE84, bDead 0xE8C)
+        uint8_t healthBlock[0x20] = {0};
+        if (!ds_pubg_read(pawn + kDSPUBGCharacterHealthOffset, healthBlock, sizeof(healthBlock))) {
+            return false;
+        }
+        if (!isTrainingTarget && (healthBlock[0x1C] & 1)) {
+            return false;
         }
 
         // 3. Must have valid RootComponent and Mesh (standard UE4 character)
@@ -5699,8 +5761,9 @@ static void ds_pubg_tick_impl(void) {
 
         // 4. Health validation (Reject non-characters, pets/companions, and dead bodies, while
         // keeping PlayerArray pawns whose HealthMax has not replicated yet).
-        float health = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthOffset);
-        float healthMax = ds_pubg_read_f32(pawn + kDSPUBGCharacterHealthMaxOffset);
+        float health = 0.0f, healthMax = 0.0f;
+        memcpy(&health, healthBlock + 0x00, 4);
+        memcpy(&healthMax, healthBlock + 0x04, 4);
         if (isTrainingTarget) {
             if (isnan(healthMax) || isinf(healthMax) || healthMax < 50.0f || healthMax > 1000000.0f) {
                 healthMax = 100.0f;
@@ -5738,16 +5801,14 @@ static void ds_pubg_tick_impl(void) {
         cEntry.meshComp = meshComp;
 
         bool isKnocked = false;
-        // Check multiple possible GroggyHealth offsets in STExtraCharacter (shifted by +0x10 in new DUMP: 0xE78, 0xE7C, 0xE80)
-        float gh = ds_pubg_read_f32(pawn + 0xE78ULL);
-        if (isnan(gh) || isinf(gh) || gh <= 0.0f || gh > 200.0f) {
-            gh = ds_pubg_read_f32(pawn + 0xE7CULL);
-        }
-        if (isnan(gh) || isinf(gh) || gh <= 0.0f || gh > 200.0f) {
-            gh = ds_pubg_read_f32(pawn + 0xE80ULL);
-        }
-        if (isnan(gh) || isinf(gh) || gh <= 0.0f || gh > 200.0f) {
-            gh = ds_pubg_read_f32(pawn + 0xE84ULL);
+        float gh = 0.0f;
+        for (int gOff = 0x08; gOff <= 0x14; gOff += 4) {
+            float candidate = 0.0f;
+            memcpy(&candidate, healthBlock + gOff, 4);
+            if (!isnan(candidate) && !isinf(candidate) && candidate > 0.0f && candidate <= 200.0f) {
+                gh = candidate;
+                break;
+            }
         }
 
         // If bDead (offset 0xE8C) is 0, but standard health <= 0, the player is knocked down (gục ngã)!
@@ -5959,7 +6020,6 @@ static void ds_pubg_tick_impl(void) {
         p.isOccluded = false;
         p.isVehicle = false;
         p.actorPtr = pawn;
-        p.playerKey = ds_pubg_read_u32(pawn + kDSPUBGCharacterPlayerKeyOffset);
         p.camRelX = camRelX;
         p.camRelY = camRelY;
         p.camRelZ = camRelZ;
@@ -6106,10 +6166,12 @@ static void ds_pubg_tick_impl(void) {
 
                 memcpy(cEntry.cachedName, resolvedName, sizeof(cEntry.cachedName));
                 memcpy(cEntry.cachedNation, resolvedNation, sizeof(cEntry.cachedNation));
+                cEntry.cachedPlayerKey = ds_pubg_read_u32(pawn + kDSPUBGCharacterPlayerKeyOffset);
                 cEntry.infoActor = pawn;
             }
             memcpy(p.name, cEntry.cachedName, sizeof(p.name));
             memcpy(p.nation, cEntry.cachedNation, sizeof(p.nation));
+            p.playerKey = cEntry.cachedPlayerKey;
 
             // Real Skeletal Bones (16 joints, 15 bone links)
             p.hasSkeleton = false;
@@ -6119,16 +6181,9 @@ static void ds_pubg_tick_impl(void) {
             if (meshComp && ds_pubg_valid(meshComp)) {
                 uint32_t bCount = 0;
                 uint32_t resolvedOff = 0;
-                if (cacheValid && (cEntry.boneOffset == 0xCE0ULL || cEntry.boneOffset == 0xE18ULL || cEntry.boneOffset == 0xE28ULL)) {
-                    uint64_t livePtr = ds_pubg_read_ptr(meshComp + cEntry.boneOffset);
-                    uint32_t liveCount = ds_pubg_read_u32(meshComp + cEntry.boneOffset + 8ULL);
-                    if (livePtr && ds_pubg_valid(livePtr) && liveCount >= 20 && liveCount <= 1024) {
-                        boneData = livePtr;
-                        bCount = liveCount;
-                        resolvedOff = cEntry.boneOffset;
-                    }
-                }
-                if (!boneData && ds_pubg_find_bone_array(meshComp, &boneData, &bCount, &resolvedOff) && boneData && bCount >= 20) {
+                if (ds_pubg_read_live_bone_array(meshComp, cacheValid ? cEntry.boneOffset : 0,
+                                                 &boneData, &bCount, &resolvedOff) &&
+                    boneData && bCount >= 20) {
                     cEntry.boneData = boneData;
                     cEntry.boneCount = bCount;
                     cEntry.boneOffset = resolvedOff;
@@ -6957,7 +7012,13 @@ static void ds_pubg_tick_impl(void) {
     // Vischeck disabled per user request: map obstacle scan skipped
     s_obstacleCount = 0;
 
-    // Source 1: GameState.PlayerArray
+    // Source 1 preload: read PlayerArray entries (defer projection until after level/loot scan)
+    struct DSPUBGPAEntry {
+        uint64_t pawn;
+        uint64_t ps;
+        bool isBot;
+    };
+    std::vector<DSPUBGPAEntry> paEntries;
     uint64_t gameState = ds_pubg_read_ptr(world + kDSPUBGWorldGameStateOffset);
     if (!gameState) {
         uint64_t gm = ds_pubg_read_ptr(world + kDSPUBGWorldAuthorityGameModeOffset);
@@ -6970,43 +7031,28 @@ static void ds_pubg_tick_impl(void) {
             if (playerCount > 128) playerCount = 128;
             std::vector<uint64_t> playerStates(playerCount, 0);
             if (ds_pubg_read(playerArrayData, playerStates.data(), playerCount * sizeof(uint64_t))) {
+                paEntries.reserve(playerCount);
                 for (uint32_t i = 0; i < playerCount; i++) {
                     uint64_t ps = playerStates[i];
                     if (!ps || !ds_pubg_valid(ps)) continue;
                     uint64_t pawn = ds_pubg_read_ptr(ps + kDSPUBGPlayerStatePawnPrivateOffset);
+                    if (!pawn) continue;
                     uint8_t botByte = ds_pubg_read_u8(ps + kDSPUBGPlayerStateIsABotOffset);
-                    bool isBot = (botByte & 0x4) != 0;
-                    if (pawn) {
-                        processPawn(pawn, ps, isBot);
-                    }
+                    paEntries.push_back({ pawn, ps, (botByte & 0x4) != 0 });
                 }
             }
         }
     }
 
-    // Source 2: Levels Actors (Dual-Cadence Engine: tracked pawns/grenades/vehicles every frame, full loot scan throttled)
-    // Fast-path: Update tracked level pawns at full frame rate
-    for (size_t pi = 0; pi < s_trackedLevelPawns.size(); ) {
-        uint64_t tp = s_trackedLevelPawns[pi];
-        if (!tp || !ds_pubg_valid(tp)) {
-            s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
-            continue;
+    auto isKnownPawn = [&](uint64_t actor) -> bool {
+        for (const auto &e : paEntries) {
+            if (e.pawn == actor) return true;
         }
-        if (!processPawn(tp, 0, false)) {
-            s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
-        } else {
-            pi++;
+        for (uint64_t tp : s_trackedLevelPawns) {
+            if (tp == actor) return true;
         }
-    }
-
-    for (size_t gi = 0; gi < s_trackedLevelGrenades.size(); ) {
-        uint64_t tg = s_trackedLevelGrenades[gi];
-        if (!tg || !ds_pubg_valid(tg) || !processGrenade(tg)) {
-            s_trackedLevelGrenades.erase(s_trackedLevelGrenades.begin() + gi);
-        } else {
-            gi++;
-        }
-    }
+        return false;
+    };
 
     auto collectActorsFromLevel = [&](uint64_t lvl, bool isPersistent) {
         if (!lvl || !ds_pubg_valid(lvl)) return;
@@ -7021,8 +7067,6 @@ static void ds_pubg_tick_impl(void) {
                 }
             }
         } else if (g_dspubgLevelActorsOff) {
-            // For streaming sublevels, reuse the PersistentLevel Actors offset directly
-            // without running the 8KB brute-force scan or clearing g_dspubgLevelActorsOff.
             if (!ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &actorsData, &actorsCount) ||
                 actorsCount == 0 || actorsCount > 8192) {
                 return;
@@ -7042,6 +7086,7 @@ static void ds_pubg_tick_impl(void) {
                 for (uint32_t i = 0; i < actorsCount; i++) {
                     uint64_t actor = s_levelActors[i];
                     if (!actor || actor == localPawn || !ds_pubg_valid(actor)) continue;
+                    if (isKnownPawn(actor)) continue;
 
                     uint32_t cSlot = ds_pubg_actor_cache_hash(actor);
                     DSPUBGActorCacheEntry &cEntry = g_dspubgActorCache[cSlot];
@@ -7054,47 +7099,48 @@ static void ds_pubg_tick_impl(void) {
                             continue;
                         }
                         if (cEntry.isPawn) {
-                            if (processPawn(actor, 0, false)) {
-                                bool already = false;
-                                for (uint64_t tp : s_trackedLevelPawns) { if (tp == actor) { already = true; break; } }
-                                if (!already && s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
-                            }
+                            if (s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
                             continue;
                         }
                     }
 
                     if (!processPawn(actor, 0, false)) {
+                        if (!isPersistent) continue;
                         if (!processGrenade(actor)) {
-                            if (isPersistent) processItemOrVehicle(actor);
+                            processItemOrVehicle(actor);
                         } else {
                             bool alreadyG = false;
                             for (uint64_t tg : s_trackedLevelGrenades) { if (tg == actor) { alreadyG = true; break; } }
                             if (!alreadyG && s_trackedLevelGrenades.size() < 16) s_trackedLevelGrenades.push_back(actor);
                         }
                     } else {
-                        bool already = false;
-                        for (uint64_t tp : s_trackedLevelPawns) { if (tp == actor) { already = true; break; } }
-                        if (!already && s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
+                        if (s_trackedLevelPawns.size() < 128) s_trackedLevelPawns.push_back(actor);
                     }
                 }
             }
         }
     };
 
-    static const uint32_t kDSPUBGFullScanInterval = 15;
+    for (size_t gi = 0; gi < s_trackedLevelGrenades.size(); ) {
+        uint64_t tg = s_trackedLevelGrenades[gi];
+        if (!tg || !ds_pubg_valid(tg) || !processGrenade(tg)) {
+            s_trackedLevelGrenades.erase(s_trackedLevelGrenades.begin() + gi);
+        } else {
+            gi++;
+        }
+    }
+
+    // Dual-cadence level & loot scan BEFORE refreshing camera/player transforms
+    // so enemy ESP always projects against the latest post-scan camera pose.
+    static const uint32_t kDSPUBGFullScanInterval = 20;
     bool needFullLevelScan = ((s_levelScanTick++ % kDSPUBGFullScanInterval) == 0);
     if (needFullLevelScan && level) {
         s_trackedLevelVehicles.clear();
         int beforeCount = itemStagingCount;
         collectActorsFromLevel(level, true);
         if (g_dspubgLevelActorsOff) {
-            uint64_t worldLevels[64] = {0};
-            uint32_t worldLevelCount = ds_pubg_find_world_levels(world, level, worldLevels, 64);
-            for (uint32_t li = 1; li < worldLevelCount; li++) {
-                collectActorsFromLevel(worldLevels[li], false);
-            }
+            s_cachedWorldLevelCount = ds_pubg_find_world_levels(world, level, s_cachedWorldLevels, 64);
         }
-        // Cache discovered static loot items with their 3D world coordinates for smooth reprojection
         s_cachedLootCount = 0;
         for (int i = beforeCount; i < itemStagingCount && s_cachedLootCount < (int)(sizeof(s_cachedLoot)/sizeof(s_cachedLoot[0])); i++) {
             if (itemStaging[i].category == DSPUBGItemCategoryVehicle) continue;
@@ -7108,8 +7154,16 @@ static void ds_pubg_tick_impl(void) {
             cl.isPriority = itemStaging[i].isPriority;
         }
     } else {
-        // Intermediate frames: live-update tracked vehicles and reproject cached loot
-        // through the current camera basis so labels move smoothly without (0,0) flicker.
+        if (g_dspubgLevelActorsOff && s_cachedWorldLevelCount > 1) {
+            // Amortize streaming sublevel pawn discovery (max 3 sublevels/tick) to avoid scan spikes
+            uint32_t subCount = s_cachedWorldLevelCount - 1;
+            uint32_t batch = subCount < 3 ? subCount : 3;
+            for (uint32_t b = 0; b < batch; b++) {
+                uint32_t li = 1 + ((s_sublevelCursor - 1 + b) % subCount);
+                collectActorsFromLevel(s_cachedWorldLevels[li], false);
+            }
+            s_sublevelCursor = 1 + ((s_sublevelCursor - 1 + batch) % subCount);
+        }
         for (size_t vi = 0; vi < s_trackedLevelVehicles.size(); ) {
             uint64_t tv = s_trackedLevelVehicles[vi];
             if (!tv || !ds_pubg_valid(tv)) {
@@ -7119,6 +7173,27 @@ static void ds_pubg_tick_impl(void) {
             processItemOrVehicle(tv);
             vi++;
         }
+    }
+
+    // Refresh CameraCache.POV immediately before projecting loot & players
+    if (cameraManager) {
+        uint64_t cachePov = cameraManager + 0x520ULL + 0x10ULL;
+        DSPUBGVector freshLoc = {};
+        DSPUBGRotator freshRot = {};
+        float freshFOV = 0.0f;
+        if (ds_pubg_read(cachePov + kDSPUBGPOVLocationOffset, &freshLoc, sizeof(freshLoc)) &&
+            ds_pubg_read(cachePov + kDSPUBGPOVRotationOffset, &freshRot, sizeof(freshRot)) &&
+            ds_pubg_read(cachePov + kDSPUBGPOVFOVOffset, &freshFOV, sizeof(freshFOV)) &&
+            !isnan(freshLoc.X) && !isinf(freshLoc.X) && (fabsf(freshLoc.X) > 1.0f || fabsf(freshLoc.Y) > 1.0f) &&
+            !isnan(freshRot.Pitch) && !isnan(freshRot.Yaw) && freshFOV >= 20.0f && freshFOV <= 160.0f) {
+            DSPUBGCamBasis freshBasis = {};
+            if (ds_pubg_cam_basis_build(freshLoc, freshRot, freshFOV, screenW, screenH, freshBasis)) {
+                basis = freshBasis;
+            }
+        }
+    }
+
+    if (!needFullLevelScan) {
         for (int i = 0; i < s_cachedLootCount && itemStagingCount < kDSPUBGMaxItems * 2; i++) {
             const DSPUBGCachedLoot &cl = s_cachedLoot[i];
             if (!cl.hasWorldLoc) continue;
@@ -7145,6 +7220,23 @@ static void ds_pubg_tick_impl(void) {
             pi.isVisible = true;
             pi.colorRGBA = cl.colorRGBA;
             pi.isPriority = cl.isPriority;
+        }
+    }
+
+    // Project all players with the freshest camera basis right before snapshot publish
+    for (const auto &pa : paEntries) {
+        processPawn(pa.pawn, pa.ps, pa.isBot);
+    }
+    for (size_t pi = 0; pi < s_trackedLevelPawns.size(); ) {
+        uint64_t tp = s_trackedLevelPawns[pi];
+        if (!tp || !ds_pubg_valid(tp)) {
+            s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
+            continue;
+        }
+        if (!processPawn(tp, 0, false)) {
+            s_trackedLevelPawns.erase(s_trackedLevelPawns.begin() + pi);
+        } else {
+            pi++;
         }
     }
 
