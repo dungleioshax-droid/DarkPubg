@@ -1714,25 +1714,9 @@ static void ds_hosted_apply_pubg(void) {
     if (itemCount < 0) itemCount = 0;
     if (itemCount > kDSPUBGMaxItems) itemCount = kDSPUBGMaxItems;
 
-    // Anti-overlap vertical stacking for items at the same screen position (capped to 48 nearest items)
-    int antiOverlapCount = (itemCount > 48) ? 48 : itemCount;
-    CGPoint adjustedPositions[kDSPUBGMaxItems];
-    for (int i = 0; i < itemCount; i++) {
-        adjustedPositions[i] = CGPointMake(items[i].screenX, items[i].screenY);
-    }
-
-    for (int i = 0; i < antiOverlapCount; i++) {
-        const DSPUBGProjectedItem &it = items[i];
-        if (!it.isVisible) continue;
-        for (int j = 0; j < i; j++) {
-            if (!items[j].isVisible) continue;
-            CGFloat dx = fabsf(adjustedPositions[i].x - adjustedPositions[j].x);
-            CGFloat dy = fabsf(adjustedPositions[i].y - adjustedPositions[j].y);
-            if (dx < 38.0f && dy < 11.5f) {
-                adjustedPositions[i].y = adjustedPositions[j].y - 12.0f;
-            }
-        }
-    }
+    // Labels are drawn at the projected screen position of their actor. There
+    // is deliberately no overlap stacking: shifting a label moved it away from
+    // the loot it describes, which made dense areas unreadable.
 
     for (int i = 0; i < kDSPUBGMaxItems; i++) {
         CATextLayer *lbl = g_hostedPUBGItemLabels[i];
@@ -1758,8 +1742,8 @@ static void ds_hosted_apply_pubg(void) {
             nameStr = @"Vật Phẩm";
         }
 
-        CGFloat posX = adjustedPositions[i].x;
-        CGFloat posY = adjustedPositions[i].y;
+        CGFloat posX = it.screenX;
+        CGFloat posY = it.screenY;
 
         if (it.category == DSPUBGItemCategoryVehicle) {
             NSString *titleStr = [NSString stringWithFormat:@"[%@ %.0fM]", nameStr, it.distanceMeters];
