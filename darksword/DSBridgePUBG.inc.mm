@@ -5735,19 +5735,21 @@ static void ds_pubg_tick_impl(void) {
             }
         }
 
-        // 2. Hidden check - AActor.bHidden (0xE8)
-        if (!isTrainingTarget) {
+        // 2. Hidden check - AActor.bHidden (0xE8) and batch Health/Groggy/bDead read
+        uint8_t healthBlock[0x20] = {0};
+        if (isTrainingTarget) {
+            if (!ds_pubg_read(pawn + kDSPUBGCharacterHealthOffset, healthBlock, 8)) {
+                return false;
+            }
+        } else {
             uint8_t aHidden = ds_pubg_read_u8(pawn + 0xE8ULL);
             if (aHidden & 0x1) return false;
-        }
-
-        // Batch read 0xE70..0xE8F (Health, HealthMax, GroggyHealth 0xE78..0xE84, bDead 0xE8C)
-        uint8_t healthBlock[0x20] = {0};
-        if (!ds_pubg_read(pawn + kDSPUBGCharacterHealthOffset, healthBlock, sizeof(healthBlock))) {
-            return false;
-        }
-        if (!isTrainingTarget && (healthBlock[0x1C] & 1)) {
-            return false;
+            if (!ds_pubg_read(pawn + kDSPUBGCharacterHealthOffset, healthBlock, sizeof(healthBlock))) {
+                return false;
+            }
+            if (healthBlock[0x1C] & 1) {
+                return false;
+            }
         }
 
         // 3. Must have valid RootComponent and Mesh (standard UE4 character)
@@ -7067,6 +7069,10 @@ static void ds_pubg_tick_impl(void) {
                 }
             }
         } else if (g_dspubgLevelActorsOff) {
+            uint64_t owning = ds_pubg_read_ptr(lvl + 0xC0ULL);
+            if (owning != world) {
+                return;
+            }
             if (!ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &actorsData, &actorsCount) ||
                 actorsCount == 0 || actorsCount > 8192) {
                 return;

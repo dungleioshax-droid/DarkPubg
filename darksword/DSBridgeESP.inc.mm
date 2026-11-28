@@ -913,7 +913,9 @@ static void ds_hosted_configure_display_link(CADisplayLink *displayLink) {
     if (!displayLink) return;
     NSInteger maximum = MAX((NSInteger)UIScreen.mainScreen.maximumFramesPerSecond,
                             (NSInteger)60);
-    NSInteger targetFPS = MIN(maximum, (NSInteger)120);
+    // Cap ESP compositor updates to 60 Hz so ProMotion devices do not burn
+    // double CPU/backboardd bandwidth and get throttled/killed in background.
+    NSInteger targetFPS = MIN(maximum, (NSInteger)60);
     g_hostedMaximumFrameRate.store((uint32_t)targetFPS,
                                    std::memory_order_release);
     displayLink.preferredFramesPerSecond = targetFPS;
@@ -2082,27 +2084,31 @@ static void ds_hosted_consume_render_snapshot(bool fallback,
 }
 
 static void ds_hosted_publish_render_snapshot(const DSHostedRenderSnapshot &next) {
-    BOOL queueApply = NO;
+    BOOL queueFallback = NO;
     uint64_t fallbackToken = 0;
+    double now = CACurrentMediaTime();
     os_unfair_lock_lock(&g_hostedSnapshotLock);
     int writeIndex = g_hostedPublishedSnapshot == 0 ? 1 : 0;
     g_hostedSnapshots[writeIndex] = next;
     g_hostedSnapshots[writeIndex].generation = ++g_hostedSnapshotGeneration;
     g_hostedPublishedSnapshot = writeIndex;
-    if (!g_hostedFallbackApplyQueued) {
+    if (now - g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > 0.025 &&
+        !g_hostedFallbackApplyQueued) {
         g_hostedFallbackApplyQueued = YES;
         fallbackToken = ++g_hostedFallbackToken;
-        queueApply = YES;
+        queueFallback = YES;
     }
     os_unfair_lock_unlock(&g_hostedSnapshotLock);
-    if (queueApply) {
+    if (queueFallback) {
         dispatch_async(dispatch_get_main_queue(), ^{
             double startedAt = CACurrentMediaTime();
             os_unfair_lock_lock(&g_hostedSnapshotLock);
             BOOL validToken = g_hostedFallbackApplyQueued &&
                               fallbackToken == g_hostedFallbackToken;
+            BOOL displayLinkResumed =
+                g_hostedLastDisplayLinkTick.load(std::memory_order_relaxed) > now;
             os_unfair_lock_unlock(&g_hostedSnapshotLock);
-            if (validToken) {
+            if (validToken && !displayLinkResumed) {
                 ds_hosted_consume_render_snapshot(true, 0.0, 0.0, startedAt);
             }
             os_unfair_lock_lock(&g_hostedSnapshotLock);
@@ -2761,11 +2767,11 @@ static void ds_hosted_overlay_start(void) {
                 if (g_hostedTimer) {
                     uint32_t targetFPS = MIN(MAX(
                         g_hostedMaximumFrameRate.load(std::memory_order_acquire),
-                        60u), 120u);
+                        30u), 60u);
                     dispatch_source_set_timer(
                         g_hostedTimer, DISPATCH_TIME_NOW,
                         (uint64_t)(NSEC_PER_SEC / targetFPS),
-                        500 * NSEC_PER_USEC);
+                        1 * NSEC_PER_MSEC);
                 }
             });
         }
@@ -2773,22 +2779,19 @@ static void ds_hosted_overlay_start(void) {
     g_hostedTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                            ds_bridge_queue());
     uint32_t targetFPS = MIN(MAX(
-        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 60u), 120u);
+        g_hostedMaximumFrameRate.load(std::memory_order_acquire), 30u), 60u);
     dispatch_source_set_timer(g_hostedTimer, DISPATCH_TIME_NOW,
                               (uint64_t)(NSEC_PER_SEC / targetFPS),
-                              500 * NSEC_PER_USEC);
+                              1 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(g_hostedTimer, ^{
         @autoreleasepool {
             if (g_hostedLayerReady.load(std::memory_order_acquire)) {
                 uint64_t pulse = g_hostedDisplayPulse.load(std::memory_order_acquire);
-                uint32_t fps = MIN(MAX(
-                    g_hostedMaximumFrameRate.load(std::memory_order_acquire), 60u), 120u);
-                double missWindow = 1.25 / (double)fps;
                 if (pulse == g_hostedConsumedDisplayPulse) {
                     double lastTick = g_hostedLastDisplayLinkTick.load(
                         std::memory_order_relaxed);
                     if (lastTick > 0.0 &&
-                        CACurrentMediaTime() - lastTick <= missWindow) {
+                        CACurrentMediaTime() - lastTick <= 0.025) {
                         return;
                     }
                 } else {
