@@ -1130,6 +1130,7 @@ static inline bool ds_pubg_is_item_type_enabled(DSPUBGItemCategory cat, const ch
 }
 static void ds_pubg_tick(void);
 static bool ds_pubg_has_render_source(void);
+static bool ds_pubg_has_active_match(void);
 static const char* ds_pubg_get_debug_status(void);
 static int ds_pubg_copy_projected_players(DSPUBGProjectedPlayer out[kDSPUBGMaxPlayers],
                                           uint64_t *epochOut);
@@ -1713,7 +1714,11 @@ static void ds_hud_watchdog_tick(void) {
     if (!g_hostedTimer && g_hostedLayerReady.load(std::memory_order_acquire)) {
         ds_hosted_overlay_start();
     }
-    ds_start_keepalive();
+    if (!s_keepAliveWanted.load() || !s_keepAliveTimer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ds_start_keepalive();
+        });
+    }
 }
 
 static void ds_hud_watchdog_start(void) {
@@ -1850,6 +1855,7 @@ static void ds_finish_enable(void) {
         ds_fail_enable(ds_localized(@"DarkPubg startup failed. Retry or reinstall over the existing app; restart the device only as a last resort."));
         return;
     }
+    BypassJetsamByProcess(getpid(), NO);
 
     g_dsProgress.store(0.96);
     ds_set_stage(ds_localized(@"Locating SpringBoard"));

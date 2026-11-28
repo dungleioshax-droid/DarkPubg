@@ -82,6 +82,7 @@ static uint64_t g_dspubgEngineViewportOffset = kDSPUBGEngineGameViewportOffset;
 static CFAbsoluteTime g_dspubgNextAttach = 0;
 static CFAbsoluteTime g_dspubgNextScan = 0;
 static std::atomic<bool> g_dspubgTargetActive(false);
+static std::atomic<bool> g_dspubgActiveMatch(false);
 
 // Live diagnostic statistics
 static int g_dspubgLastActorsCount = 0;
@@ -828,7 +829,7 @@ static void ds_pubg_scan_for_gnames(uint64_t vmMap, const std::vector<ScanRange>
         for (uint64_t offset = 0; offset < limitSize; offset += kChunkSize) {
             size_t toRead = (size_t)std::min((uint64_t)kChunkSize, limitSize - offset);
             uint64_t chunkAddr = range.start + offset;
-            if (!ds_debug_read_bytes(vmMap, chunkAddr, chunk.data(), toRead)) continue;
+            if (!ds_debug_read_bytes_uncached(vmMap, chunkAddr, chunk.data(), toRead)) continue;
 
             size_t ptrCount = toRead / 8;
             const uint64_t *ptrs = (const uint64_t *)chunk.data();
@@ -1858,7 +1859,7 @@ static bool ds_pubg_scan_for_engine_and_world(uint64_t vmMap, uint64_t base) {
         for (uint64_t offset = 0; offset < limitSize; offset += kChunkSize) {
             size_t toRead = (size_t)std::min((uint64_t)kChunkSize, limitSize - offset);
             uint64_t chunkAddr = range.start + offset;
-            if (!ds_debug_read_bytes(vmMap, chunkAddr, chunk.data(), toRead)) continue;
+            if (!ds_debug_read_bytes_uncached(vmMap, chunkAddr, chunk.data(), toRead)) continue;
 
             size_t ptrCount = toRead / 8;
             const uint64_t *ptrs = (const uint64_t *)chunk.data();
@@ -2010,6 +2011,7 @@ static bool ds_pubg_attach(void) {
     uint64_t proc = ds_pubg_find_proc(&targetPid);
 
     if (!ds_isvalid(proc) || targetPid <= 0) {
+        g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgProc = g_dspubgVmMap = g_dspubgBase = 0;
         g_dspubgPid = 0;
@@ -2020,6 +2022,7 @@ static bool ds_pubg_attach(void) {
     uint64_t task = proc_task(proc);
     uint64_t vmMap = ds_isvalid(task) ? task_get_vm_map(task) : 0;
     if (!ds_isvalid(vmMap)) {
+        g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
         return false;
@@ -2037,6 +2040,7 @@ static bool ds_pubg_attach(void) {
     g_dspubgVmMap = vmMap;
 
     if (!ds_debug_shmem_claim_target(DSDebugShmemOwner::PUBG, targetPid, proc, vmMap)) {
+        g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgTargetActive.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
         return false;
@@ -2051,6 +2055,7 @@ static bool ds_pubg_attach(void) {
     }
 
     if (!g_dspubgBase) {
+        g_dspubgActiveMatch.store(false, std::memory_order_release);
         g_dspubgNextAttach = now + 1.0;
         return false;
     }
@@ -2292,6 +2297,11 @@ static bool ds_pubg_has_render_source(void) {
     return g_dspubgTargetActive.load(std::memory_order_acquire);
 }
 
+static bool ds_pubg_has_active_match(void) {
+    return g_dspubgTargetActive.load(std::memory_order_acquire) &&
+           g_dspubgActiveMatch.load(std::memory_order_acquire);
+}
+
 static int ds_pubg_copy_projected_players(DSPUBGProjectedPlayer out[kDSPUBGMaxPlayers], uint64_t *epochOut) {
     os_unfair_lock_lock(&g_dspubgSnapshotLock);
     int count = g_dspubgPlayerCount;
@@ -2328,6 +2338,7 @@ static int ds_pubg_copy_projected_grenades(DSPUBGProjectedGrenade out[kDSPUBGMax
 }
 
 static void ds_pubg_reset_match_caches(void) {
+    g_dspubgActiveMatch.store(false, std::memory_order_release);
     s_cachedLootCount = 0;
     s_levelScanTick = 0;
     s_trackedLevelPawns.clear();
@@ -2972,6 +2983,7 @@ static void ds_pubg_tick_impl(void) {
         g_dspubgLastBotCount = 0;
         return;
     }
+    g_dspubgActiveMatch.store(true, std::memory_order_release);
 
     uint64_t cameraManager = playerController ? ds_pubg_read_ptr(playerController + kDSPUBGPlayerControllerCameraMgrOffset) : 0;
 
