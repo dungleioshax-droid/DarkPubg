@@ -2407,7 +2407,11 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
     if (!ds_pubg_actors_array_at(arr, &data, &count)) return 0;
     if (!data || count == 0) return 0;
 
-    const uint32_t probe = count < 16 ? count : 16;
+    // Walk further than the old fixed 16-slot window: destroyed actors leave
+    // runs of nullptr slots at the head of ULevel::Actors, and a window that is
+    // all null used to score zero even for the real list. Stop once eight live
+    // objects have been confirmed; a random {ptr,count} pair never gets there.
+    const uint32_t probe = count < 32 ? count : 32;
     int score = 0;
     int validObjects = 0;
     for (uint32_t i = 0; i < probe; i++) {
@@ -2420,10 +2424,13 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
         uint64_t cls = ds_pubg_read_ptr(a + 0x10ULL);
         if (cls && ds_pubg_valid(cls)) {
             score += 2;
-            validObjects++;
+            if (++validObjects >= 8) break;
         }
     }
-    if (validObjects < 2 && !(count <= 8 && validObjects >= 1)) return 0;
+    // A live ULevel::Actors array can begin with a run of null slots after a GC
+    // pass, so one resolvable UObject inside the probe window is enough proof.
+    // Requiring two silently dropped the real actor list on streamed matches.
+    if (validObjects < 1 || score < 2) return 0;
     outData = data;
     outCount = count;
     return score;
@@ -2478,7 +2485,10 @@ static uint32_t ds_pubg_find_world_levels(uint64_t world, uint64_t persistentLev
                 uint64_t sl = lvls[i] & 0x0000FFFFFFFFFFFFULL;
                 if (sl && ds_pubg_valid(sl)) {
                     uint64_t owning = ds_pubg_read_ptr(sl + 0xC0ULL);
-                    if (owning == world) {
+                    // Accept "unknown" (unreadable Zero) as well: the offset
+                    // moves between builds and a hard mismatch test wiped the
+                    // whole sublevel list, taking every streamed enemy with it.
+                    if (!owning || owning == world) {
                         subOk = true;
                         break;
                     }
@@ -2579,48 +2589,55 @@ static bool ds_pubg_find_level_actors(uint64_t lvl, uint64_t *outData, uint32_t 
 // Resolve world-space translation for a SceneComponent, preferring
 // ComponentToWorld (+0x210 quat, +0x220 translation) so attached actors keep
 // true world coordinates instead of parent-relative local offsets.
+static bool ds_pubg_read_component_to_world(uint64_t rootComp, DSPUBGVector &outLoc) {
+    uint8_t rc2w[32] = {0};
+    if (!ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) return false;
+    float qx = 0, qy = 0, qz = 0, qw = 1.0f;
+    DSPUBGVector c2wLoc = {};
+    memcpy(&qx, rc2w + 0x0, 4);
+    memcpy(&qy, rc2w + 0x4, 4);
+    memcpy(&qz, rc2w + 0x8, 4);
+    memcpy(&qw, rc2w + 0xC, 4);
+    memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
+    float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
+    if (!isfinite(qlen2) || qlen2 < 0.4f || qlen2 > 2.2f) return false;
+    if (!isfinite(c2wLoc.X) || !isfinite(c2wLoc.Y) || !isfinite(c2wLoc.Z)) return false;
+    if (fabsf(c2wLoc.X) < 1.0f && fabsf(c2wLoc.Y) < 1.0f) return false;
+    outLoc = c2wLoc;
+    return true;
+}
+
+// Resolve a component's world translation. For characters/attached actors the
+// published RelativeLocation (+ AttachParent translation) is authoritative on
+// this build and is what the working ESP used; ComponentToWorld is the
+// fallback for components whose relative pose is stale (vehicle seats,
+// parachutes). Reading C2W first mis-projected every pawn when the 0x210
+// transform offset shifted.
 static bool ds_pubg_read_world_loc(uint64_t rootComp, DSPUBGVector &outLoc, bool includeAttachParent) {
     if (!rootComp || !ds_pubg_valid(rootComp)) return false;
 
-    uint8_t rc2w[32] = {0};
-    if (ds_pubg_read(rootComp + 0x210ULL, rc2w, sizeof(rc2w))) {
-        float qx = 0, qy = 0, qz = 0, qw = 1.0f;
-        DSPUBGVector c2wLoc = {};
-        memcpy(&qx, rc2w + 0x0, 4);
-        memcpy(&qy, rc2w + 0x4, 4);
-        memcpy(&qz, rc2w + 0x8, 4);
-        memcpy(&qw, rc2w + 0xC, 4);
-        memcpy(&c2wLoc, rc2w + 0x10, sizeof(c2wLoc));
-        float qlen2 = qx * qx + qy * qy + qz * qz + qw * qw;
-        if (isfinite(qlen2) && qlen2 >= 0.4f && qlen2 <= 2.2f &&
-            isfinite(c2wLoc.X) && isfinite(c2wLoc.Y) && isfinite(c2wLoc.Z) &&
-            (fabsf(c2wLoc.X) >= 1.0f || fabsf(c2wLoc.Y) >= 1.0f)) {
-            outLoc = c2wLoc;
+    DSPUBGVector relLoc = {};
+    bool haveRel = ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &relLoc, sizeof(relLoc));
+    if (haveRel) {
+        if (includeAttachParent) {
+            uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
+            if (parent && ds_pubg_valid(parent)) {
+                DSPUBGVector parentLoc = {};
+                if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
+                    relLoc.X += parentLoc.X;
+                    relLoc.Y += parentLoc.Y;
+                    relLoc.Z += parentLoc.Z;
+                }
+            }
+        }
+        if (isfinite(relLoc.X) && isfinite(relLoc.Y) && isfinite(relLoc.Z) &&
+            (fabsf(relLoc.X) >= 1.0f || fabsf(relLoc.Y) >= 1.0f)) {
+            outLoc = relLoc;
             return true;
         }
     }
 
-    DSPUBGVector relLoc = {};
-    if (!ds_pubg_read(rootComp + kDSPUBGSceneCompRelativeLocOffset, &relLoc, sizeof(relLoc))) {
-        return false;
-    }
-    if (includeAttachParent) {
-        uint64_t parent = ds_pubg_read_ptr(rootComp + kDSPUBGSceneCompAttachedParentOffset);
-        if (parent && ds_pubg_valid(parent)) {
-            DSPUBGVector parentLoc = {};
-            if (ds_pubg_read(parent + kDSPUBGSceneCompRelativeLocOffset, &parentLoc, sizeof(parentLoc))) {
-                relLoc.X += parentLoc.X;
-                relLoc.Y += parentLoc.Y;
-                relLoc.Z += parentLoc.Z;
-            }
-        }
-    }
-    if (!isfinite(relLoc.X) || !isfinite(relLoc.Y) || !isfinite(relLoc.Z) ||
-        (fabsf(relLoc.X) < 1.0f && fabsf(relLoc.Y) < 1.0f)) {
-        return false;
-    }
-    outLoc = relLoc;
-    return true;
+    return ds_pubg_read_component_to_world(rootComp, outLoc);
 }
 
 
@@ -2743,17 +2760,36 @@ static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint6
         return false;
     }
 
-    // 4. Fallback if NetDriver offset shifted: require BOTH an active match GameState
-    // AND a live local character pawn with valid health (never default-true in Lobby).
-    bool isMatchGs = (hasGsName && (strcasestr(gsName, "STExtra") != NULL || strcasestr(gsName, "UAEGameState") != NULL));
-    bool hasLiveLocalPawn = false;
+    // 4. Fallback when the NetDriver offset shifted or is only half-initialised.
+    // A match GameState plus either an owned pawn or a populated PlayerArray is
+    // already proof of a running session; requiring max-health to have
+    // replicated dropped every enemy in the first seconds after landing.
+    bool isMatchGs = (hasGsName && (strcasestr(gsName, "STExtra") != NULL ||
+                                    strcasestr(gsName, "UAEGameState") != NULL ||
+                                    strcasestr(gsName, "GameState") != NULL));
+    if (!isMatchGs) {
+        // Last resort for builds where the GameState offset moved: a name-passed
+        // player controller with an owned pawn is an in-match state. Lobby and
+        // preview controllers were already rejected above.
+        return (playerController && ds_pubg_valid(playerController) &&
+                localPawn && ds_pubg_valid(localPawn));
+    }
+
     if (localPawn && ds_pubg_valid(localPawn)) {
         float lpMaxHp = ds_pubg_read_f32(localPawn + kDSPUBGCharacterHealthMaxOffset);
-        if (!isnan(lpMaxHp) && !isinf(lpMaxHp) && lpMaxHp >= 50.0f && lpMaxHp <= 2000.0f) {
-            hasLiveLocalPawn = true;
-        }
+        float lpHealth = ds_pubg_read_f32(localPawn + kDSPUBGCharacterHealthOffset);
+        if (isfinite(lpMaxHp) && lpMaxHp >= 50.0f && lpMaxHp <= 1000000.0f) return true;
+        if (isfinite(lpHealth) && lpHealth > 0.0f && lpHealth <= 1000000.0f) return true;
     }
-    return (isMatchGs && hasLiveLocalPawn);
+
+    if (gs && ds_pubg_valid(gs)) {
+        uint32_t paCount = ds_pubg_read_u32(gs + kDSPUBGGameStatePlayerArrayOffset + 8ULL);
+        if (paCount > 0 && paCount <= 128) return true;
+    }
+
+    // Match GameState present but nothing replicated yet: let the tick run so
+    // the level scan can populate pawns instead of zeroing the snapshot.
+    return true;
 }
 
 // Live teammate/self skip set consulted by item/vehicle scanner.
@@ -3096,8 +3132,13 @@ static void ds_pubg_tick_impl(void) {
                         "Controller", "Shell", "Cartridge", "Trace", "Grenade",
                         "Smoke", "Explosion", "Shoulei", "Molotov", "Burn"
                     };
-                    if (ds_pubg_is_scenery_name(pawnName) ||
-                        ds_pubg_contains_any(pawnName, kPawnSceneryExtraTokens, sizeof(kPawnSceneryExtraTokens) / sizeof(kPawnSceneryExtraTokens[0]), false)) {
+                    // A real character class always wins over the scenery list:
+                    // PUBG characters wear meshes whose names carry "Mesh", and
+                    // caching one as scenery permanently hid that pawn.
+                    const bool sceneryHit =
+                        ds_pubg_is_scenery_name(pawnName) ||
+                        ds_pubg_contains_any(pawnName, kPawnSceneryExtraTokens, sizeof(kPawnSceneryExtraTokens) / sizeof(kPawnSceneryExtraTokens[0]), false);
+                    if (sceneryHit && !isCharacterNamed) {
                         ds_pubg_cache_stamp(cEntry, pawn);
                         cEntry.isScenery = true;
                         cEntry.isPawn = false;
@@ -3106,7 +3147,9 @@ static void ds_pubg_tick_impl(void) {
                         return false;
                     }
 
-                    if (ds_pubg_contains_any(pawnName, kPawnNonCharTokens, sizeof(kPawnNonCharTokens) / sizeof(kPawnNonCharTokens[0]), true)) {
+                    if (!sceneryHit &&
+                        ds_pubg_contains_any(pawnName, kPawnNonCharTokens, sizeof(kPawnNonCharTokens) / sizeof(kPawnNonCharTokens[0]), true) &&
+                        !isCharacterNamed) {
                         return false;
                     }
                 }
@@ -3163,7 +3206,11 @@ static void ds_pubg_tick_impl(void) {
         } else {
             if (isnan(health) || isinf(health) || isnan(healthMax) || isinf(healthMax)) return false;
             if (healthMax < 50.0f || healthMax > 1000000.0f) {
-                if (psHint != 0 && health > 0.0f && health <= 500.0f) {
+                // PlayerArray pawns, name-confirmed characters and previously
+                // accepted pawns keep showing while HealthMax is still being
+                // replicated; level-scanned enemies fail this otherwise.
+                const bool trustedPawn = (psHint != 0) || isCharacterNamed || (cacheValid && cEntry.isPawn);
+                if (trustedPawn && health > 0.0f && health <= 10000.0f) {
                     healthMax = fmaxf(health, 100.0f);
                 } else {
                     return false;
@@ -3515,7 +3562,11 @@ static void ds_pubg_tick_impl(void) {
                     cEntry.boneCount = bCount;
                     cEntry.boneOffset = resolvedOff;
                 }
-                if (!isTrainingTarget && !psHint && bCount > 0 && bCount < 35) {
+                // A short rig usually means a prop, but bots and streamed pawns
+                // can expose a partial transform array. Only drop it when the
+                // name is not already recognisable as a character.
+                if (!isTrainingTarget && !psHint && !isCharacterNamed &&
+                    bCount > 0 && bCount < 20) {
                     return false;
                 }
 
@@ -4353,10 +4404,12 @@ static void ds_pubg_tick_impl(void) {
                 }
             }
         } else if (g_dspubgLevelActorsOff) {
+            // ULevel::OwningWorld is at 0xC0 on the reference dump, but the
+            // offset moves between builds. Treat an unreadable/empty field as
+            // "unknown" instead of "not ours"; rejecting here meant every
+            // streamed sublevel was skipped and its enemies never existed.
             uint64_t owning = ds_pubg_read_ptr(lvl + 0xC0ULL);
-            if (owning != world) {
-                return;
-            }
+            if (owning && ds_pubg_valid(owning) && owning != world) return;
             if (!ds_pubg_actors_array_at(lvl + g_dspubgLevelActorsOff, &actorsData, &actorsCount) ||
                 actorsCount == 0 || actorsCount > 8192) {
                 return;

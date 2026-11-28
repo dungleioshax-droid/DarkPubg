@@ -1300,6 +1300,24 @@ static void ds_hosted_apply_pubg(void) {
     const CGFloat cx = width * 0.5f;
     const CGFloat cy = height * 0.5f;
 
+    // Keep the batched paths sized to the live overlay in case the window
+    // geometry changed after the layers were created (rotation, split view).
+    if (g_hostedPUBGBoxAliveLayer) {
+        CGRect batchBounds = g_hostedLayer.bounds;
+        CAShapeLayer *const batchLayers[] = {
+            g_hostedPUBGBoxAliveLayer, g_hostedPUBGBoxKnockedLayer,
+            g_hostedPUBGSkeletonAliveLayer, g_hostedPUBGSkeletonKnockedLayer,
+            g_hostedPUBGLineAliveLayer, g_hostedPUBGLineKnockedLayer,
+            g_hostedPUBGHealthBgLayer, g_hostedPUBGHealthAliveLayer,
+            g_hostedPUBGHealthKnockedLayer
+        };
+        for (CAShapeLayer *batchLayer : batchLayers) {
+            if (batchLayer && !CGRectEqualToRect(batchLayer.frame, batchBounds)) {
+                batchLayer.frame = batchBounds;
+            }
+        }
+    }
+
     static UIFont *s_infoFont = nil;
     static UIFont *s_wFont = nil;
     static UIFont *s_itemTitleFont = nil;
@@ -2257,6 +2275,24 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
                                                           [UIColor blackColor].CGColor, 0.8f);
             g_hostedPUBGHealthKnockedLayer = makeBatchShape([UIColor colorWithRed:1.0f green:0.20f blue:0.15f alpha:1.0f].CGColor,
                                                             [UIColor blackColor].CGColor, 0.8f);
+
+            // CAShapeLayer draws inside its own bounds; a freshly created layer
+            // has a zero rect and silently rasterises nothing even with a valid
+            // path. The batch layers span the whole overlay so every projected
+            // box / skeleton / snapline point lands on-screen.
+            CGRect batchBounds = g_hostedLayer.bounds;
+            CAShapeLayer *const batchLayers[] = {
+                g_hostedPUBGBoxAliveLayer, g_hostedPUBGBoxKnockedLayer,
+                g_hostedPUBGSkeletonAliveLayer, g_hostedPUBGSkeletonKnockedLayer,
+                g_hostedPUBGLineAliveLayer, g_hostedPUBGLineKnockedLayer,
+                g_hostedPUBGHealthBgLayer, g_hostedPUBGHealthAliveLayer,
+                g_hostedPUBGHealthKnockedLayer
+            };
+            for (CAShapeLayer *batchLayer : batchLayers) {
+                if (batchLayer && !CGRectEqualToRect(batchLayer.frame, batchBounds)) {
+                    batchLayer.frame = batchBounds;
+                }
+            }
 
             for (int i = 0; i < kDSPUBGMaxPlayers; i++) {
                 // Every property below is constant for the lifetime of the
