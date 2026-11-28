@@ -829,7 +829,7 @@ static void ds_pubg_scan_for_gnames(uint64_t vmMap, const std::vector<ScanRange>
         for (uint64_t offset = 0; offset < limitSize; offset += kChunkSize) {
             size_t toRead = (size_t)std::min((uint64_t)kChunkSize, limitSize - offset);
             uint64_t chunkAddr = range.start + offset;
-            if (!ds_debug_read_bytes_uncached(vmMap, chunkAddr, chunk.data(), toRead)) continue;
+            if (!ds_debug_read_bytes(vmMap, chunkAddr, chunk.data(), toRead)) continue;
 
             size_t ptrCount = toRead / 8;
             const uint64_t *ptrs = (const uint64_t *)chunk.data();
@@ -1859,7 +1859,7 @@ static bool ds_pubg_scan_for_engine_and_world(uint64_t vmMap, uint64_t base) {
         for (uint64_t offset = 0; offset < limitSize; offset += kChunkSize) {
             size_t toRead = (size_t)std::min((uint64_t)kChunkSize, limitSize - offset);
             uint64_t chunkAddr = range.start + offset;
-            if (!ds_debug_read_bytes_uncached(vmMap, chunkAddr, chunk.data(), toRead)) continue;
+            if (!ds_debug_read_bytes(vmMap, chunkAddr, chunk.data(), toRead)) continue;
 
             size_t ptrCount = toRead / 8;
             const uint64_t *ptrs = (const uint64_t *)chunk.data();
@@ -2403,7 +2403,7 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
     // runs of nullptr slots at the head of ULevel::Actors, and a window that is
     // all null used to score zero even for the real list. Stop once eight live
     // objects have been confirmed; a random {ptr,count} pair never gets there.
-    const uint32_t probe = count < 32 ? count : 32;
+    const uint32_t probe = count < 96 ? count : 96;
     int score = 0;
     int validObjects = 0;
     for (uint32_t i = 0; i < probe; i++) {
@@ -2419,15 +2419,9 @@ static int ds_pubg_actor_array_score(uint64_t arr, uint64_t &outData, uint32_t &
             if (++validObjects >= 8) break;
         }
     }
-    // Decoy {pointer, small-count} pairs scattered through the level body used
-    // to win the scan once a single resolvable object was enough, and every
-    // actor in those arrays was reported as a phantom enemy or ground item.
-    // ULevel::Actors is by far the longest UObject list in a level, so a large
-    // count plus one live object is still accepted -- that keeps streamed
-    // matches from losing enemies after a GC pass leaves null slots up front.
     const bool largeArray = (count >= 512);
     if (validObjects < 2 && !(largeArray && validObjects >= 1) &&
-        !(count <= 8 && validObjects >= 1)) return 0;
+        !(count <= 32 && validObjects >= 1)) return 0;
     outData = data;
     outCount = count;
     return score;
@@ -2768,6 +2762,10 @@ static bool ds_pubg_is_in_match(uint64_t world, uint64_t playerController, uint6
                                     strcasestr(gsName, "UAEGameState") != NULL ||
                                     strcasestr(gsName, "GameState") != NULL));
     if (!isMatchGs) {
+        if (gs && ds_pubg_valid(gs)) {
+            uint32_t paCount = ds_pubg_read_u32(gs + kDSPUBGGameStatePlayerArrayOffset + 8ULL);
+            if (paCount > 0 && paCount <= 128) return true;
+        }
         // Last resort for builds where the GameState offset moved: a name-passed
         // player controller with an owned pawn is an in-match state. Lobby and
         // preview controllers were already rejected above.

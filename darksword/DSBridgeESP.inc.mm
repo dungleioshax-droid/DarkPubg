@@ -283,7 +283,7 @@ static BOOL ds_debug_target_alive(void) {
 // per target topology generation; per-tick reads then become plain local
 // memcpy. Keep enough mappings for a complete match working set so active
 // pages do not churn through repeated evict+remap cycles.
-#define DS_DEBUG_SHMEM_SLOTS 768
+#define DS_DEBUG_SHMEM_SLOTS 2048
 static struct {
     uint64_t vmMap;
     uint64_t pageAddress;
@@ -294,34 +294,9 @@ static uint64_t g_debugShmemTick = 0;
 static int g_debugShmemCount = 0;
 static std::unordered_map<uint64_t, int> g_debugShmemIndex;
 
-#define DS_DEBUG_TRANSIENT_SLOTS 4
-static struct {
-    uint64_t vmMap;
-    uint64_t pageAddress;
-    struct vmshmem shmem;
-} g_debugTransientScanCache[DS_DEBUG_TRANSIENT_SLOTS];
-static int g_debugTransientScanCursor = 0;
-
-static void ds_debug_transient_scan_reset(BOOL targetAlive) {
-    for (int i = 0; i < DS_DEBUG_TRANSIENT_SLOTS; i++) {
-        if (g_debugTransientScanCache[i].shmem.used) {
-            if (targetAlive) {
-                ds_debug_release_shmem_live(g_debugTransientScanCache[i].shmem);
-            } else {
-                ds_debug_release_shmem(g_debugTransientScanCache[i].shmem);
-            }
-        }
-        g_debugTransientScanCache[i].vmMap = 0;
-        g_debugTransientScanCache[i].pageAddress = 0;
-        g_debugTransientScanCache[i].shmem = (struct vmshmem){0};
-    }
-    g_debugTransientScanCursor = 0;
-}
-
 static void ds_debug_shmem_flush_ex(BOOL targetAlive) {
     // Clear every published span even when the dead target's mappings must be
     // leaked. A leaked local address is still the wrong process generation.
-    ds_debug_transient_scan_reset(targetAlive);
     for (int index = 0; index < DS_DEBUG_SHMEM_SLOTS; index++) {
         if (g_debugShmemCache[index].shmem.used) {
             if (targetAlive) {
@@ -455,100 +430,6 @@ static uint64_t ds_debug_map_page(uint64_t vmMap, uint64_t pageAddress) {
     g_debugShmemCache[slot].tick = g_debugShmemTick;
     g_debugShmemIndex[pageAddress] = slot;
     return shmem.localAddress;
-}
-
-static uint64_t ds_debug_map_page_transient(uint64_t vmMap, uint64_t pageAddress) {
-    if (!ds_isvalid(vmMap) || !ds_debug_user_address(pageAddress)) return 0;
-    if (g_debugShmemOwner == DSDebugShmemOwner::None ||
-        g_debugShmemOwnerVmMap != vmMap || !g_debugShmemPid) return 0;
-
-    auto cached = g_debugShmemIndex.find(pageAddress);
-    if (cached != g_debugShmemIndex.end()) {
-        int index = cached->second;
-        if (index >= 0 && index < g_debugShmemCount &&
-            g_debugShmemCache[index].shmem.used &&
-            g_debugShmemCache[index].vmMap == vmMap &&
-            g_debugShmemCache[index].pageAddress == pageAddress) {
-            return g_debugShmemCache[index].shmem.localAddress;
-        }
-    }
-
-    for (int i = 0; i < DS_DEBUG_TRANSIENT_SLOTS; i++) {
-        if (g_debugTransientScanCache[i].shmem.used &&
-            g_debugTransientScanCache[i].vmMap == vmMap &&
-            g_debugTransientScanCache[i].pageAddress == pageAddress) {
-            return g_debugTransientScanCache[i].shmem.localAddress;
-        }
-    }
-
-    if (!ds_debug_address_mapped(vmMap, pageAddress, PAGE_SIZE)) return 0;
-    uint64_t entryAddress = ds_debug_vm_region_entry(
-        pageAddress, pageAddress + (uint64_t)PAGE_SIZE - 1ULL);
-    if (!entryAddress) return 0;
-
-    int slot = g_debugTransientScanCursor;
-    g_debugTransientScanCursor = (g_debugTransientScanCursor + 1) % DS_DEBUG_TRANSIENT_SLOTS;
-
-    if (g_debugTransientScanCache[slot].shmem.used) {
-        if (ds_pid_alive_userspace(g_debugShmemPid)) {
-            ds_debug_release_shmem_live(g_debugTransientScanCache[slot].shmem);
-        } else {
-            ds_debug_release_shmem(g_debugTransientScanCache[slot].shmem);
-        }
-        g_debugTransientScanCache[slot].vmMap = 0;
-        g_debugTransientScanCache[slot].pageAddress = 0;
-        g_debugTransientScanCache[slot].shmem = (struct vmshmem){0};
-    }
-
-    struct vmshmem shmem = {0};
-    @try {
-        shmem = vmmapremotepagefromentry(entryAddress, pageAddress);
-    } @catch (__unused NSException *exception) {
-        shmem = (struct vmshmem){0};
-    }
-    if (!shmem.used || !shmem.localAddress) {
-        ds_debug_vm_regions_request_async(vmMap, g_debugShmemPid);
-        ds_debug_release_shmem(shmem);
-        return 0;
-    }
-
-    g_debugTransientScanCache[slot].vmMap = vmMap;
-    g_debugTransientScanCache[slot].pageAddress = pageAddress;
-    g_debugTransientScanCache[slot].shmem = shmem;
-    return shmem.localAddress;
-}
-
-static BOOL ds_debug_read_bytes_uncached(uint64_t vmMap, uint64_t address, void *buffer, size_t length) {
-    if (!vmMap || !address || !buffer || length == 0) return NO;
-
-    @try {
-    uint8_t *dst = (uint8_t *)buffer;
-    uint64_t current = address;
-    size_t remaining = length;
-    const uint64_t pageSize = (uint64_t)PAGE_SIZE;
-    const uint64_t pageMask = pageSize - 1ULL;
-
-    while (remaining > 0) {
-        if (!ds_debug_user_address(current)) return NO;
-
-        uint64_t pageAddress = current & ~pageMask;
-        uint64_t pageOffset = current & pageMask;
-        size_t copySize = (size_t)MIN((uint64_t)remaining, pageSize - pageOffset);
-
-        uint64_t localPage = ds_debug_map_page_transient(vmMap, pageAddress);
-        if (!localPage) return NO;
-
-        memcpy(dst, (const void *)(uintptr_t)(localPage + pageOffset), copySize);
-
-        dst += copySize;
-        current += copySize;
-        remaining -= copySize;
-    }
-
-    return YES;
-    } @catch (__unused NSException *exception) {
-        return NO;
-    }
 }
 
 static BOOL ds_debug_read_bytes(uint64_t vmMap, uint64_t address, void *buffer, size_t length) {
@@ -914,7 +795,7 @@ static void ds_hosted_menu_ensure(void) {
 
 static BOOL ds_debug_macho_main_identity(uint64_t vmMap, uint64_t base) {
     struct mach_header_64 header = {};
-    if (!ds_debug_read_bytes_uncached(vmMap, base, &header, sizeof(header)) ||
+    if (!ds_debug_read_bytes(vmMap, base, &header, sizeof(header)) ||
         header.magic != MH_MAGIC_64 || header.ncmds == 0 ||
         header.ncmds > 1024 || header.sizeofcmds == 0 ||
         header.sizeofcmds > (64U * 1024U)) {
@@ -922,8 +803,8 @@ static BOOL ds_debug_macho_main_identity(uint64_t vmMap, uint64_t base) {
     }
 
     std::vector<uint8_t> commands(header.sizeofcmds);
-    if (!ds_debug_read_bytes_uncached(vmMap, base + sizeof(header),
-                                      commands.data(), commands.size())) {
+    if (!ds_debug_read_bytes(vmMap, base + sizeof(header),
+                             commands.data(), commands.size())) {
         return NO;
     }
 
@@ -1406,11 +1287,6 @@ static void ds_hosted_apply_pubg(void) {
             ds_hosted_pubg_hide_all();
             return;
         }
-    }
-
-    if (!ds_pubg_has_active_match()) {
-        ds_hosted_pubg_hide_all();
-        return;
     }
 
     DSPUBGProjectedPlayer players[kDSPUBGMaxPlayers] = {};
@@ -2880,7 +2756,6 @@ static unsigned ds_hosted_overlay_setup_on_main(void) {
 static void ds_hosted_overlay_frame(void) {
     static CFAbsoluteTime s_lastMenuEnsureAt = 0;
     static CFAbsoluteTime s_lastIdleTickAt = 0;
-    static BOOL s_publishedIdleEmpty = NO;
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (now - s_lastMenuEnsureAt >= 1.0) {
         s_lastMenuEnsureAt = now;
@@ -2910,17 +2785,7 @@ static void ds_hosted_overlay_frame(void) {
 
     DSHostedRenderSnapshot snapshot = {};
     ds_pubg_tick();
-    BOOL activeMatch = ds_pubg_has_active_match();
     snapshot.pubgRenderSourceReady = ds_pubg_has_render_source();
-    if (!activeMatch) {
-        if (!s_publishedIdleEmpty) {
-            s_publishedIdleEmpty = YES;
-            g_hostedPushedFrames++;
-            ds_hosted_publish_render_snapshot(snapshot);
-        }
-        return;
-    }
-    s_publishedIdleEmpty = NO;
     g_hostedPushedFrames++;
     ds_hosted_publish_render_snapshot(snapshot);
 }
